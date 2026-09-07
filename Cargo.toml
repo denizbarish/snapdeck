@@ -10,7 +10,9 @@ license = "MIT"
 repository = "https://github.com/OWNER/snapdeck"
 
 [workspace.dependencies]
-screencapturekit = "9.0.1"
+# `macos_15_2` gates `SCScreenshotManager` (14.0) and its
+# `capture_image_in_rect` (15.2), both of which the macOS capturer needs.
+screencapturekit = { version = "9.0.1", features = ["macos_15_2"] }
 core-graphics = "0.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

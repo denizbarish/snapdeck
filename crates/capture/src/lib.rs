@@ -4,7 +4,8 @@ pub mod error;
 pub mod mock;
 pub mod types;
 
-// Task 3 adds: #[cfg(target_os = "macos")] pub mod macos;
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 pub use error::CaptureError;
 pub use types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo};
