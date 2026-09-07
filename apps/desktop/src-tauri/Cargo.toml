@@ -1,0 +1,23 @@
+[package]
+name = "snapdeck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "snapdeck_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-store = "2.4.4"
+# Task 2 adds: snapdeck-capture = { path = "../../../crates/capture" }
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true
+image.workspace = true

@@ -1,0 +1,12 @@
+{
+  "name": "snapdeck",
+  "private": true,
+  "packageManager": "pnpm@11.0.8",
+  "scripts": {
+    "dev": "pnpm --filter @snapdeck/desktop dev",
+    "build": "pnpm --filter @snapdeck/desktop build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "tauri": "pnpm --filter @snapdeck/desktop tauri"
+  }
+}
