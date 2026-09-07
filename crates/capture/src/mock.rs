@@ -9,6 +9,9 @@ pub struct MockCapturer {
     pub displays: Vec<DisplayInfo>,
     pub windows: Vec<WindowInfo>,
     pub frame: Frame,
+    /// When set, every capture fails with this error. Consumers need this to
+    /// test the permission-denied path without a platform capturer.
+    pub error: Option<CaptureError>,
 }
 
 impl MockCapturer {
@@ -17,7 +20,13 @@ impl MockCapturer {
             displays,
             windows,
             frame,
+            error: None,
         }
+    }
+
+    pub fn with_error(mut self, error: CaptureError) -> Self {
+        self.error = Some(error);
+        self
     }
 }
 
@@ -31,6 +40,12 @@ impl ScreenCapturer for MockCapturer {
     }
 
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        // Regions are not validated against the displays, so a consumer test
+        // that captures an off-screen region here proves nothing about the
+        // real capturer, which rejects it.
         match target {
             CaptureTarget::Display(id) if !self.displays.iter().any(|d| d.id == id) => {
                 Err(CaptureError::TargetNotFound(format!("display {id}")))

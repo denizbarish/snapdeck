@@ -2,6 +2,7 @@
 name = "snapdeck-capture"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Cross-platform screen capture abstraction for Snapdeck"
 
