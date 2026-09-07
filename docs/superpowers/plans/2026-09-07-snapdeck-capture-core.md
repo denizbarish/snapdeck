@@ -121,7 +121,7 @@ packages:
 {
   "name": "snapdeck",
   "private": true,
-  "packageManager": "pnpm@9.12.0",
+  "packageManager": "pnpm@11.0.8",
   "scripts": {
     "dev": "pnpm --filter @snapdeck/desktop dev",
     "build": "pnpm --filter @snapdeck/desktop build",
@@ -398,10 +398,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
@@ -412,7 +412,7 @@ jobs:
 
 `LICENSE`: standart MIT metni, telif satırı `Copyright (c) 2026 Snapdeck contributors`.
 
-`README.md` şunları içermeli: tek cümlelik ürün tanımı, gereksinimler (macOS 13+, Rust stable, Node 22, pnpm 9), `pnpm install` ve `pnpm tauri dev` adımları, ekran kaydı izninin ilk yakalamada isteneceği notu, ve şu uyarı bölümü:
+`README.md` şunları içermeli: tek cümlelik ürün tanımı, gereksinimler (macOS 13+, Rust stable, Node 24, pnpm 11), `pnpm install` ve `pnpm tauri dev` adımları, ekran kaydı izninin ilk yakalamada isteneceği notu, ve şu uyarı bölümü:
 
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 
