@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/desktop/src-tauri"]
-# Task 2 adds "crates/capture" to this list.
+members = ["apps/desktop/src-tauri", "crates/capture"]
 
 [workspace.package]
 version = "0.1.0"

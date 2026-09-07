@@ -17,7 +17,7 @@ tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset",
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-clipboard-manager = "2.3.3"
 tauri-plugin-store = "2.4.4"
-# Task 2 adds: snapdeck-capture = { path = "../../../crates/capture" }
+snapdeck-capture = { path = "../../../crates/capture" }
 serde.workspace = true
 serde_json = "1"
 thiserror.workspace = true
