@@ -494,8 +494,7 @@ pub mod error;
 pub mod mock;
 pub mod types;
 
-#[cfg(target_os = "macos")]
-pub mod macos;
+// Task 3 adds: #[cfg(target_os = "macos")] pub mod macos;
 
 pub use error::CaptureError;
 pub use types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo};
@@ -1026,7 +1025,14 @@ Expected: FAIL, `could not find macos in snapdeck_capture`.
 
 - [ ] **Step 3: Implementasyonu yaz**
 
-`crates/capture/src/macos/mod.rs`:
+Önce `crates/capture/src/lib.rs` içindeki Task 2'den kalan yer tutucu yorumu gerçek bildirimle değiştir:
+
+```rust
+#[cfg(target_os = "macos")]
+pub mod macos;
+```
+
+Sonra `crates/capture/src/macos/mod.rs`:
 
 ```rust
 pub mod permission;
