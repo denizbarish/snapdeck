@@ -971,9 +971,13 @@ Doğrulanmış screencapturekit 9.0.1 API'si:
 `SCDisplay::display_id() -> u32`, `.frame() -> CGRect`, `.width() -> u32`, `.height() -> u32`;
 `SCWindow::window_id() -> u32`, `.title() -> Option<String>`, `.frame() -> CGRect`, `.window_layer() -> i32`, `.is_on_screen() -> bool`, `.owning_application() -> Option<SCRunningApplication>`;
 `SCContentFilter::create().with_display(&d).with_excluding_windows(&[]).build()`, `.with_window(&w).build()`;
-`SCStreamConfiguration::new().with_width(u32).with_height(u32).with_pixel_format(PixelFormat::BGRA).with_shows_cursor(bool)`;
+`SCStreamConfiguration::new().with_width(u32).with_height(u32).with_pixel_format(PixelFormat::BGRA).with_shows_cursor(bool).with_source_rect(CGRect)`;
+
+Sürüm kapısı uyarısı: `capture_image_in_rect` crate'in `macos_15_2` feature'ı arkasındadır ve macOS 15.2 gerektirir.
+Ürün tabanı macOS 13.0 olduğu için kullanılmaz. Bölge yakalama, ekran filtresi + `with_source_rect` ile yapılır;
+bu API sürüm kapısı altında değildir.
 `SCScreenshotManager::capture_image(&filter, &config) -> Result<CGImage, SCError>`;
-`SCScreenshotManager::capture_image_in_rect(CGRect) -> Result<CGImage, SCError>`;
+`SCStreamConfiguration::with_source_rect(CGRect)`, ekranın kendi başlangıç noktasına göre bölge seçer;
 `CGImageExt::rgba_data(&self) -> Result<Vec<u8>, SCError>` (satır dolgusu olmadan sıkı paketlenmiş);
 `CGImage::width() -> usize`, `.height() -> usize`.
 
@@ -1061,15 +1065,15 @@ impl Default for MacCapturer {
     }
 }
 
-fn map_err(err: impl std::fmt::Display) -> CaptureError {
-    let text = err.to_string();
-    // ScreenCaptureKit reports missing TCC approval as a declined user consent error.
-    if text.contains("not authorized") || text.contains("declined") || text.contains("-3801") {
-        CaptureError::PermissionDenied
-    } else {
-        CaptureError::Platform(text)
-    }
-}
+/// Maps a ScreenCaptureKit error to a capture error.
+///
+/// Match on the error's variant, never on its message: macOS localizes
+/// `NSError` descriptions, so a Turkish system reports declined TCC consent
+/// in Turkish and any English substring test silently misclassifies a
+/// permission denial as a generic platform failure. Consult the `SCError`
+/// variants in the installed crate version, map declined-consent and
+/// unauthorized cases to `CaptureError::PermissionDenied`, and everything
+/// else to `CaptureError::Platform` carrying the original text.
 
 fn to_rect(frame: CGRect) -> Rect {
     Rect {
@@ -1147,17 +1151,34 @@ impl ScreenCapturer for MacCapturer {
                 if rect.is_empty() {
                     return Err(CaptureError::Platform("empty region".to_string()));
                 }
-                let scale = self
-                    .displays()?
-                    .into_iter()
-                    .find(|d| d.bounds.intersect(&rect).is_some())
-                    .map(|d| d.scale_factor)
-                    .unwrap_or(1.0);
-                let cg_rect = CGRect {
-                    origin: CGPoint { x: rect.x, y: rect.y },
+                let content = SCShareableContent::get().map_err(map_err)?;
+                let displays = content.displays();
+                // The region arrives in global points; capture it from the
+                // display it overlaps.
+                let display = displays
+                    .iter()
+                    .find(|d| to_rect(d.frame()).intersect(&rect).is_some())
+                    .ok_or_else(|| {
+                        CaptureError::TargetNotFound("no display intersects the region".to_string())
+                    })?;
+                let bounds = to_rect(display.frame());
+                let scale = scale_factor_for(display.display_id());
+                // sourceRect is relative to the display's own origin, not to
+                // the global coordinate space.
+                let local = CGRect {
+                    origin: CGPoint { x: rect.x - bounds.x, y: rect.y - bounds.y },
                     size: CGSize { width: rect.width, height: rect.height },
                 };
-                let image = SCScreenshotManager::capture_image_in_rect(cg_rect).map_err(map_err)?;
+                let filter = SCContentFilter::create()
+                    .with_display(display)
+                    .with_excluding_windows(&[])
+                    .build();
+                let config = SCStreamConfiguration::new()
+                    .with_source_rect(local)
+                    .with_width((rect.width * scale as f64) as u32)
+                    .with_height((rect.height * scale as f64) as u32)
+                    .with_shows_cursor(false);
+                let image = SCScreenshotManager::capture_image(&filter, &config).map_err(map_err)?;
                 frame_from_image(&image, scale)
             }
             CaptureTarget::Display(id) => {
@@ -1206,7 +1227,9 @@ impl ScreenCapturer for MacCapturer {
 }
 ```
 
-Not: `SCRunningApplication::application_name()` ve `CGDisplayMode::pixel_width()` isimleri crate sürümünde farklıysa, `cargo doc -p screencapturekit --open` ile doğrula ve karşılığını kullan; davranış aynı kalmalı (uygulama adı ve piksel genişliği).
+Not: `SCRunningApplication::application_name()` `String` döner, `Option<String>` değil, yani `map` kullanılır, `and_then` değil. `CGDisplayMode::pixel_width()` ve `width()` `u64` döner. Bir isim crate sürümünde farklıysa `cargo doc -p screencapturekit --no-deps` ile doğrula ve karşılığını kullan; davranış aynı kalmalı (uygulama adı ve piksel genişliği).
+
+Not: `crates/capture/build.rs`, Swift çalışma zamanı kütüphaneleri için rpath ekler. Onsuz test binary'leri yüklenmeden çöker.
 
 - [ ] **Step 4: Testleri çalıştır**
 
