@@ -74,7 +74,7 @@ Sorumluluk sınırı: `crates/capture` Tauri'yi bilmez, `apps/desktop/src/overla
 
 **Files:**
 - Create: `Cargo.toml`, `package.json`, `pnpm-workspace.yaml`, `.gitignore`, `LICENSE`, `README.md`
-- Create: `apps/desktop/package.json`, `apps/desktop/vite.config.ts`, `apps/desktop/tsconfig.json`, `apps/desktop/index.html`, `apps/desktop/src/main.tsx`
+- Create: `apps/desktop/package.json`, `apps/desktop/vite.config.ts`, `apps/desktop/tsconfig.json`, `apps/desktop/index.html`, `apps/desktop/overlay.html`, `apps/desktop/src/main.tsx`
 - Create: `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src-tauri/Info.plist`, `apps/desktop/src-tauri/src/main.rs`, `apps/desktop/src-tauri/src/lib.rs`
 - Create: `.github/workflows/ci.yml`
 
@@ -95,7 +95,7 @@ members = ["apps/desktop/src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/OWNER/snapdeck"
 
@@ -155,7 +155,7 @@ target/
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "lint": "tsc --noEmit",
     "tauri": "tauri"
   },
@@ -172,7 +172,7 @@ target/
     "@vitejs/plugin-react": "^4.3.0",
     "typescript": "^5.6.0",
     "vite": "^6.0.0",
-    "vitest": "^2.1.0"
+    "vitest": "^3.2.0"
   }
 }
 ```
@@ -235,6 +235,24 @@ export default defineConfig({
 </html>
 ```
 
+`apps/desktop/overlay.html`. Vite'ın `overlay` girişi bu dosyayı ister; olmazsa
+`pnpm build` ve dolayısıyla `pnpm tauri build` hiç çalışmaz. Script etiketi yok, çünkü
+`src/overlay/main.tsx` henüz mevcut değil. Task 6 bu dosyanın tamamını değiştirir:
+
+```html
+<!doctype html>
+<!-- Placeholder. Task 6 replaces this with the real overlay entry point. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck Overlay</title>
+  </head>
+  <body>
+    <div id="overlay-root"></div>
+  </body>
+</html>
+```
+
 `apps/desktop/src/main.tsx`:
 
 ```tsx
@@ -261,6 +279,7 @@ createRoot(document.getElementById('root')!).render(
 name = "snapdeck"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [lib]
@@ -360,7 +379,7 @@ pub fn run() {
 
 - [ ] **Step 4: Uygulamanın çalıştığını doğrula**
 
-Run: `pnpm install && pnpm tauri dev`
+Run: `pnpm install && pnpm build && pnpm tauri dev`
 Expected: Derleme başarılı, hata yok. Dock'ta ikon görünmez (LSUIElement), pencere açılmaz. `Ctrl+C` ile durdur.
 
 Run: `cargo fmt --check && cargo clippy --workspace -- -D warnings`
@@ -396,9 +415,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # No `version:` input: it must not disagree with packageManager in
+      # package.json, and the action reads that field on its own.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -1457,8 +1476,8 @@ git commit -m "feat(app): add tray menu, shared state, and global shortcuts"
 
 **Files:**
 - Create: `apps/desktop/src-tauri/src/overlay.rs`, `apps/desktop/src-tauri/src/output.rs`
-- Create: `apps/desktop/overlay.html`, `apps/desktop/src/overlay/main.tsx`, `apps/desktop/src/overlay/Overlay.tsx`
-- Modify: `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/src/tray.rs`
+- Create: `apps/desktop/src/overlay/main.tsx`, `apps/desktop/src/overlay/Overlay.tsx`
+- Modify: `apps/desktop/overlay.html` (Task 1'in yer tutucusunun tamamını değiştir), `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/src/tray.rs`
 - Test: `apps/desktop/src-tauri/src/overlay.rs` (inline `#[cfg(test)]`)
 
 **Interfaces:**
