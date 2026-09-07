@@ -21,8 +21,6 @@ Snapdeck is a menu bar app, so it has no Dock icon and opens no window on launch
 macOS asks for Screen Recording permission the first time you take a capture. Grant it in
 System Settings > Privacy & Security > Screen & System Audio Recording, then try again.
 
-## Unsigned builds
-
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 
 ## License
