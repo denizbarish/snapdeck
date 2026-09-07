@@ -455,13 +455,13 @@ git commit -m "chore: scaffold monorepo, Tauri shell, and CI"
 - Produces:
   - `Rect { x: f64, y: f64, width: f64, height: f64 }`, metotları `intersect(&self, &Rect) -> Option<Rect>`, `clamp_to(&self, &Rect) -> Rect`, `is_empty(&self) -> bool`
   - `PixelFormat { Rgba8, Bgra8 }`
-  - `Frame { data: Vec<u8>, width: u32, height: u32, stride: usize, pixel_format: PixelFormat, scale_factor: f32, captured_at: SystemTime }`, metodu `to_rgba8(&self) -> Vec<u8>`
+  - `Frame { data: Vec<u8>, width: u32, height: u32, stride: usize, pixel_format: PixelFormat, scale_factor: f32, captured_at: SystemTime }`, metodu `to_rgba8(&self) -> Result<Vec<u8>, CaptureError>`
   - `DisplayInfo { id: u32, bounds: Rect, scale_factor: f32, is_primary: bool }`
   - `WindowInfo { id: u32, title: Option<String>, app_name: Option<String>, bounds: Rect, layer: i32, is_on_screen: bool }`
   - `CaptureTarget { Display(u32), Window(u32), Region(Rect) }`
   - `CaptureError { PermissionDenied, TargetNotFound(String), Platform(String) }`
   - `trait ScreenCapturer { fn displays(&self) -> Result<Vec<DisplayInfo>, CaptureError>; fn windows(&self) -> Result<Vec<WindowInfo>, CaptureError>; fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError>; }`
-  - `MockCapturer::new(displays: Vec<DisplayInfo>, windows: Vec<WindowInfo>, frame: Frame)`
+  - `MockCapturer::new(displays: Vec<DisplayInfo>, windows: Vec<WindowInfo>, frame: Frame)`, `MockCapturer::with_error(self, error: CaptureError) -> Self`
 
 - [ ] **Step 1: Crate iskeletini oluştur**
 
@@ -472,6 +472,7 @@ git commit -m "chore: scaffold monorepo, Tauri shell, and CI"
 name = "snapdeck-capture"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Cross-platform screen capture abstraction for Snapdeck"
 
@@ -513,7 +514,7 @@ pub trait ScreenCapturer {
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error, Serialize, Clone, PartialEq, Eq)]
-#[serde(tag = "kind", content = "detail")]
+#[serde(tag = "kind", content = "detail", rename_all = "camelCase")]
 pub enum CaptureError {
     /// macOS screen recording permission is missing or was revoked.
     #[error("screen recording permission denied")]
@@ -539,11 +540,19 @@ pub struct MockCapturer {
     pub displays: Vec<DisplayInfo>,
     pub windows: Vec<WindowInfo>,
     pub frame: Frame,
+    /// When set, every capture fails with this error. Consumers need this to
+    /// test the permission-denied path without a platform capturer.
+    pub error: Option<CaptureError>,
 }
 
 impl MockCapturer {
     pub fn new(displays: Vec<DisplayInfo>, windows: Vec<WindowInfo>, frame: Frame) -> Self {
-        Self { displays, windows, frame }
+        Self { displays, windows, frame, error: None }
+    }
+
+    pub fn with_error(mut self, error: CaptureError) -> Self {
+        self.error = Some(error);
+        self
     }
 }
 
@@ -557,6 +566,12 @@ impl ScreenCapturer for MockCapturer {
     }
 
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        // Regions are not validated against the displays, so a consumer test
+        // that captures an off-screen region here proves nothing about the
+        // real capturer, which rejects it.
         match target {
             CaptureTarget::Display(id) if !self.displays.iter().any(|d| d.id == id) => {
                 Err(CaptureError::TargetNotFound(format!("display {id}")))
@@ -613,6 +628,15 @@ mod tests {
     }
 
     #[test]
+    fn clamp_to_returns_empty_rect_when_disjoint() {
+        let bounds = rect(0.0, 0.0, 100.0, 100.0);
+        let elsewhere = rect(500.0, 500.0, 50.0, 50.0);
+        let clamped = elsewhere.clamp_to(&bounds);
+        assert!(clamped.is_empty());
+        assert_eq!(clamped, rect(500.0, 500.0, 0.0, 0.0));
+    }
+
+    #[test]
     fn to_rgba8_drops_stride_padding() {
         // 2x2 image, 4 bytes of row padding per row.
         let frame = Frame {
@@ -628,24 +652,61 @@ mod tests {
             captured_at: SystemTime::now(),
         };
         assert_eq!(
-            frame.to_rgba8(),
+            frame.to_rgba8().unwrap(),
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
     }
 
     #[test]
-    fn to_rgba8_swaps_bgra_channels() {
+    fn to_rgba8_swaps_bgra_channels_across_padded_rows() {
+        // 2x2 BGRA with 4 bytes of row padding: the combination
+        // ScreenCaptureKit actually delivers.
         let frame = Frame {
-            data: vec![10, 20, 30, 40],
-            width: 1,
-            height: 1,
-            stride: 4,
+            data: vec![
+                10, 20, 30, 40, 50, 60, 70, 80, 0, 0, 0, 0, //
+                90, 100, 110, 120, 130, 140, 150, 160, 0, 0, 0, 0,
+            ],
+            width: 2,
+            height: 2,
+            stride: 12,
             pixel_format: PixelFormat::Bgra8,
             scale_factor: 2.0,
             captured_at: SystemTime::now(),
         };
-        // BGRA (10,20,30,40) becomes RGBA (30,20,10,40).
-        assert_eq!(frame.to_rgba8(), vec![30, 20, 10, 40]);
+        // Each BGRA pixel becomes RGBA, and the padding is dropped.
+        assert_eq!(
+            frame.to_rgba8().unwrap(),
+            vec![30, 20, 10, 40, 70, 60, 50, 80, 110, 100, 90, 120, 150, 140, 130, 160]
+        );
+    }
+
+    #[test]
+    fn to_rgba8_rejects_a_stride_narrower_than_one_row() {
+        let frame = Frame {
+            data: vec![0; 16],
+            width: 2,
+            height: 2,
+            // A row of 2 pixels needs 8 bytes.
+            stride: 4,
+            pixel_format: PixelFormat::Rgba8,
+            scale_factor: 1.0,
+            captured_at: SystemTime::now(),
+        };
+        assert!(matches!(frame.to_rgba8(), Err(CaptureError::Platform(_))));
+    }
+
+    #[test]
+    fn to_rgba8_rejects_a_buffer_too_short_for_its_rows() {
+        let frame = Frame {
+            data: vec![0; 8],
+            width: 2,
+            height: 2,
+            stride: 8,
+            pixel_format: PixelFormat::Rgba8,
+            scale_factor: 1.0,
+            captured_at: SystemTime::now(),
+        };
+        assert!(matches!(frame.to_rgba8(), Err(CaptureError::Platform(_))));
     }
 }
 ```
@@ -657,7 +718,7 @@ use std::time::SystemTime;
 
 use snapdeck_capture::{
     mock::MockCapturer, CaptureError, CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect,
-    ScreenCapturer,
+    ScreenCapturer, WindowInfo,
 };
 
 fn frame() -> Frame {
@@ -672,19 +733,59 @@ fn frame() -> Frame {
     }
 }
 
-#[test]
-fn capture_unknown_display_reports_target_not_found() {
-    let display = DisplayInfo {
+fn display() -> DisplayInfo {
+    DisplayInfo {
         id: 1,
         bounds: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
         scale_factor: 2.0,
         is_primary: true,
-    };
-    let capturer = MockCapturer::new(vec![display], vec![], frame());
+    }
+}
+
+fn window() -> WindowInfo {
+    WindowInfo {
+        id: 7,
+        title: Some("Editor".to_string()),
+        app_name: Some("Snapdeck".to_string()),
+        bounds: Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 },
+        layer: 0,
+        is_on_screen: true,
+    }
+}
+
+#[test]
+fn capture_unknown_display_reports_target_not_found() {
+    let capturer = MockCapturer::new(vec![display()], vec![], frame());
 
     let err = capturer.capture(CaptureTarget::Display(99)).unwrap_err();
 
     assert_eq!(err, CaptureError::TargetNotFound("display 99".to_string()));
+}
+
+#[test]
+fn capture_unknown_window_reports_target_not_found() {
+    let capturer = MockCapturer::new(vec![display()], vec![window()], frame());
+
+    let err = capturer.capture(CaptureTarget::Window(42)).unwrap_err();
+
+    assert_eq!(err, CaptureError::TargetNotFound("window 42".to_string()));
+}
+
+#[test]
+fn injected_error_fails_every_capture() {
+    // Consumers must be able to exercise the permission-denied path, which
+    // never yields an empty or black frame.
+    let capturer = MockCapturer::new(vec![display()], vec![window()], frame())
+        .with_error(CaptureError::PermissionDenied);
+
+    assert_eq!(
+        capturer.capture(CaptureTarget::Display(1)).unwrap_err(),
+        CaptureError::PermissionDenied
+    );
+    assert_eq!(
+        capturer.capture(CaptureTarget::Window(7)).unwrap_err(),
+        CaptureError::PermissionDenied
+    );
 }
 ```
 
@@ -702,8 +803,11 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::CaptureError;
+
 /// Rectangle in display points (not pixels), origin at top-left.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -727,13 +831,17 @@ impl Rect {
         (!candidate.is_empty()).then_some(candidate)
     }
 
-    /// Shrinks the rectangle so it fits inside `bounds`.
+    /// Returns the part of the rectangle that lies inside `bounds`, or an
+    /// empty rect at the original origin when the two do not overlap. That
+    /// origin is outside `bounds`, so callers must check `is_empty` before
+    /// trusting `x` and `y`.
     pub fn clamp_to(&self, bounds: &Rect) -> Rect {
         self.intersect(bounds).unwrap_or(Rect { x: self.x, y: self.y, width: 0.0, height: 0.0 })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PixelFormat {
     Rgba8,
     Bgra8,
@@ -759,10 +867,33 @@ pub struct Frame {
 
 impl Frame {
     /// Tightly packed RGBA8 copy with row padding removed.
-    pub fn to_rgba8(&self) -> Vec<u8> {
+    ///
+    /// Fails when the frame's own fields contradict each other: a stride
+    /// narrower than one row of pixels, or a buffer too short to hold
+    /// `height` rows. Frames come from platform APIs, so these fields are
+    /// validated rather than trusted. An unchecked stride either panics on
+    /// the slice index or silently repeats a row.
+    pub fn to_rgba8(&self) -> Result<Vec<u8>, CaptureError> {
         let row_bytes = self.width as usize * 4;
-        let mut out = Vec::with_capacity(row_bytes * self.height as usize);
-        for row in 0..self.height as usize {
+        let height = self.height as usize;
+        if self.stride < row_bytes {
+            return Err(CaptureError::Platform(format!(
+                "frame stride {} is narrower than one row of {row_bytes} bytes",
+                self.stride
+            )));
+        }
+        let required = match height.checked_sub(1) {
+            Some(rows_before_last) => self.stride * rows_before_last + row_bytes,
+            None => 0,
+        };
+        if self.data.len() < required {
+            return Err(CaptureError::Platform(format!(
+                "frame buffer holds {} bytes, needs {required}",
+                self.data.len()
+            )));
+        }
+        let mut out = Vec::with_capacity(row_bytes * height);
+        for row in 0..height {
             let start = row * self.stride;
             let row_slice = &self.data[start..start + row_bytes];
             match self.pixel_format {
@@ -774,11 +905,12 @@ impl Frame {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DisplayInfo {
     pub id: u32,
     /// Bounds in the global point coordinate space.
@@ -788,6 +920,7 @@ pub struct DisplayInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WindowInfo {
     pub id: u32,
     pub title: Option<String>,
@@ -810,7 +943,7 @@ pub enum CaptureTarget {
 - [ ] **Step 5: Testlerin geçtiğini doğrula**
 
 Run: `cargo test -p snapdeck-capture`
-Expected: PASS, 7 test geçer.
+Expected: PASS, 12 test geçer (9 birim, 3 entegrasyon).
 
 Run: `cargo clippy -p snapdeck-capture --all-targets -- -D warnings`
 Expected: uyarı yok.
@@ -1624,7 +1757,7 @@ use snapdeck_capture::Frame;
 /// Writes a frame as PNG. Row padding is removed and BGRA is converted by
 /// `Frame::to_rgba8`, so the file is always tightly packed RGBA.
 pub fn save_png(frame: &Frame, path: &Path) -> Result<(), String> {
-    let rgba = frame.to_rgba8();
+    let rgba = frame.to_rgba8().map_err(|e| e.to_string())?;
     image::save_buffer(path, &rgba, frame.width, frame.height, image::ExtendedColorType::Rgba8)
         .map_err(|e| format!("failed to save png: {e}"))
 }
@@ -2736,7 +2869,7 @@ pub fn capture_region(
     let path = dir.join(format!("{name}.png"));
     save_png(&frame, &path)?;
 
-    let rgba = frame.to_rgba8();
+    let rgba = frame.to_rgba8().map_err(|e| e.to_string())?;
     app.clipboard()
         .write_image(&tauri::image::Image::new(&rgba, frame.width, frame.height))
         .map_err(|e| format!("failed to copy to clipboard: {e}"))?;
