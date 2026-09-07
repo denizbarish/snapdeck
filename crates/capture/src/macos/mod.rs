@@ -12,9 +12,8 @@ use crate::{
     ScreenCapturer,
 };
 
-/// ScreenCaptureKit-backed capturer. Requires macOS 15.2 or newer: region
-/// capture goes through `SCScreenshotManager::capture_image_in_rect`, which
-/// Apple added in 15.2.
+/// ScreenCaptureKit-backed capturer. Every capture path goes through
+/// `SCScreenshotManager`, which Apple added in macOS 14.0.
 pub struct MacCapturer;
 
 impl MacCapturer {
@@ -137,23 +136,41 @@ impl ScreenCapturer for MacCapturer {
                 if rect.is_empty() {
                     return Err(CaptureError::Platform("empty region".to_string()));
                 }
-                let scale = self
-                    .displays()?
-                    .into_iter()
-                    .find(|d| d.bounds.intersect(&rect).is_some())
-                    .map(|d| d.scale_factor)
-                    .unwrap_or(1.0);
-                let cg_rect = CGRect {
+                let content = SCShareableContent::get().map_err(map_err)?;
+                let displays = content.displays();
+                // The region arrives in global points; capture it from the
+                // display it overlaps.
+                let display = displays
+                    .iter()
+                    .find(|d| to_rect(d.frame()).intersect(&rect).is_some())
+                    .ok_or_else(|| {
+                        CaptureError::TargetNotFound("no display intersects the region".to_string())
+                    })?;
+                let bounds = to_rect(display.frame());
+                let scale = scale_factor_for(display.display_id());
+                // sourceRect is relative to the display's own origin, not to
+                // the global coordinate space.
+                let local = CGRect {
                     origin: CGPoint {
-                        x: rect.x,
-                        y: rect.y,
+                        x: rect.x - bounds.x,
+                        y: rect.y - bounds.y,
                     },
                     size: CGSize {
                         width: rect.width,
                         height: rect.height,
                     },
                 };
-                let image = SCScreenshotManager::capture_image_in_rect(cg_rect).map_err(map_err)?;
+                let filter = SCContentFilter::create()
+                    .with_display(display)
+                    .with_excluding_windows(&[])
+                    .build();
+                let config = SCStreamConfiguration::new()
+                    .with_source_rect(local)
+                    .with_width((rect.width * scale as f64) as u32)
+                    .with_height((rect.height * scale as f64) as u32)
+                    .with_shows_cursor(false);
+                let image =
+                    SCScreenshotManager::capture_image(&filter, &config).map_err(map_err)?;
                 frame_from_image(&image, scale)
             }
             CaptureTarget::Display(id) => {

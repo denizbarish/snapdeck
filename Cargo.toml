@@ -10,9 +10,11 @@ license = "MIT"
 repository = "https://github.com/OWNER/snapdeck"
 
 [workspace.dependencies]
-# `macos_15_2` gates `SCScreenshotManager` (14.0) and its
-# `capture_image_in_rect` (15.2), both of which the macOS capturer needs.
-screencapturekit = { version = "9.0.1", features = ["macos_15_2"] }
+# `macos_14_0` gates the whole `screenshot_manager` module, which holds
+# `SCScreenshotManager` and `CGImageExt::rgba_data`. No higher feature is
+# enabled: region capture uses `SCStreamConfiguration::with_source_rect`,
+# which is not version gated.
+screencapturekit = { version = "9.0.1", features = ["macos_14_0"] }
 core-graphics = "0.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
