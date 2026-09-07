@@ -22,8 +22,9 @@ diğerlerinden ayrıştığı nokta.
 - Yerel çıktı: dosyaya kaydet, panoya kopyala, sürükle-bırak
 
 ### v1 dışı (v2 backlog)
-- Ekran kaydı (MP4/GIF, mikrofon ve sistem sesi, trim) — en ağır alt sistem, çekirdeği geciktirmemek
-  için sonraya alındı. Mimari, yakalama akışı (stream) soyutlamasını v1'de hazır tutar.
+- Ekran kaydı (MP4/GIF, mikrofon ve sistem sesi, trim), en ağır alt sistem olduğu için sonraya alındı.
+  v2'de `ScreenCapturer` trait'ine `stream()` metodu eklenir; `Frame` tipi stride, pixel format ve
+  timestamp taşıdığı için bu ekleme mevcut çağıranları kırmaz.
 - İmleç vurgusu ve tıklama efekti
 - Windows ve Linux implementasyonları (soyutlama v1'de hazır, implementasyon sonra)
 - Bulut yükleme, paylaşım linki, hesap sistemi (ürün hedefi değil)
