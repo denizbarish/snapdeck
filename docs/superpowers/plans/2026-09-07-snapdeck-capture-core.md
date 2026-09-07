@@ -1035,7 +1035,7 @@ pub mod macos;
 Sonra `crates/capture/src/macos/mod.rs`:
 
 ```rust
-pub mod permission;
+// Task 4 adds: pub mod permission;
 
 use core_graphics::display::{CGDisplay, CGMainDisplayID};
 use screencapturekit::prelude::*;
@@ -1241,7 +1241,13 @@ git commit -m "feat(capture): add macOS ScreenCaptureKit implementation"
 
 - [ ] **Step 1: Başarısız testi yaz**
 
-`crates/capture/src/macos/permission.rs` sonuna:
+Önce `crates/capture/src/macos/mod.rs` içindeki yer tutucu yorumu gerçek bildirimle değiştir:
+
+```rust
+pub mod permission;
+```
+
+Sonra `crates/capture/src/macos/permission.rs` sonuna:
 
 ```rust
 #[cfg(test)]
