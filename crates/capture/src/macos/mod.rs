@@ -35,6 +35,13 @@ impl Default for MacCapturer {
 /// `NSError`'s `localizedDescription`, so a Turkish system reports declined
 /// consent in Turkish and any substring test would misclassify a denial as a
 /// generic platform failure on every non-English system.
+///
+/// The preflight behind the `NoShareableContent` arm is read on every such
+/// failure and deliberately never cached: TCC state changes at runtime, and a
+/// cached value would be wrong exactly after the user fixes their permission.
+/// Every call site reaches this from a synchronous `?` on an already-blocking
+/// ScreenCaptureKit call, so the extra round trip on the error path costs
+/// nothing that matters.
 fn map_err(err: SCError) -> CaptureError {
     match err {
         // Unambiguous: ScreenCaptureKit named the cause itself.
@@ -57,8 +64,17 @@ fn map_err(err: SCError) -> CaptureError {
 /// Every `SCShareableContent` accessor reports every failure as
 /// `NoShareableContent` carrying only the localized description, so the
 /// variant cannot tell a missing grant from a transient XPC failure. The
-/// preflight can: with the grant held, the failure is a platform problem and
-/// its message is the only diagnostic it carries, so it has to survive.
+/// preflight usually can: with the grant held, the failure is a platform
+/// problem and its message is the only diagnostic it carries, so it has to
+/// survive.
+///
+/// The two disagree in one window. A running process cannot see a screen
+/// recording grant made after it started, which is why macOS offers "Quit &
+/// Reopen" when the switch is flipped. Until that relaunch the preflight
+/// reports `Granted` while `SCShareableContent::get()` still fails, so the
+/// denial comes back as `Platform` rather than `PermissionDenied`. A
+/// `Platform` error originating from content enumeration is therefore not
+/// proof that the grant is usable, and callers must not read it as one.
 fn map_no_shareable_content(err: SCError, permission: PermissionState) -> CaptureError {
     if permission.is_granted() {
         CaptureError::Platform(err.to_string())
@@ -474,6 +490,26 @@ mod tests {
         assert_eq!(
             map_no_shareable_content(err, PermissionState::Granted),
             CaptureError::Platform(message)
+        );
+    }
+
+    #[test]
+    fn map_err_resolves_shareable_content_against_the_live_preflight() {
+        // Pins the wiring, not the outcome: the expectation is computed from
+        // the same live preflight the arm is supposed to consult, so nothing
+        // here is hardcoded to this machine's TCC state and the test passes
+        // on a granted machine and on a denied one alike. Only the
+        // side-effect-free preflight is touched, never
+        // `CGRequestScreenCaptureAccess`. Dropping the
+        // `NoShareableContent` arm or inverting the wiring makes the two
+        // sides disagree.
+        let expected = map_no_shareable_content(
+            SCError::NoShareableContent("xpc failed".to_string()),
+            screen_capture_permission(),
+        );
+        assert_eq!(
+            map_err(SCError::NoShareableContent("xpc failed".to_string())),
+            expected
         );
     }
 
