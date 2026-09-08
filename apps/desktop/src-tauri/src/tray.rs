@@ -25,7 +25,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .icon(app.default_window_icon().cloned().expect("bundled icon"))
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .ok_or(tauri::Error::UnknownPath)?,
+        )
         .on_menu_event(|app, event| match event.id().as_ref() {
             "capture_region" => request_capture(app, "region"),
             "capture_window" => request_capture(app, "window"),

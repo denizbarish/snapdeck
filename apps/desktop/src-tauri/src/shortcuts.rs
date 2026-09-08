@@ -87,7 +87,14 @@ mod tests {
         let shortcuts = Shortcuts::default();
         let parsed = shortcuts.parse_all().expect("defaults must parse");
         assert_eq!(parsed.len(), Shortcuts::MODES.len());
-        assert_eq!(shortcuts.mode_for_parsed(&parsed[1]), Some("window"));
+        // Every position, not just one, and against literals rather than
+        // `MODES`: `mode_for_parsed` reads the mode out of `MODES`, so asserting
+        // one against the other holds for any ordering. Without an independent
+        // oracle, swapping MODES 0 and 2 passes here and silently makes the
+        // region shortcut capture the whole screen once Task 6 acts on the mode.
+        for (index, expected) in ["region", "window", "display"].iter().enumerate() {
+            assert_eq!(shortcuts.mode_for_parsed(&parsed[index]), Some(*expected));
+        }
     }
 
     #[test]
@@ -99,10 +106,13 @@ mod tests {
 
     #[test]
     fn defaults_do_not_collide_with_each_other() {
-        let s = Shortcuts::default();
-        let mut all = vec![&s.capture_region, &s.capture_window, &s.capture_display];
-        all.sort();
-        all.dedup();
-        assert_eq!(all.len(), 3);
+        // Compare parsed values, not strings: "Cmd+Shift+7" and
+        // "CmdOrCtrl+Shift+7" are different strings that collide at
+        // registration, which is the whole reason mode_for_parsed exists.
+        let mut parsed = Shortcuts::default()
+            .parse_all()
+            .expect("defaults must parse");
+        parsed.dedup();
+        assert_eq!(parsed.len(), 3);
     }
 }
