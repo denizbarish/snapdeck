@@ -69,7 +69,8 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   const bounds = { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }
 
   const confirm = (rect: Rect) => {
-    // A press with no drag is a cancel, not a capture of nothing.
+    // Confirming a selection too small to be worth capturing is a cancel, not
+    // a capture of nothing.
     if (!isUsable(rect)) return dismissAll()
     // `capture_region` belongs to Task 10 and does not exist yet. Logging the
     // exact rect that would have been sent keeps the gap visible instead of
@@ -168,16 +169,14 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
     setSelection(clampRect(normalizeRect(dragStart.current, pointer), bounds))
   }
 
+  // Releasing the pointer ends the drag or the resize and confirms nothing. The
+  // selection stays adjustable, so the eight handles and the arrow keys are
+  // reachable: Enter captures it, Escape cancels. Capturing on release would
+  // make all three dead UI, because the overlay would already be gone by the
+  // time the user reached for them.
   const onPointerUp = () => {
-    // Releasing a handle ends the resize and nothing else. The adjusted
-    // selection is confirmed with Enter, so the user can grab another handle
-    // first.
-    if (activeHandle.current) {
-      activeHandle.current = null
-      return
-    }
+    activeHandle.current = null
     dragStart.current = null
-    if (selection) confirm(selection)
   }
 
   return (
@@ -230,6 +229,12 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
           >
             {/* Device pixels, which is what the saved file will contain. */}
             {Math.round(selection.width * scale)} × {Math.round(selection.height * scale)}
+            {/*
+              The release no longer captures, so the two keys that finish the
+              capture have to be visible; otherwise a finished selection just
+              sits there with no clue how to commit it.
+            */}
+            <span style={{ opacity: 0.7, marginLeft: 8 }}>Enter to capture · Esc to cancel</span>
           </div>
           {HANDLES.map((handle) => {
             const position = handlePosition(selection, handle)
