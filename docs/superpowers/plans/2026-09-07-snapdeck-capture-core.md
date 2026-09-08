@@ -2005,6 +2005,44 @@ sorusunu ya da ilgili ayar panelini görür.
 doğrulanır. Ekran veya izin gerektirmez. Bu fonksiyon hem arka planı hem kullanıcının kaydettiği
 dosyayı üretir, yani bir bayt sırası veya stride hatası ikisini birden sessizce bozar.
 
+### Task 6 ikinci incelemesinden gelen ek kurallar
+
+**9. Aynı anda tek yakalama.** `open_overlays` sınırsız işçi başlatıyor ve hiçbir koruma yok. Hızlı iki
+basışta iki işçi aynı `frozen-<id>.png` dosyasını sıfır offsetten yazar (iç içe geçmiş baytlar, bozuk
+PNG), ikinci işçi `WindowLabelAlreadyExists` alır, hata yolu tüm overlay'leri kapatır ve kullanıcı iki
+basış sonunda **hiç** overlay göremez. Bu, yerine geçtiği hatadan daha kötüdür ve ekranda 1.5 sn hiçbir
+şey görünmediği için kullanıcının doğal davranışıdır. `AppState` içinde bir bayrak tutulur; uçuşta bir
+yakalama varken gelen istek düşürülür. Bayrak, panik ve erken dönüşlerde de temizlenmesi için bir guard
+tipiyle (Drop) yönetilir.
+
+**10. Kodlama süresi release build'de ölçülür, sonra format seçilir.** Rule 6 yanlış bir varsayıma
+dayanıyordu: `image` crate'inin `CompressionType` varsayılanı zaten `Fast`, `FilterType` varsayılanı
+`Adaptive`. Yani tek gerçek değişiklik Adaptive'den NoFilter'a geçmekti ve bu, kodlamayı 1.10-1.17
+sn'den 1.37-1.80 sn'ye **yavaşlattı**. Üstelik tüm ölçümler debug build'de yapıldı. Önce release
+build'de gerçek 3420x2224 kare üzerinde Adaptive ve NoFilter ölçülür. Hedef, kısayoldan overlay'in
+ekrana gelmesine kadar geçen süredir; arka plan geçici bir dosyadır, PNG olmak zorunda değildir.
+Kayıpsız kalmak şartıyla (Task 9 renk seçici) sıkıştırmasız bir format da meşrudur; hangisi seçilirse
+ölçümüyle birlikte raporlanır.
+
+**11. Görüntü yüklenemezse pencere sonsuza kadar gizli kalmaz.** `show()` yalnızca `onLoad` yolundan
+çağrılıyor; `onError` durumunda pencere ne gösteriliyor ne kapatılıyor, pencere haritasında hayalet
+olarak kalıyor ve `LSUIElement` sürümünde konsol da olmadığı için hiçbir iz kalmıyor. Bekleme
+sınırlandırılır (yaklaşık 500 ms) ve süre dolduğunda pencere kapatılır; `show()` zincirine sonlandırıcı
+bir `catch` eklenir.
+
+**12. Boşaltma zaman aşımı yakalamayı iptal eder.** Eski overlay kapanmadıysa işçi devam etmemelidir;
+aksi halde yeni donmuş kare eski overlay'i içine gömer ve `build()` zaten etiket çakışmasıyla düşer.
+
+**13. Donmuş kareler overlay kapanınca silinir.** Kullanıcının ekranının tam çözünürlüklü kopyaları
+`~/Library/Caches` altında süresiz birikmemelidir; bu bir gizlilik özelliğidir, bilinçli karar verilir.
+
+**14. Tam ekran Space denemesi sınırlıdır.** `CanJoinAllSpaces | FullScreenAuxiliary` tek başına
+yetmedi. İki hipotez denenir: (a) `collectionBehavior` ayarı ve pencerenin öne alınması aynı ana iş
+parçacığı turunda yapılır (rule 2 `show()`'u yüzlerce ms sonraya taşıdı, Space ataması pencere ilk öne
+alındığında belirlenir), (b) `LSUIElement` uygulamasında `NSApp.activate` ile birlikte öne alınır.
+İkisi de tutmazsa bu, README'de yazılı bilinen bir sınırlama olarak kabul edilir ve daha fazla
+zorlanmaz.
+
 ---
 
 ### Task 7: Seçim geometrisi ve overlay arayüzü
