@@ -1956,6 +1956,55 @@ git add apps/desktop
 git commit -m "feat(overlay): open frozen-frame overlay windows per display"
 ```
 
+### Task 6 incelemesinden gelen ek kurallar
+
+Bu kurallar yukarıdaki kod bloklarını geçersiz kılar; çakışma olursa bunlar geçerlidir.
+
+**1. Yakalama ve kodlama ana iş parçacığından çıkar, pencere kurulumu ana iş parçacığında kalır.**
+`request_capture` bir işçi iş parçacığı başlatır: `displays()`, her ekran için `capture()` ve `save_png()`
+orada koşar ve `Vec<(DisplayInfo, PathBuf)>` toplar. Sonuç `app.run_on_main_thread(...)` ile ana iş
+parçacığına verilir; pencereler orada kurulur, çünkü macOS pencere oluşturmayı ana iş parçacığında
+zorunlu tutar. Ölçüm: tek ekranda 1.4-1.7 sn donma, %78'i PNG kodlaması. Bölünmüş halde ana iş
+parçacığında kalan iş ~100-260 ms olur ve ekran sayısından bağımsızdır.
+
+**2. Pencere görünmez kurulur, arka planı yüklendikten sonra gösterilir.** Aksi halde kullanıcı,
+donmuş kare boyanana kadar tamamen şeffaf, tıklama yutan, her zaman üstte bir dikdörtgenle baş başa
+kalır ve altındaki ekran hâlâ hareket eder; bu, özelliğin var oluş sebebi olan donmayı ortadan kaldırır.
+`.visible(false)` ile kurulur, görüntü yüklendiğinde frontend pencereyi gösterir.
+
+**3. Eski overlay'ler yakalama döngüsünden ÖNCE, tek seferde kapatılır.** Mevcut "varsa kapat, sonra
+kur" koruması ölü koddur: `WebviewWindow::close()` olay döngüsü proxy'sine kuyruklanır, ana iş parçacığı
+bloklu olduğu için döngü içinde işlenemez, `build()` `WindowLabelAlreadyExists` ile düşer ve `?` tüm
+işlemi iptal eder. Sonuç: ilk yakalama çalışır, ikincisi sessizce başarısız olur, üçüncüsü çalışır.
+Ayrıca eski overlay kapanmadan yakalama yapıldığı için yeni donmuş kare eskisini içine gömer.
+
+**4. Pencere seviyesi menü çubuğunun üstüne çıkarılır ve tüm Space'lere katılır.** `always_on_top`
+pencereyi CGWindowLevel 5'e koyar; Dock 20, menü çubuğu 24'tedir, yani ikisi de donmuş karenin üstüne
+çizilir ve ekranın üst/alt şeritleri seçilemez hale gelir. `ns_window()` üzerinden seviye menü çubuğunun
+üstüne alınır, `collectionBehavior`'a `canJoinAllSpaces | fullScreenAuxiliary` eklenir; ikincisi olmadan
+overlay tam ekran Space'lerin üstünde hiç görünmez.
+
+**5. Donmuş karenin yolu Rust'tan sorgu parametresiyle gelir.** `overlay.html?...&path=<mutlak yol>`
+şeklinde; frontend yalnızca `convertFileSrc` çağırır. Bu, `appCacheDir()` + `join()` IPC gidiş
+dönüşlerini, onlar için gereken `capabilities/overlay.json` dosyasını ve dosya adı şablonunun
+TypeScript'te ikinci kez yazılmasını birden ortadan kaldırır. `<img>` etiketine `onError` eklenir,
+yoksa yol bozulduğunda tanısı olmayan boş bir pencere kalır.
+
+**6. `save_png` sıkıştırma seviyesini parametre alır.** Arka plan `CompressionType::Fast` +
+`FilterType::NoFilter` ile yazılır (30 MB RGBA için ~1.1 sn yerine ~150-250 ms); Task 10'un kullanıcıya
+kaydettiği dosya varsayılan sıkıştırmayı kullanır, çünkü orada dosya boyutu gerçek bir maliyettir.
+Sıkıştırma kayıpsızdır, yalnızca deflate akışını değiştirir, bu yüzden Task 9'un renk seçicisi etkilenmez.
+
+**7. İzin reddi kullanıcıya görünür olmalıdır.** `eprintln!`, `LSUIElement` uygulamasında ve
+`"windows": []` yapılandırmasında kimseye ulaşmaz; `get_webview_window("main")` her zaman `None` döner.
+Preflight izni yok derse `request_screen_capture_permission()` çağrılır (ilk seferde sistem sorar), hâlâ
+reddediliyorsa `SETTINGS_DEEP_LINK` açılır. Böylece kullanıcı sessiz bir hiçlik yerine ya sistem
+sorusunu ya da ilgili ayar panelini görür.
+
+**8. `save_png` test edilir.** Bilinen bir 2x2 BGRA frame geçici bir dizine yazılır ve çözülen baytlar
+doğrulanır. Ekran veya izin gerektirmez. Bu fonksiyon hem arka planı hem kullanıcının kaydettiği
+dosyayı üretir, yani bir bayt sırası veya stride hatası ikisini birden sessizce bozar.
+
 ---
 
 ### Task 7: Seçim geometrisi ve overlay arayüzü
