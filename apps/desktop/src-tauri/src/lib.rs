@@ -6,6 +6,7 @@ mod tray;
 
 use shortcuts::{register_shortcuts, Shortcuts};
 use state::AppState;
+use tauri::RunEvent;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 pub fn run() {
@@ -33,6 +34,20 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running snapdeck");
+        .build(tauri::generate_context!())
+        .expect("error while building snapdeck")
+        .run(|_app, event| {
+            // Closing the last overlay must not end the process. Tauri requests
+            // an exit once no window is left, and this is a menu bar agent that
+            // has no windows between captures, so without this the app dies the
+            // moment a capture is repeated or Task 7's Escape closes the
+            // overlays. `code` is `Some` only for a programmatic exit, which is
+            // what the tray's Quit item does, so quitting still works.
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                api.prevent_exit();
+            }
+        });
 }

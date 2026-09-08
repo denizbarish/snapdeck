@@ -3113,6 +3113,8 @@ name = "snapdeck"
 version = "0.1.0"
 dependencies = [
  "image",
+ "objc2-app-kit",
+ "percent-encoding",
  "serde",
  "serde_json",
  "snapdeck-capture",

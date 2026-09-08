@@ -22,3 +22,10 @@ serde.workspace = true
 serde_json = "1"
 thiserror.workspace = true
 image.workspace = true
+# The frozen frame's absolute path travels in the overlay URL's query string.
+percent-encoding = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The overlay window has to be lifted above the menu bar and told to join every
+# Space, neither of which Tauri's window builder exposes.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
