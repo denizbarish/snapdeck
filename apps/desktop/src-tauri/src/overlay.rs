@@ -315,7 +315,12 @@ fn open_screen_recording_settings() {
 /// frozen frame taken now would have the previous overlay baked into it, which
 /// is exactly the recursive screenshot this wait exists to prevent, and
 /// `build` would then fail on the still-taken label anyway.
-fn wait_for_overlays_to_close(app: &AppHandle) -> bool {
+///
+/// `commands::capture_region` waits on it too, and for the first of those two
+/// reasons rather than the second: it re-captures the selected region at native
+/// resolution, so an overlay that is merely closing rather than closed lands in
+/// the user's file as a picture of the dimmed selection UI.
+pub(crate) fn wait_for_overlays_to_close(app: &AppHandle) -> bool {
     let deadline = Instant::now() + CLOSE_DRAIN_TIMEOUT;
     while has_overlay_windows(app) {
         if Instant::now() >= deadline {

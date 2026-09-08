@@ -28,8 +28,11 @@ pub fn run() {
         )
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
+            commands::permission_state,
+            commands::request_permission,
             commands::close_overlays,
-            commands::list_windows
+            commands::list_windows,
+            commands::capture_region
         ])
         .setup(|app| {
             let handle = app.handle().clone();

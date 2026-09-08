@@ -34,8 +34,6 @@ pub enum PngCompression {
     Fast,
     /// The artifact the user keeps, where the file is half the size again and
     /// nobody is waiting on the write.
-    // Task 10 saves the user's screenshot with this; nothing constructs it yet.
-    #[allow(dead_code)]
     Default,
 }
 
@@ -58,6 +56,74 @@ pub fn save_png(frame: &Frame, path: &Path, compression: PngCompression) -> Resu
     PngEncoder::new_with_quality(BufWriter::new(file), compression_type, filter)
         .write_image(&rgba, frame.width, frame.height, ExtendedColorType::Rgba8)
         .map_err(|e| format!("failed to save png: {e}"))
+}
+
+/// Wall-clock parts used by the filename template. Kept as plain fields so the
+/// renderer is pure and testable without a clock.
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetDateTimeParts {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl OffsetDateTimeParts {
+    /// The current UTC wall clock, read from the system clock.
+    ///
+    /// UTC rather than local time, because `std` carries no time zone database
+    /// and this crate has no date library. A file therefore gets the UTC hour,
+    /// which east of Greenwich is not the hour the user took the screenshot.
+    pub fn now() -> Self {
+        // std has no calendar math, so derive the parts from the Unix epoch.
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let days = secs.div_euclid(86_400);
+        let time_of_day = secs.rem_euclid(86_400);
+        let (year, month, day) = civil_from_days(days);
+        Self {
+            year,
+            month,
+            day,
+            hour: (time_of_day / 3600) as u8,
+            minute: ((time_of_day % 3600) / 60) as u8,
+            second: (time_of_day % 60) as u8,
+        }
+    }
+}
+
+/// Howard Hinnant's days-from-civil inverse; converts a Unix day number to a date.
+fn civil_from_days(z: i64) -> (i32, u8, u8) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
+/// Expands `{date}`, `{time}`, `{width}` and `{height}` in a filename template.
+/// Unknown tokens are left as-is. Path separators are replaced with hyphens so
+/// the result is always a single filename.
+pub fn render_filename(template: &str, at: OffsetDateTimeParts, width: u32, height: u32) -> String {
+    let date = format!("{:04}-{:02}-{:02}", at.year, at.month, at.day);
+    // Colons are not usable in macOS filenames, so time uses dots.
+    let time = format!("{:02}.{:02}.{:02}", at.hour, at.minute, at.second);
+    template
+        .replace("{date}", &date)
+        .replace("{time}", &time)
+        .replace("{width}", &width.to_string())
+        .replace("{height}", &height.to_string())
+        .replace(['/', '\\'], "-")
 }
 
 #[cfg(test)]
@@ -131,5 +197,40 @@ mod tests {
         std::fs::remove_file(&default_path).ok();
 
         assert_eq!(fast.into_raw(), default.into_raw());
+    }
+
+    fn parts() -> OffsetDateTimeParts {
+        OffsetDateTimeParts {
+            year: 2026,
+            month: 9,
+            day: 7,
+            hour: 4,
+            minute: 5,
+            second: 6,
+        }
+    }
+
+    #[test]
+    fn renders_the_default_template() {
+        let name = render_filename("Snapdeck {date} at {time}", parts(), 800, 600);
+        assert_eq!(name, "Snapdeck 2026-09-07 at 04.05.06");
+    }
+
+    #[test]
+    fn renders_size_tokens() {
+        let name = render_filename("shot-{width}x{height}", parts(), 800, 600);
+        assert_eq!(name, "shot-800x600");
+    }
+
+    #[test]
+    fn leaves_unknown_tokens_untouched() {
+        let name = render_filename("{nope}-{width}", parts(), 10, 20);
+        assert_eq!(name, "{nope}-10");
+    }
+
+    #[test]
+    fn strips_path_separators_from_the_result() {
+        let name = render_filename("a/b{width}", parts(), 5, 5);
+        assert_eq!(name, "a-b5");
     }
 }

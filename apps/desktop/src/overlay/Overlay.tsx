@@ -257,16 +257,22 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
     // here would answer a deliberate keystroke with no file, no message and no
     // screen to try again on. Only Escape and a real capture dismiss.
     if (!isUsable(rect)) return
-    // `capture_region` belongs to Task 10 and does not exist yet. Logging the
-    // exact rect that would have been sent keeps the gap visible instead of
-    // letting a finished selection disappear as if it had been saved. The
-    // numbers are display-local points; converting them to the global space is
-    // that command's job, because only Rust knows where this display sits.
-    console.warn(
-      `overlay: region capture is not wired yet (Task 10), dropping the selection for display ${displayId}:`,
-      rect,
-    )
-    dismissAll()
+    // Display-local points; converting them to the global space is the
+    // command's job, because only Rust knows where this display sits.
+    //
+    // Nothing is dismissed here on the way out, and nothing awaits the result
+    // either. `capture_region` closes the overlays itself and has to: it
+    // re-captures the region at native resolution rather than cropping the
+    // frozen frame, so it cannot start until this window is off the screen,
+    // and by the time it answers there is no webview left to answer to.
+    invoke('capture_region', { displayId, rect }).catch((error: unknown) => {
+      console.error(`overlay: could not capture the selection on display ${displayId}`, error)
+      // Reached only while this window is somehow still alive, which means the
+      // command gave up before it closed anything. Leaving every display
+      // covered under a selection the user already confirmed is the one
+      // outcome worse than a missing file.
+      dismissAll()
+    })
   }
 
   /**
