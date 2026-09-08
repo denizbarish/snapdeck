@@ -12,18 +12,28 @@ use snapdeck_capture::Frame;
 /// filter change, never a pixel value, so a colour read back from either file
 /// is the colour that was on screen.
 ///
-/// The levels are named explicitly because `image`'s own
-/// `CompressionType::default()` is `Fast`, not `Default`, and its
-/// `FilterType::default()` is `Adaptive`, which tries five filters per
-/// scanline. On a 3420x2214 frame that filter search, not the deflate pass,
-/// is the bulk of the encode.
+/// Measured in a release build on a real 3420x2224 frame (30.4 MB of RGBA),
+/// best of three, encode only:
+///
+/// | compression | filter | encode | file |
+/// | --- | --- | --- | --- |
+/// | `Fast` | `Adaptive` | 32.7 ms | 2.3 MB |
+/// | `Fast` | `NoFilter` | 48.0 ms | 29.9 MB |
+/// | `Uncompressed` | `NoFilter` | 71.3 ms | 30.4 MB |
+/// | `Default` | `Adaptive` | 273.5 ms | 1.4 MB |
+///
+/// `Adaptive` is both the fastest and by far the smallest here: the filter
+/// search costs less than the deflate work it saves, and the file the webview
+/// then has to read back is a thirteenth of the size. `Fast` + `Adaptive` is
+/// `image`'s own default, so `PngCompression::Fast` is the plain
+/// `PngEncoder::new` behaviour, spelled out rather than inherited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PngCompression {
-    /// Lowest latency, largest file. The overlay backdrop is a throwaway file
-    /// the user waits on, so its size costs nothing.
+    /// The overlay backdrop, where the user is blocked on the encode and on the
+    /// webview's read of the result.
     Fast,
-    /// Smaller file, slower encode. For the artifact the user keeps, where the
-    /// size is a real cost and nobody is blocked on the write.
+    /// The artifact the user keeps, where the file is half the size again and
+    /// nobody is waiting on the write.
     // Task 10 saves the user's screenshot with this; nothing constructs it yet.
     #[allow(dead_code)]
     Default,
@@ -32,7 +42,7 @@ pub enum PngCompression {
 impl PngCompression {
     fn encoder_settings(self) -> (CompressionType, FilterType) {
         match self {
-            Self::Fast => (CompressionType::Fast, FilterType::NoFilter),
+            Self::Fast => (CompressionType::Fast, FilterType::Adaptive),
             Self::Default => (CompressionType::Default, FilterType::Adaptive),
         }
     }

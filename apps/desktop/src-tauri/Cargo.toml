@@ -26,6 +26,9 @@ image.workspace = true
 percent-encoding = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The overlay window has to be lifted above the menu bar and told to join every
-# Space, neither of which Tauri's window builder exposes.
+# The overlay window has to be lifted above the menu bar and allowed over a
+# full-screen Space, neither of which Tauri's window builder exposes.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
+# `MainThreadMarker`, which is what makes touching a main-thread-only `NSWindow`
+# from a raw pointer checked rather than assumed.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
