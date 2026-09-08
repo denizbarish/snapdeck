@@ -47,6 +47,17 @@ const PATH_QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const CLOSE_DRAIN_POLL: Duration = Duration::from_millis(4);
 
+/// How long an overlay may stay hidden after it has been built.
+///
+/// Generous on purpose. This is the last line of defence, not the fast path:
+/// the overlay shows itself the moment its backdrop has painted, so a deadline
+/// that expires is always either a broken window nobody can see or a load that
+/// was going to succeed and would be killed for no reason. The first costs the
+/// user nothing extra by lingering another second; the second is a capture
+/// thrown away. The budget covers page load, a multi-megabyte asset read and
+/// the decode, on every display at once.
+const REVEAL_DEADLINE: Duration = Duration::from_millis(2000);
+
 /// Whether the screen recording pane has already been opened in this process.
 ///
 /// Impatient repeat triggers would otherwise steal focus once per press.
@@ -97,15 +108,27 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
     // capture would fail with `WindowLabelAlreadyExists`. Closing first also
     // keeps the previous overlay out of the new frozen frame.
     close_overlays(app);
+    discard_cached_frozen_frames(app);
 
     let app = app.clone();
     let mode = mode.to_string();
     std::thread::spawn(move || {
         // A panic here would otherwise be completely silent: nothing joins this
         // thread, and the user would see the same nothing as a refused
-        // permission. The guard is moved in, so the slot is freed either way.
+        // permission.
+        //
+        // The guard stays in this frame rather than travelling into
+        // `run_capture`. An unwind drops everything the panicking frame owns
+        // before `catch_unwind` returns, so a guard held down there would free
+        // the capture slot while this recovery is still queuing its cleanup: a
+        // new capture could claim the slot, write its `frozen-<id>.png`, and
+        // then have the recovery's `close_overlays` and frame discard, which
+        // the main thread runs first, delete the frames out from under it.
+        // `run_capture` takes the guard out only when it hands the finished
+        // windows to the main thread.
+        let mut guard = Some(guard);
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_capture(&app, &mode, guard);
+            run_capture(&app, &mode, &mut guard);
         }));
         if let Err(payload) = outcome {
             eprintln!(
@@ -114,8 +137,14 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
             );
             let handle = app.clone();
             // Any overlay that did get built is unusable now, and Task 7's
-            // Escape does not exist yet.
-            let _ = app.run_on_main_thread(move || close_overlays(&handle));
+            // Escape does not exist yet. Whatever is left of the guard rides
+            // into the closure and drops only after the cleanup has run, so the
+            // slot stays claimed for the whole recovery.
+            let _ = app.run_on_main_thread(move || {
+                close_overlays(&handle);
+                discard_cached_frozen_frames(&handle);
+                drop(guard);
+            });
         }
     });
 }
@@ -123,11 +152,12 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
 /// The worker thread's whole job: check permission, wait for the old overlays
 /// to leave, capture, then hand the windows back to the main thread.
 ///
-/// The guard travels all the way into the main-thread closure so the capture
-/// slot stays claimed until the new windows exist. Releasing it when this
-/// function returns would reopen the label race it is there to prevent, because
-/// `run_on_main_thread` only queues the closure.
-fn run_capture(app: &AppHandle, mode: &str, guard: CaptureGuard) {
+/// The guard is borrowed rather than owned, and moved out only on the success
+/// path, into the main-thread closure: the slot has to stay claimed until the
+/// new windows actually exist, because `run_on_main_thread` only queues the
+/// closure, and it has to stay claimed through an unwind, which is why the
+/// caller keeps the `Option` in a frame that does not unwind with this one.
+fn run_capture(app: &AppHandle, mode: &str, guard: &mut Option<CaptureGuard>) {
     if !ensure_permission() {
         return;
     }
@@ -148,9 +178,11 @@ fn run_capture(app: &AppHandle, mode: &str, guard: CaptureGuard) {
 
     let handle = app.clone();
     let mode = mode.to_string();
+    let guard = guard.take();
     if let Err(err) = app.run_on_main_thread(move || {
-        build_overlay_windows(&handle, &mode, &frozen);
+        let windows = build_overlay_windows(&handle, &mode, &frozen);
         drop(guard);
+        schedule_reveal_deadline(&handle, windows);
     }) {
         eprintln!("snapdeck: could not reach the main thread: {err}");
     }
@@ -168,18 +200,31 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     "non-string panic payload".to_string()
 }
 
-/// Closes every overlay window and discards the frozen frames behind them.
-/// Also wired to Escape and to a finished selection in Task 7.
+/// Closes every overlay window. Also wired to Escape and to a finished
+/// selection in Task 7.
+///
+/// Deliberately does not touch the frozen frames. Escape can arrive while a
+/// capture is in flight, and unlinking the file a worker is halfway through
+/// writing would leave the next set of windows opening onto nothing. Whoever
+/// knows that no capture is running calls `discard_cached_frozen_frames` as
+/// well.
 pub fn close_overlays(app: &AppHandle) {
     for (label, window) in app.webview_windows() {
         if label.starts_with(OVERLAY_LABEL_PREFIX) {
             let _ = window.close();
         }
     }
-    discard_frozen_frames(app);
 }
 
-/// Removes the frozen frames from the application cache.
+/// Discards the frozen frames sitting in the application cache directory.
+pub fn discard_cached_frozen_frames(app: &AppHandle) {
+    let Ok(cache_dir) = app.path().app_cache_dir() else {
+        return;
+    };
+    discard_frozen_frames(&cache_dir);
+}
+
+/// Removes the frozen frames from `dir`.
 ///
 /// Each one is a full-resolution, lossless copy of everything that was on the
 /// user's screen, so leaving them in `~/Library/Caches` to accumulate is a
@@ -187,11 +232,12 @@ pub fn close_overlays(app: &AppHandle) {
 /// capture rewrites anyway. Safe to call while the overlays are still on
 /// screen, because the webview has already decoded the file into memory by the
 /// time it is visible.
-fn discard_frozen_frames(app: &AppHandle) {
-    let Ok(cache_dir) = app.path().app_cache_dir() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+///
+/// Takes the directory rather than an `AppHandle` so that the one thing worth
+/// testing here, which files it is willing to unlink, can be tested against a
+/// temporary directory.
+fn discard_frozen_frames(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -312,11 +358,22 @@ fn capture_frozen_frames(app: &AppHandle) -> Result<Vec<(DisplayInfo, PathBuf)>,
 }
 
 /// Main thread only: macOS requires window creation there.
-fn build_overlay_windows(app: &AppHandle, mode: &str, frozen: &[(DisplayInfo, PathBuf)]) {
+///
+/// Returns the windows it built, so the caller can hold them to the reveal
+/// deadline. An empty vector means there is nothing left on screen.
+fn build_overlay_windows(
+    app: &AppHandle,
+    mode: &str,
+    frozen: &[(DisplayInfo, PathBuf)],
+) -> Vec<WebviewWindow> {
+    let mut windows = Vec::with_capacity(frozen.len());
     let mut failed = false;
     for (display, path) in frozen {
         match build_overlay_window(app, mode, display, path) {
-            Ok(window) => raise_above_menu_bar(&window),
+            Ok(window) => {
+                raise_above_menu_bar(&window);
+                windows.push(window);
+            }
             Err(err) => {
                 eprintln!(
                     "snapdeck: failed to create the overlay for display {}: {err}",
@@ -328,8 +385,55 @@ fn build_overlay_windows(app: &AppHandle, mode: &str, frozen: &[(DisplayInfo, Pa
     }
     // A half-open set of overlays is worse than none: the windows that did open
     // swallow every click with no way to dismiss them before Task 7's Escape.
+    // The frames go too: the capture is over, this thread still holds the
+    // capture slot, so nothing can be writing them.
     if failed {
         close_overlays(app);
+        discard_cached_frozen_frames(app);
+        return Vec::new();
+    }
+    windows
+}
+
+/// Closes any overlay that is still hidden `REVEAL_DEADLINE` after it was
+/// built.
+///
+/// The deadline lives in Rust rather than in the overlay page because the page
+/// may never get to run one. The window is built `.visible(false)`, so it is
+/// never composited and WebKit puts its DOM timers on the throttled schedule; a
+/// timer set for 500 ms is not a promise of 500 ms. Worse, the page can fail
+/// before any timer is armed at all: a missing query parameter, a bundle that
+/// does not load, a rejected CSP. In each of those the window stays hidden with
+/// no `error` event to notice it by, holding its label against the next
+/// capture. The window is Rust's, so the promise that it either shows itself or
+/// goes away is Rust's too.
+///
+/// The windows travel into the closure as handles, not labels. The capture slot
+/// is released as soon as they exist, so by the time this fires another capture
+/// may already own the same `overlay-<id>` labels, and a lookup by label would
+/// close that capture's brand new, legitimately still-hidden windows.
+fn schedule_reveal_deadline(app: &AppHandle, windows: Vec<WebviewWindow>) {
+    if windows.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(REVEAL_DEADLINE);
+        let _ = app.run_on_main_thread(move || close_hidden_overlays(&windows));
+    });
+}
+
+/// Main thread only. A window that is already gone reports an error rather than
+/// a visibility, which is the outcome this is trying to reach anyway.
+fn close_hidden_overlays(windows: &[WebviewWindow]) {
+    for window in windows {
+        if matches!(window.is_visible(), Ok(false)) {
+            eprintln!(
+                "snapdeck: {} never showed its frozen frame within {REVEAL_DEADLINE:?}, closing it",
+                window.label()
+            );
+            let _ = window.close();
+        }
     }
 }
 
@@ -382,12 +486,22 @@ fn raise_above_menu_bar(window: &WebviewWindow) {
             return;
         }
     };
-    // `NSWindow` is a main-thread-only class in objc2, and taking a reference
-    // from a raw pointer skips the marker that would normally prove it. Asking
-    // for the marker restores that proof: this is called from
-    // `build_overlay_windows`, which itself runs inside `run_on_main_thread`,
-    // so failing here means a caller broke that contract.
-    let _mtm = MainThreadMarker::new().expect("AppKit requires the main thread");
+    // `NSWindow` is a main-thread-only class in objc2. Taking a reference from
+    // a raw pointer bypasses the marker that would normally carry that proof
+    // through the type system, and asking for the marker here does not bring
+    // the proof back: the cast below stays unchecked. What it does is assert at
+    // runtime that this really is the main thread, which is the assumption the
+    // cast rests on. Reaching the `else` means a caller broke the contract that
+    // this only runs inside `run_on_main_thread`, and returning is the only
+    // sane answer: this closure sits outside the worker's `catch_unwind`, so a
+    // panic here would unwind the AppKit event loop and take the app with it.
+    let Some(_mtm) = MainThreadMarker::new() else {
+        eprintln!(
+            "snapdeck: overlay setup for {} ran off the main thread, leaving the window at its default level",
+            window.label()
+        );
+        return;
+    };
     // SAFETY: `ns_window` hands back this window's live `NSWindow`, which
     // outlives the borrow, and `_mtm` proves this is the thread AppKit
     // requires for every `NSWindow` call.
@@ -453,6 +567,37 @@ mod tests {
         ] {
             assert!(!is_frozen_frame_filename(name), "should keep {name}");
         }
+    }
+
+    /// The filter decides what is deleted, but only the walk actually deletes,
+    /// so the walk is exercised against a real directory.
+    #[test]
+    fn discard_frozen_frames_unlinks_exactly_the_frozen_frames() {
+        let dir = temp_dir("discard");
+        std::fs::create_dir_all(&dir).expect("create the temporary cache");
+        for name in ["frozen-1.png", "frozen-abc.png", "user-notes.txt"] {
+            std::fs::write(dir.join(name), b"x").expect("write the fixture");
+        }
+
+        discard_frozen_frames(&dir);
+
+        let mut survivors: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read the temporary cache")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        survivors.sort();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(survivors, vec!["frozen-abc.png", "user-notes.txt"]);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("snapdeck-{}-{unique}-{name}", std::process::id()))
     }
 
     /// A file the cleanup deletes must be a file the capture wrote.

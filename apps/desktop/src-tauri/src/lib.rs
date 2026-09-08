@@ -36,18 +36,23 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building snapdeck")
-        .run(|_app, event| {
+        .run(|app, event| match event {
             // Closing the last overlay must not end the process. Tauri requests
             // an exit once no window is left, and this is a menu bar agent that
             // has no windows between captures, so without this the app dies the
             // moment a capture is repeated or Task 7's Escape closes the
             // overlays. `code` is `Some` only for a programmatic exit, which is
             // what the tray's Quit item does, so quitting still works.
-            if let RunEvent::ExitRequested {
+            RunEvent::ExitRequested {
                 code: None, api, ..
-            } = event
-            {
-                api.prevent_exit();
-            }
+            } => api.prevent_exit(),
+            // The frozen frames are full-resolution, lossless copies of
+            // everything that was on the user's screen. Nothing else reaches
+            // them once the app is closing: the only other cleanup runs on the
+            // next capture, and there is no next capture. Without this, one
+            // capture and a quit leaves them in `~/Library/Caches` until the app
+            // is run again.
+            RunEvent::Exit => overlay::discard_cached_frozen_frames(app),
+            _ => {}
         });
 }

@@ -1,6 +1,5 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useEffect, useRef } from 'react'
 import type { SyntheticEvent } from 'react'
 
 export interface OverlayProps {
@@ -16,51 +15,37 @@ export interface OverlayProps {
 }
 
 /**
- * How long the window may stay hidden waiting for its backdrop.
+ * The frozen backdrop for one display.
  *
- * The frame is a local file the asset protocol serves from the page cache it
- * was written to moments ago, so anything past this is a failure, not a slow
- * load. Without a bound, a window that never resolves either way stays hidden
- * forever: invisible to the user, a phantom in Tauri's window map, and holding
- * its label against the next capture.
+ * Two outcomes only: the frame loads and the window shows itself, or it fails
+ * and the window closes. There is deliberately no timer for the case where
+ * neither happens. The window is created hidden and is therefore never
+ * composited, which is exactly when WebKit throttles DOM timers, and a page
+ * that fails before React mounts never arms one at all. Rust holds the deadline
+ * instead: it built the window, it can see whether it ever became visible, and
+ * it closes the ones that did not.
  */
-const REVEAL_TIMEOUT_MS = 500
-
 export function Overlay({ framePath }: OverlayProps) {
-  // Cleared as soon as the window is on screen; fires the fail-safe otherwise.
-  const failSafe = useRef<number | undefined>(undefined)
-
-  useEffect(() => {
-    failSafe.current = window.setTimeout(() => {
-      console.error(`overlay: the frozen frame at ${framePath} did not load in ${REVEAL_TIMEOUT_MS}ms`)
-      dismiss()
-    }, REVEAL_TIMEOUT_MS)
-    return () => {
-      window.clearTimeout(failSafe.current)
-    }
-  }, [framePath])
-
-  // The window is created hidden. Showing it before the backdrop is ready would
-  // put a fully transparent, click-swallowing rectangle over a screen that is
-  // still moving, which is what freezing exists to prevent.
+  // Showing the window before the backdrop is ready would put a fully
+  // transparent, click-swallowing rectangle over a screen that is still moving,
+  // which is what freezing exists to prevent.
   //
   // The wait is on `decode`, not on a rendered frame: a hidden window is never
   // composited, so `requestAnimationFrame` does not run and waiting for a paint
   // would hang forever. A decoded image is composited with the window's first
-  // frame.
+  // frame. A failed decode is not worth blocking on either, so it falls through
+  // to `show`: `onLoad` has already proved the file arrived and parsed.
   const revealWindow = (event: SyntheticEvent<HTMLImageElement>) => {
     const image = event.currentTarget
     image
       .decode()
       .catch(() => undefined)
-      .then(() => {
-        window.clearTimeout(failSafe.current)
-        return getCurrentWindow().show()
-      })
-      // Terminal handler, not `void`: `void` silences the lint, not the
-      // rejection. A window that cannot show itself has to close, or it is a
-      // hidden phantom holding its label, and in an LSUIElement release build
-      // there is no console to notice it in.
+      .then(() => getCurrentWindow().show())
+      // A terminal handler rather than `void`. There is no floating-promise
+      // lint in this repo to satisfy; the point is that the rejection is
+      // handled instead of merely marked. A window that cannot show itself has
+      // to close, or it is a hidden phantom holding its label, and in an
+      // LSUIElement release build there is no console to notice it in.
       .catch((error: unknown) => {
         console.error(`overlay: could not show the window for ${framePath}`, error)
         dismiss()

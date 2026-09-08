@@ -101,10 +101,17 @@ mod tests {
         let guard = state
             .begin_capture()
             .expect("the first capture claims the slot");
+        // The panic is the point of the test, so its message and the backtrace
+        // note are noise on every `cargo test` run. Silenced only around the
+        // call: the hook is process wide, and a panic in another test running
+        // in parallel deserves its message.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
         let panicked = std::panic::catch_unwind(move || {
             let _guard = guard;
             panic!("the capture worker died");
         });
+        std::panic::set_hook(previous_hook);
         assert!(panicked.is_err());
         assert!(
             state.begin_capture().is_some(),
