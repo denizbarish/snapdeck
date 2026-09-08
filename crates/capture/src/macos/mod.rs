@@ -393,6 +393,20 @@ mod tests {
     }
 
     #[test]
+    fn containment_rejects_a_region_reaching_past_the_display_vertically() {
+        // A display stacked above and left of the primary one, so both
+        // vertical terms are measured against a non-zero origin rather than
+        // against zero, where a y/x copy-paste slip would go unnoticed.
+        let display = rect(-1920.0, -1080.0, 1920.0, 1080.0);
+        // Starts above the top edge.
+        assert!(!contains(display, rect(-1820.0, -1090.0, 100.0, 50.0)));
+        // Reaches past the bottom edge.
+        assert!(!contains(display, rect(-1820.0, -40.0, 100.0, 50.0)));
+        // Ends exactly on the bottom edge.
+        assert!(contains(display, rect(-1820.0, -50.0, 100.0, 50.0)));
+    }
+
+    #[test]
     fn maps_a_named_permission_denial() {
         assert_eq!(
             map_err(SCError::PermissionDenied("Screen Recording".to_string())),
@@ -412,6 +426,19 @@ mod tests {
     }
 
     #[test]
+    fn maps_a_non_declined_stream_error_code_to_platform() {
+        // UserDeclined is the only stream error code that means consent was
+        // refused. Widening the arm to the whole variant would report every
+        // stream failure as a permission problem.
+        let err = SCError::SCStreamError {
+            code: SCStreamErrorCode::FailedToStart,
+            message: Some("stream failed to start".to_string()),
+        };
+        let message = err.to_string();
+        assert_eq!(map_err(err), CaptureError::Platform(message));
+    }
+
+    #[test]
     fn maps_a_failed_shareable_content_request() {
         assert_eq!(
             map_err(SCError::NoShareableContent("xpc failed".to_string())),
@@ -422,8 +449,21 @@ mod tests {
     #[test]
     fn maps_every_other_variant_to_platform_whatever_the_message_says() {
         // The message deliberately carries wording an English substring test
-        // would have matched. Only the variant decides.
+        // would have matched. Only the variant decides. The message is the
+        // only diagnostic such a failure carries, so it has to survive the
+        // mapping intact.
         let err = SCError::ScreenshotError("the user declined the request".to_string());
-        assert!(matches!(map_err(err), CaptureError::Platform(_)));
+        let message = err.to_string();
+        assert_eq!(map_err(err), CaptureError::Platform(message));
+    }
+
+    #[test]
+    fn pixel_lengths_round_to_nearest_and_never_reach_zero() {
+        // Rounds rather than truncating or always climbing.
+        assert_eq!(pixels(100.4, 1.0), 100);
+        // Half away from zero, not half to even.
+        assert_eq!(pixels(100.5, 1.0), 101);
+        // A sub-point length still asks for one pixel, never zero.
+        assert_eq!(pixels(0.4, 1.0), 1);
     }
 }
