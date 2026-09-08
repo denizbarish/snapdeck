@@ -159,11 +159,6 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
       if (event.key === 'Escape') return dismissAll()
       if (!selection) return
       if (event.key === 'Enter') return confirm(selection)
-      // Nothing to nudge in window mode: the selection is a window's own
-      // rectangle, and the next pointer move recomputes it from scratch, so a
-      // moved rect would either be discarded or capture a region that is no
-      // longer the window it is drawn around.
-      if (snapsToWindows) return
       const step = event.shiftKey ? NUDGE_STEP_COARSE : NUDGE_STEP
       const deltas: Record<string, [number, number]> = {
         ArrowLeft: [-step, 0],
@@ -172,11 +167,19 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
         ArrowDown: [0, step],
       }
       const delta = deltas[event.key]
-      if (delta) {
-        // Otherwise the arrow keys scroll the page under the selection.
-        event.preventDefault()
-        setSelection(nudgeRect(selection, delta[0], delta[1], bounds))
-      }
+      if (!delta) return
+      // Otherwise the arrow keys scroll the page under the selection. Swallowed
+      // in both modes, and before the window-mode return below: the frozen
+      // frame is a full-bleed image, and an arrow key that reaches the document
+      // scrolls it away from the screen it is standing in for, whether or not
+      // there is anything to nudge.
+      event.preventDefault()
+      // Nothing to nudge in window mode: the selection is a window's own
+      // rectangle, and the next pointer move recomputes it from scratch, so a
+      // moved rect would either be discarded or capture a region that is no
+      // longer the window it is drawn around.
+      if (snapsToWindows) return
+      setSelection(nudgeRect(selection, delta[0], delta[1], bounds))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

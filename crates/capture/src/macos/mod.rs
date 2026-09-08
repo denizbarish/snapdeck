@@ -1,6 +1,9 @@
 pub mod permission;
 
+use std::collections::HashMap;
+
 use core_graphics::display::{CGDisplay, CGMainDisplayID};
+use core_graphics::window::{create_window_list, kCGNullWindowID, kCGWindowListOptionOnScreenOnly};
 use screencapturekit::error::SCStreamErrorCode;
 use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
@@ -179,6 +182,51 @@ fn frame_from_image(image: &CGImage, scale_factor: f32) -> Result<Frame, Capture
     })
 }
 
+/// Window-server ids of every on-screen window, front to back.
+///
+/// `CGWindowListCreate` is the only API on the platform that reports stacking
+/// order, and it is documented to report it in exactly this order.
+/// `SCShareableContent.windows()` promises no order at all, and measurably
+/// does not deliver one: on this machine it returned two overlapping Terminal
+/// windows back to front, so a pick among overlapping windows landed on the
+/// one behind while the outline drawn on the frozen frame disagreed with the
+/// picture underneath it.
+///
+/// Ids only, rather than `CGWindowListCopyWindowInfo`'s dictionaries: the same
+/// list in the same order, with no `CFDictionary` key lookups and no second
+/// binding crate to read them with. Every attribute of the window still comes
+/// from ScreenCaptureKit.
+///
+/// An empty vector on failure. This is a sort key, not data: without it the
+/// list keeps whatever order ScreenCaptureKit gave, which is what the previous
+/// behaviour was, and refusing to enumerate windows at all would be a worse
+/// answer than an imperfectly ordered list.
+fn on_screen_z_order() -> Vec<u32> {
+    create_window_list(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+        .map(|list| list.iter().map(|id| *id).collect())
+        .unwrap_or_default()
+}
+
+/// Orders `windows` by their position in `z_order`, front to back.
+///
+/// Ids missing from `z_order` go last, keeping their relative order: the two
+/// lists come from two separate system calls, so a window can appear or close
+/// between them, and a window whose stacking is unknown is exactly the one
+/// that should not be allowed to shadow a window whose stacking is known.
+///
+/// Pure so that the ordering contract `windowUnderPoint` depends on can be
+/// tested without a screen.
+fn sort_by_z_order(mut windows: Vec<WindowInfo>, z_order: &[u32]) -> Vec<WindowInfo> {
+    let rank: HashMap<u32, usize> = z_order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+    // `sort_by_key` is stable, which is what keeps the unranked tail in order.
+    windows.sort_by_key(|window| rank.get(&window.id).copied().unwrap_or(usize::MAX));
+    windows
+}
+
 impl ScreenCapturer for MacCapturer {
     fn displays(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         // Load-bearing for the permission contract: see `map_err`. A missing
@@ -200,11 +248,12 @@ impl ScreenCapturer for MacCapturer {
             .collect())
     }
 
+    /// On-screen windows, front to back; see `sort_by_z_order`.
     fn windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
         // Load-bearing for the permission contract: see `map_err`. A missing
         // grant has to fail here, never later.
         let content = SCShareableContent::get().map_err(map_err)?;
-        Ok(content
+        let windows = content
             .windows()
             .into_iter()
             .filter(|w| w.is_on_screen())
@@ -216,7 +265,8 @@ impl ScreenCapturer for MacCapturer {
                 layer: w.window_layer(),
                 is_on_screen: true,
             })
-            .collect())
+            .collect();
+        Ok(sort_by_z_order(windows, &on_screen_z_order()))
     }
 
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError> {
@@ -336,6 +386,44 @@ mod tests {
             width,
             height,
         }
+    }
+
+    fn window(id: u32) -> WindowInfo {
+        WindowInfo {
+            id,
+            title: None,
+            app_name: None,
+            bounds: rect(0.0, 0.0, 100.0, 100.0),
+            layer: 0,
+            is_on_screen: true,
+        }
+    }
+
+    fn ids(windows: &[WindowInfo]) -> Vec<u32> {
+        windows.iter().map(|w| w.id).collect()
+    }
+
+    #[test]
+    fn z_order_sort_puts_the_front_window_first() {
+        // ScreenCaptureKit's order, which is not z-order.
+        let windows = vec![window(7), window(3), window(5)];
+        // What CGWindowListCreate reports: 5 is in front, then 3, then 7.
+        assert_eq!(ids(&sort_by_z_order(windows, &[5, 3, 7])), vec![5, 3, 7]);
+    }
+
+    #[test]
+    fn z_order_sort_puts_unranked_windows_last_in_their_original_order() {
+        // 9 and 4 opened or closed between the two system calls, so the
+        // stacking list does not name them.
+        let windows = vec![window(9), window(3), window(4), window(5)];
+        assert_eq!(ids(&sort_by_z_order(windows, &[5, 3])), vec![5, 3, 9, 4]);
+    }
+
+    #[test]
+    fn z_order_sort_ignores_ids_that_are_not_on_the_list() {
+        let windows = vec![window(3), window(5)];
+        // The stacking list covers every on-screen window, ours included.
+        assert_eq!(ids(&sort_by_z_order(windows, &[99, 5, 42, 3])), vec![5, 3]);
     }
 
     #[test]

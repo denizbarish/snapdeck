@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use snapdeck_capture::macos::MacCapturer;
 
@@ -12,6 +12,18 @@ pub struct AppState {
     /// windows. Shared with the guard rather than borrowed, so the worker
     /// thread can hold the claim without borrowing the managed state.
     capture_in_flight: Arc<AtomicBool>,
+    /// Window-server ids of the overlays built by the current capture.
+    ///
+    /// Recorded by `overlay::build_overlay_windows`, which is already on the
+    /// main thread that `NSWindow` requires, and read by `list_windows` from
+    /// its blocking worker. Storing them beats asking the main thread for them
+    /// on demand: window creation blocks that thread once per display, and the
+    /// first overlay's page is already mounted and asking by the time the
+    /// second one is being built, so a request would queue behind the very
+    /// work that produces the answer. On a multi-display setup that queue is
+    /// unbounded from the worker's point of view, and window mode would fail
+    /// with nothing to highlight and no retry.
+    overlay_window_ids: Mutex<Vec<u32>>,
 }
 
 impl AppState {
@@ -19,7 +31,30 @@ impl AppState {
         Self {
             capturer: MacCapturer::new(),
             capture_in_flight: Arc::new(AtomicBool::new(false)),
+            overlay_window_ids: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records the overlays a capture just built. Replaces the previous set,
+    /// which belonged to a capture whose windows are already closed.
+    pub fn set_overlay_window_ids(&self, ids: Vec<u32>) {
+        *self.overlay_ids() = ids;
+    }
+
+    /// The overlays' own window ids, so the window list can drop them.
+    pub fn overlay_window_ids(&self) -> Vec<u32> {
+        self.overlay_ids().clone()
+    }
+
+    /// The lock, with poisoning treated as recoverable.
+    ///
+    /// Nothing under it can be left half written: both users replace or read
+    /// the whole vector. Propagating the panic instead would turn one unrelated
+    /// crash into a window mode that never highlights anything again.
+    fn overlay_ids(&self) -> std::sync::MutexGuard<'_, Vec<u32>> {
+        self.overlay_window_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Claims the single capture slot, or returns `None` when a capture is
@@ -92,6 +127,21 @@ mod tests {
             state.begin_capture().is_some(),
             "the slot must be reusable once the capture finishes or unwinds"
         );
+    }
+
+    #[test]
+    fn the_overlay_ids_start_empty_and_are_replaced_by_each_capture() {
+        let state = AppState::new();
+        assert!(
+            state.overlay_window_ids().is_empty(),
+            "no capture has built an overlay yet"
+        );
+        state.set_overlay_window_ids(vec![101, 102]);
+        assert_eq!(state.overlay_window_ids(), vec![101, 102]);
+        // The previous capture's windows are gone, so its ids must not linger
+        // and exclude a window the user could otherwise pick.
+        state.set_overlay_window_ids(vec![203]);
+        assert_eq!(state.overlay_window_ids(), vec![203]);
     }
 
     /// The guard exists so that an unwinding worker still frees the slot.

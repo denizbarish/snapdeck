@@ -7,24 +7,11 @@
 //! window that did show its frame; and the window list, because window mode
 //! has nothing to highlight until it knows where the windows are.
 
-use std::sync::mpsc;
-use std::time::Duration;
-
 use serde::Serialize;
 use snapdeck_capture::{ScreenCapturer, WindowInfo};
 use tauri::{AppHandle, Manager};
 
 use crate::{overlay, state::AppState};
-
-/// How long the window list waits for the main thread to say which windows are
-/// the overlays' own.
-///
-/// A bound rather than a plain `recv` because this runs on a blocking worker
-/// while the main thread is running the AppKit event loop: if that loop is
-/// wedged, the honest answer is an error the overlay can log, not a worker
-/// parked forever. Generous, because the closure it waits on does nothing but
-/// read a handful of window numbers.
-const OVERLAY_ID_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A point in the global point space shared by every display.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -43,17 +30,15 @@ pub struct Point {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowListResult {
-    /// On-screen windows in global points, with this application's own
-    /// overlays removed.
+    /// On-screen windows in global points, front to back, with this
+    /// application's own overlays removed.
     ///
-    /// The order is whatever `SCShareableContent` produced, and that is
-    /// measurably **not** z-order: on this machine it returned two overlapping
-    /// Terminal windows in the opposite order to
-    /// `CGWindowListCopyWindowInfo`, which is the API that does report
-    /// front-to-back. The frontend takes the first window containing the
-    /// pointer, so until this list is sorted a pick among overlapping windows
-    /// can land on the one behind. Sorting it means reading the z-order from
-    /// `CGWindowListCopyWindowInfo` and is deliberately not done here.
+    /// The order is the contract the frontend relies on: it takes the first
+    /// window containing the pointer, so a list in any other order picks the
+    /// window behind and draws an outline that disagrees with the frozen frame
+    /// under it. `SCShareableContent` promises no order and measurably does
+    /// not provide one, so `ScreenCapturer::windows` sorts by the window
+    /// server's own stacking list before this ever sees it.
     pub windows: Vec<WindowInfo>,
     /// Top-left corner of the display this overlay covers, in global points.
     pub origin: Point,
@@ -101,8 +86,12 @@ pub async fn list_windows(app: AppHandle, display_id: u32) -> Result<WindowListR
 
 /// Blocking worker only; see `list_windows`.
 fn collect_windows(app: &AppHandle, display_id: u32) -> Result<WindowListResult, String> {
-    let ours = overlay_window_ids(app)?;
     let state = app.state::<AppState>();
+    // Recorded when the overlays were built, on the main thread that
+    // `NSWindow` requires. Reading it here is a lock and a clone, with no hop
+    // to a main thread that is busy creating the very windows being asked
+    // about; see `AppState::overlay_window_ids`.
+    let ours = state.overlay_window_ids();
 
     let display = state
         .capturer
@@ -116,16 +105,9 @@ fn collect_windows(app: &AppHandle, display_id: u32) -> Result<WindowListResult,
         // rectangle rather than failing visibly.
         .ok_or_else(|| format!("no display with id {display_id}"))?;
 
-    let windows = state
-        .capturer
-        .windows()
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .filter(|window| !ours.contains(&window.id))
-        .collect();
-
+    let windows = state.capturer.windows().map_err(|err| err.to_string())?;
     Ok(WindowListResult {
-        windows,
+        windows: without_windows(windows, &ours),
         origin: Point {
             x: display.bounds.x,
             y: display.bounds.y,
@@ -133,21 +115,67 @@ fn collect_windows(app: &AppHandle, display_id: u32) -> Result<WindowListResult,
     })
 }
 
-/// Asks the main thread which windows are the overlays' own.
+/// Drops the windows whose ids are in `excluded`, keeping the rest in order.
 ///
-/// The hop is unavoidable: the ids come from `NSWindow`, which is
-/// main-thread-only, while the enumeration around it has to stay off the main
-/// thread. Blocking here is safe because this is already a blocking worker.
-fn overlay_window_ids(app: &AppHandle) -> Result<Vec<u32>, String> {
-    let (sender, receiver) = mpsc::channel();
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        // The receiver is gone only if this worker timed out first, in which
-        // case there is nobody left to tell.
-        let _ = sender.send(overlay::overlay_window_ids(&handle));
-    })
-    .map_err(|err| format!("could not reach the main thread: {err}"))?;
-    receiver
-        .recv_timeout(OVERLAY_ID_TIMEOUT)
-        .map_err(|err| format!("the main thread did not report the overlay windows: {err}"))
+/// Split out from `collect_windows` because it is the whole of that function
+/// that can be tested: everything around it needs an `AppHandle`, a live
+/// display and a screen recording grant. Order is preserved because the list
+/// is front to back and the frontend takes the first match.
+fn without_windows(windows: Vec<WindowInfo>, excluded: &[u32]) -> Vec<WindowInfo> {
+    windows
+        .into_iter()
+        .filter(|window| !excluded.contains(&window.id))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use snapdeck_capture::Rect;
+
+    fn window(id: u32) -> WindowInfo {
+        WindowInfo {
+            id,
+            title: None,
+            app_name: None,
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            layer: 0,
+            is_on_screen: true,
+        }
+    }
+
+    fn ids(windows: &[WindowInfo]) -> Vec<u32> {
+        windows.iter().map(|w| w.id).collect()
+    }
+
+    #[test]
+    fn the_overlays_own_windows_are_dropped() {
+        let windows = vec![window(11), window(22), window(33)];
+        assert_eq!(ids(&without_windows(windows, &[22])), vec![11, 33]);
+    }
+
+    #[test]
+    fn one_overlay_per_display_is_dropped() {
+        let windows = vec![window(11), window(22), window(33), window(44)];
+        assert_eq!(ids(&without_windows(windows, &[22, 44])), vec![11, 33]);
+    }
+
+    #[test]
+    fn nothing_is_dropped_when_no_overlay_was_recorded() {
+        let windows = vec![window(11), window(22)];
+        assert_eq!(ids(&without_windows(windows, &[])), vec![11, 22]);
+    }
+
+    /// The list is front to back and the frontend takes the first match, so
+    /// removing a window may not reshuffle the ones around it.
+    #[test]
+    fn the_surviving_windows_keep_their_front_to_back_order() {
+        let windows = vec![window(5), window(9), window(1), window(7)];
+        assert_eq!(ids(&without_windows(windows, &[9])), vec![5, 1, 7]);
+    }
 }
