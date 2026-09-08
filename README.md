@@ -1,6 +1,9 @@
 # Snapdeck
 
-Snapdeck is an open-source macOS menu bar app for capturing, annotating, and sharing screenshots.
+Snapdeck is an open-source macOS menu bar app for capturing screenshots: pick a region, a window
+or a whole display, and the capture is saved as a PNG and put on the clipboard.
+
+Annotation and sharing are planned and are not part of this release.
 
 ## Requirements
 
@@ -73,4 +76,16 @@ MIT, see [LICENSE](LICENSE).
   nothing appears over the fullscreen app. Setting `canJoinAllSpaces | fullScreenAuxiliary`, raising the
   window level, ordering the window in on the same run loop turn and activating the app were all tried
   and none of them place the overlay above another app's fullscreen Space.
+- **Multiple displays are unverified.** Every display is frozen and covered, and the code paths for
+  it are there, but no part of it has been exercised on a real multi-display machine.
+- **A capture writes a copy of your screen to disk.** Freezing the screen means saving a
+  full-resolution, lossless PNG of every display under `~/Library/Caches`. They are deleted as soon
+  as the capture ends, cancelled or not, but a crash or a force quit leaves them behind until the
+  next capture overwrites them.
+- **A window outline can disagree with the frozen pixels.** Window mode lists the windows after the
+  screen has been frozen, so a window that moves in between is outlined where it now is rather than
+  where the frozen frame shows it.
+- **A partly failed shortcut registration leaves some shortcuts dead.** Registration stops at the
+  first shortcut macOS refuses, usually because another app already holds it, and the ones after it
+  are never registered. The menu bar item captures in every mode either way.
 

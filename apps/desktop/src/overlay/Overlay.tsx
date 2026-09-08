@@ -324,11 +324,23 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   // working on the preselected rect, so a full-screen shortcut pressed by
   // mistake is one drag away from being a region.
   //
-  // Once, on mount. Re-running it would put the display back under a selection
-  // the user has since trimmed.
+  // On mount, and again on every `focus`. Mount alone is not enough on more
+  // than one display: every overlay is built focused and each one asks for
+  // focus again once its frame has loaded, so on a two-display setup one of
+  // them loses that race and receives `blur`, and the blur handler below clears
+  // its selection. With a mount-only effect that display's preselection was
+  // gone for good, `Enter` did nothing on it, and the only way back was a click
+  // that region mode turns into an empty rect. Re-applying on focus costs a
+  // trimmed selection that the blur had already thrown away, and it is the same
+  // rect the mode starts with, so the display the user just moved to is always
+  // the one the README describes: whole display selected, `Enter` captures it.
   useEffect(() => {
     if (mode !== DISPLAY_MODE) return
-    setSelection({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight })
+    const preselect = () =>
+      setSelection({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight })
+    preselect()
+    window.addEventListener('focus', preselect)
+    return () => window.removeEventListener('focus', preselect)
   }, [mode])
 
   // No dependency array on purpose. The handler closes over `selection` and

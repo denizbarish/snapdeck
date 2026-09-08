@@ -18,6 +18,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder}
 
 use crate::{
     output::{save_png, PngCompression},
+    report::report_failure,
     state::{AppState, CaptureGuard},
 };
 
@@ -58,10 +59,22 @@ const CLOSE_DRAIN_POLL: Duration = Duration::from_millis(4);
 /// the decode, on every display at once.
 const REVEAL_DEADLINE: Duration = Duration::from_millis(2000);
 
-/// Whether the screen recording pane has already been opened in this process.
+/// Whether the screen recording pane has already been opened since the last
+/// time the preflight was happy.
 ///
-/// Impatient repeat triggers would otherwise steal focus once per press.
+/// Impatient repeat triggers would otherwise steal focus once per press. Reset
+/// by `ensure_permission` as soon as the permission reads `Granted`, so a user
+/// who fixes the permission and later loses it again is shown the pane a second
+/// time rather than being locked out of it for the life of the process.
 static SETTINGS_PANE_OPENED: AtomicBool = AtomicBool::new(false);
+
+/// What the user is told when the screen cannot be captured.
+///
+/// Every wording here is the same one because the cause almost always is: macOS
+/// decides what a process may capture when the process starts, so the common
+/// first run is a permission granted without relaunching, a preflight that now
+/// answers `Granted` and a ScreenCaptureKit call that keeps failing anyway.
+const PERMISSION_MESSAGE: &str = "Snapdeck could not capture the screen. Open System Settings > Privacy & Security > Screen Recording, enable Snapdeck, then quit and reopen the app.";
 
 pub fn overlay_label(display_id: u32) -> String {
     format!("{OVERLAY_LABEL_PREFIX}{display_id}")
@@ -131,9 +144,12 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
             run_capture(&app, &mode, &mut guard);
         }));
         if let Err(payload) = outcome {
-            eprintln!(
-                "snapdeck: the capture worker panicked: {}",
-                panic_text(payload.as_ref())
+            report_failure(
+                &app,
+                &format!(
+                    "Snapdeck could not capture the screen: the capture stopped unexpectedly ({}). Try the shortcut again.",
+                    panic_text(payload.as_ref())
+                ),
             );
             let handle = app.clone();
             // Any overlay that did get built is unusable now: it is showing
@@ -158,12 +174,15 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
 /// closure, and it has to stay claimed through an unwind, which is why the
 /// caller keeps the `Option` in a frame that does not unwind with this one.
 fn run_capture(app: &AppHandle, mode: &str, guard: &mut Option<CaptureGuard>) {
-    if !ensure_permission() {
+    if !ensure_permission(app) {
         return;
     }
     if !wait_for_overlays_to_close(app) {
-        eprintln!(
-            "snapdeck: previous overlays did not close within {CLOSE_DRAIN_TIMEOUT:?}, capture aborted"
+        report_failure(
+            app,
+            &format!(
+                "Snapdeck could not capture the screen: the previous overlay did not close within {CLOSE_DRAIN_TIMEOUT:?}. Try the shortcut again."
+            ),
         );
         return;
     }
@@ -171,7 +190,10 @@ fn run_capture(app: &AppHandle, mode: &str, guard: &mut Option<CaptureGuard>) {
     let frozen = match capture_frozen_frames(app) {
         Ok(frozen) => frozen,
         Err(err) => {
-            eprintln!("snapdeck: capture failed: {err}");
+            // The likeliest cause by far, and the only one the user can act on,
+            // is a permission this process cannot see yet, which is why the
+            // instructions come first and the platform's own words second.
+            report_failure(app, &format!("{PERMISSION_MESSAGE} (Details: {err})"));
             return;
         }
     };
@@ -263,23 +285,33 @@ fn is_frozen_frame_filename(name: &str) -> bool {
 /// Whether capture may proceed, prompting or pointing at System Settings when
 /// it may not.
 ///
-/// `eprintln!` reaches nobody here: the app is `LSUIElement` with no windows
-/// declared, so it has neither a console the user reads nor a window to raise.
-/// The first call prompts; afterwards macOS stays silent, which is why a
-/// still-denied permission opens the settings pane instead.
+/// The app is `LSUIElement` with no windows declared, so it has neither a
+/// console the user reads nor a window to raise: a refusal has to reach them
+/// through `report_failure`. The first call prompts; afterwards macOS stays
+/// silent, which is why a still-denied permission opens the settings pane as
+/// well.
 ///
 /// A granted permission is a necessary condition, never a sufficient one: a
 /// running process cannot see a grant made after it started, so every
 /// ScreenCaptureKit call can still fail until the app is relaunched. Capture
-/// errors are therefore reported verbatim rather than reinterpreted here.
-fn ensure_permission() -> bool {
+/// errors are therefore reported by their caller rather than reinterpreted here.
+fn ensure_permission(app: &AppHandle) -> bool {
     if screen_capture_permission().is_granted() {
+        // The pane has done its job. Arming it again costs nothing while the
+        // permission holds, and it is the only thing that keeps a permission
+        // revoked later in the session from being a silent dead end.
+        SETTINGS_PANE_OPENED.store(false, Ordering::Relaxed);
         return true;
     }
     if request_screen_capture_permission().is_granted() {
+        SETTINGS_PANE_OPENED.store(false, Ordering::Relaxed);
         return true;
     }
     open_screen_recording_settings();
+    // Unconditionally, unlike the pane: the pane steals focus, a notification
+    // does not, so the answer to an impatient second press is still an answer
+    // rather than nothing at all.
+    report_failure(app, PERMISSION_MESSAGE);
     false
 }
 
@@ -387,9 +419,12 @@ fn build_overlay_windows(
                 windows.push(window);
             }
             Err(err) => {
-                eprintln!(
-                    "snapdeck: failed to create the overlay for display {}: {err}",
-                    display.id
+                report_failure(
+                    app,
+                    &format!(
+                        "Snapdeck could not cover display {} with the selection overlay, so the capture was cancelled. Try the shortcut again. (Details: {err})",
+                        display.id
+                    ),
                 );
                 failed = true;
             }
@@ -434,20 +469,47 @@ fn schedule_reveal_deadline(app: &AppHandle, windows: Vec<WebviewWindow>) {
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(REVEAL_DEADLINE);
-        let _ = app.run_on_main_thread(move || close_hidden_overlays(&windows));
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || close_hidden_overlays(&handle, &windows));
     });
 }
 
 /// Main thread only. A window that is already gone reports an error rather than
 /// a visibility, which is the outcome this is trying to reach anyway.
-fn close_hidden_overlays(windows: &[WebviewWindow]) {
+///
+/// Takes the frozen frames with it when nothing from this batch is left on
+/// screen. This is the one leak the project has actually watched happen:
+/// closing the windows and stopping there leaves a full-resolution, lossless
+/// copy of every display in `~/Library/Caches` with no overlay above it and
+/// nobody coming back for it. Guarded exactly the way `commands::close_overlays`
+/// is, because the capture slot was released when these windows were built and
+/// a newer capture may already be writing the frames this would delete.
+fn close_hidden_overlays(app: &AppHandle, windows: &[WebviewWindow]) {
+    let mut all_gone = true;
     for window in windows {
-        if matches!(window.is_visible(), Ok(false)) {
-            eprintln!(
-                "snapdeck: {} never showed its frozen frame within {REVEAL_DEADLINE:?}, closing it",
-                window.label()
-            );
-            let _ = window.close();
+        match window.is_visible() {
+            Ok(false) => {
+                report_failure(
+                    app,
+                    &format!(
+                        "Snapdeck closed the overlay on {} because it never showed the frozen screen within {REVEAL_DEADLINE:?}. Try the shortcut again.",
+                        window.label()
+                    ),
+                );
+                let _ = window.close();
+            }
+            // Showing its frozen frame is the whole contract, and this one met
+            // it: the user is looking at it, and the file behind it is still
+            // the magnifier's source.
+            Ok(true) => all_gone = false,
+            // Already destroyed, by Escape, by a capture, or by its own error
+            // handler.
+            Err(_) => {}
+        }
+    }
+    if all_gone {
+        if let Some(_guard) = app.state::<AppState>().begin_capture() {
+            discard_cached_frozen_frames(app);
         }
     }
 }

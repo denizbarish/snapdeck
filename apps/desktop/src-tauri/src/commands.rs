@@ -15,7 +15,7 @@ use snapdeck_capture::{
         request_screen_capture_permission, screen_capture_permission, PermissionState,
         SETTINGS_DEEP_LINK,
     },
-    CaptureTarget, Rect, ScreenCapturer, WindowInfo,
+    CaptureTarget, Frame, Rect, ScreenCapturer, WindowInfo,
 };
 use tauri::{image::Image, AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -23,6 +23,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::{
     output::{render_filename, save_png_without_overwriting, OffsetDateTimeParts, PngCompression},
     overlay,
+    report::report_failure,
     state::AppState,
 };
 
@@ -81,7 +82,10 @@ pub struct PermissionReport {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureResult {
-    pub path: String,
+    /// Absolute path of the saved PNG, or `null` when the file could not be
+    /// written and the capture only reached the clipboard. The failure is
+    /// reported to the user either way; see `capture_and_write`.
+    pub path: Option<String>,
     /// Pixels, not points: the region is captured at the display's own
     /// density, so on Retina this is twice the number of points selected.
     pub width: u32,
@@ -229,16 +233,20 @@ pub async fn capture_region(
     display_id: u32,
     rect: Rect,
 ) -> Result<CaptureResult, String> {
+    let handle = app.clone();
     let result =
         tauri::async_runtime::spawn_blocking(move || capture_selection(&app, display_id, rect))
             .await
             .map_err(|err| format!("the capture task did not finish: {err}"))?;
     // The overlay that asked is deliberately closed before the capture runs, so
     // an `Err` returned from here has no webview left to reach and no console
-    // to land in. This is the only trace it can leave, and it is what the rest
-    // of the capture path already does with a failure nobody is waiting on.
+    // to land in. The notification and the log file are the only surfaces left,
+    // which is what the rest of the capture path now uses too.
     if let Err(err) = &result {
-        eprintln!("snapdeck: the region capture failed: {err}");
+        report_failure(
+            &handle,
+            &format!("Snapdeck could not save the capture: {err}"),
+        );
     }
     result
 }
@@ -323,6 +331,13 @@ fn capture_and_write(
         frame.width,
         frame.height,
     );
+    // The clipboard first, and both outcomes collected rather than the first
+    // failure returned. A full disk, a read-only pictures directory or a
+    // permission problem takes the file away, and a `?` here used to take the
+    // clipboard with it: the capture the user had already framed and confirmed
+    // was thrown away over a directory, when the image was in hand and one
+    // paste away from being useful. Only losing both is a failed capture.
+    let clipboard = copy_to_clipboard(app, &frame);
     // `Default`, not the `Fast` the backdrop uses. The backdrop is a throwaway
     // the user is blocked on; this is a file they keep, where Task 6 measured
     // `Fast` + `NoFilter` at 29.9 MB against 2.3 MB here, and nobody is
@@ -331,18 +346,53 @@ fn capture_and_write(
     // The saved path comes back from the write rather than being built here,
     // because a name already taken gets a suffix instead of the previous
     // capture's contents.
-    let path = save_png_without_overwriting(&frame, &directory, &name, PngCompression::Default)?;
+    let saved = save_png_without_overwriting(&frame, &directory, &name, PngCompression::Default);
 
-    let rgba = frame.to_rgba8().map_err(|err| err.to_string())?;
-    app.clipboard()
-        .write_image(&Image::new(&rgba, frame.width, frame.height))
-        .map_err(|err| format!("failed to copy the capture to the clipboard: {err}"))?;
-
-    Ok(CaptureResult {
-        path: path.to_string_lossy().into_owned(),
+    let result = |path: Option<String>| CaptureResult {
+        path,
         width: frame.width,
         height: frame.height,
-    })
+    };
+    match (saved, clipboard) {
+        (Ok(path), Ok(())) => Ok(result(Some(path.to_string_lossy().into_owned()))),
+        // Half a capture is still a capture, and the half that survived is the
+        // one the user can act on, so it is reported here rather than returned
+        // as a failure: an `Err` from this command means nothing was captured.
+        (Err(save_err), Ok(())) => {
+            report_failure(
+                app,
+                &format!(
+                    "Snapdeck could not save the capture to {} ({save_err}), so it is only on the clipboard. Paste it before you copy anything else.",
+                    directory.display()
+                ),
+            );
+            Ok(result(None))
+        }
+        (Ok(path), Err(clipboard_err)) => {
+            report_failure(
+                app,
+                &format!(
+                    "Snapdeck saved the capture to {} but could not put it on the clipboard ({clipboard_err}).",
+                    path.display()
+                ),
+            );
+            Ok(result(Some(path.to_string_lossy().into_owned())))
+        }
+        (Err(save_err), Err(clipboard_err)) => Err(format!("{save_err}, and {clipboard_err}")),
+    }
+}
+
+/// Puts the captured pixels on the clipboard.
+///
+/// Split out so that its failure is a value the caller can weigh against the
+/// file's, rather than an early return that decides for it.
+fn copy_to_clipboard(app: &AppHandle, frame: &Frame) -> Result<(), String> {
+    let rgba = frame
+        .to_rgba8()
+        .map_err(|err| format!("failed to convert the capture for the clipboard: {err}"))?;
+    app.clipboard()
+        .write_image(&Image::new(&rgba, frame.width, frame.height))
+        .map_err(|err| format!("failed to copy the capture to the clipboard: {err}"))
 }
 
 /// Takes the overlays off the screen and waits until they are actually gone.

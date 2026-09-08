@@ -1,8 +1,13 @@
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle,
 };
+
+// No settings item. There is no settings window to open: the application
+// declares no windows and builds none at runtime, so the item could only ever
+// look up a "main" window that does not exist and do nothing. The settings
+// surface arrives with Plan 4, and the menu item arrives with it.
 
 /// Single entry point for every capture request, from the tray or a shortcut.
 /// Returns immediately: `open_overlays` moves the capture to a worker thread
@@ -16,12 +21,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let region = MenuItemBuilder::with_id("capture_region", "Capture Region").build(app)?;
     let window = MenuItemBuilder::with_id("capture_window", "Capture Window").build(app)?;
     let display = MenuItemBuilder::with_id("capture_display", "Capture Full Screen").build(app)?;
-    let settings = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Snapdeck").build(app)?;
     let menu = MenuBuilder::new(app)
         .items(&[&region, &window, &display])
         .separator()
-        .items(&[&settings, &quit])
+        .items(&[&quit])
         .build()?;
 
     TrayIconBuilder::with_id("main")
@@ -35,12 +39,6 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "capture_region" => request_capture(app, "region"),
             "capture_window" => request_capture(app, "window"),
             "capture_display" => request_capture(app, "display"),
-            "settings" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
             "quit" => app.exit(0),
             _ => {}
         })

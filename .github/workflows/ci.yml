@@ -17,6 +17,21 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Everything above compiles the library without `custom-protocol`, which
+      # is the feature that embeds the frontend and is therefore the only
+      # configuration that ever reads `dist/`, the CSP or the asset scope. It is
+      # the one a user runs, so it is built here: `tauri.conf.json` is otherwise
+      # untested on every commit.
+      # No `version:` input: it must not disagree with packageManager in
+      # package.json, and the action reads that field on its own.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo check -p snapdeck --features tauri/custom-protocol
 
   web:
     runs-on: ubuntu-latest
@@ -32,3 +47,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm test
+      # The bundle the app actually loads. Without it the Vite build, the two
+      # HTML entry points and the TypeScript in them are unexercised on every
+      # commit that does not happen to be built by hand.
+      - run: pnpm build
