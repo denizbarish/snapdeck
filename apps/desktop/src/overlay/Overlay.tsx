@@ -38,6 +38,9 @@ const READOUT_OFFSET = 24
 const NUDGE_STEP = 1
 const NUDGE_STEP_COARSE = 10
 
+/** `PointerEvent.button` for the left mouse button, the only one that draws. */
+const PRIMARY_BUTTON = 0
+
 /** Dimming applied to everything outside the selection. */
 const DIM = 'rgba(0,0,0,0.35)'
 
@@ -61,6 +64,12 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   const dragStart = useRef<Point | null>(null)
   /** The handle being dragged, or `null` when the pointer is not on one. */
   const activeHandle = useRef<Handle | null>(null)
+  /**
+   * The selection as it was when the active handle was pressed. Every move of
+   * that handle is measured from this rect and never from the live selection,
+   * which is what keeps the three edges the user is not dragging anchored.
+   */
+  const resizeOrigin = useRef<Rect | null>(null)
 
   // The window is exactly one display, so the viewport is the display and the
   // selection may go anywhere in it. Read every render rather than cached: a
@@ -69,9 +78,11 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   const bounds = { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }
 
   const confirm = (rect: Rect) => {
-    // Confirming a selection too small to be worth capturing is a cancel, not
-    // a capture of nothing.
-    if (!isUsable(rect)) return dismissAll()
+    // Enter on a selection too small to be worth capturing does nothing, and
+    // the overlay stays up so the user can fix it. Ending the whole session
+    // here would answer a deliberate keystroke with no file, no message and no
+    // screen to try again on. Only Escape and a real capture dismiss.
+    if (!isUsable(rect)) return
     // `capture_region` belongs to Task 10 and does not exist yet. Logging the
     // exact rect that would have been sent keeps the gap visible instead of
     // letting a finished selection disappear as if it had been saved. The
@@ -82,6 +93,17 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
       rect,
     )
     dismissAll()
+  }
+
+  /**
+   * Forgets whatever gesture was in progress. Every path that ends one goes
+   * through here, so no ref can outlive the press that set it and silently
+   * steer the next pointer event.
+   */
+  const endGesture = () => {
+    dragStart.current = null
+    activeHandle.current = null
+    resizeOrigin.current = null
   }
 
   // No dependency array on purpose. The handler closes over `selection` and
@@ -111,6 +133,23 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
+
+  // At most one selection exists across all displays. Each overlay keeps its
+  // own, but only the focused window receives Enter, so a rect left behind on
+  // another display would sit there promising a capture that its own keystroke
+  // cannot reach. Losing focus also ends any gesture: the pointer events that
+  // would have finished it are going somewhere else now.
+  //
+  // The refs and `setSelection` are stable, so the empty dependency array is
+  // honest here, unlike the keyboard effect above.
+  useEffect(() => {
+    const onBlur = () => {
+      endGesture()
+      setSelection(null)
+    }
+    window.addEventListener('blur', onBlur)
+    return () => window.removeEventListener('blur', onBlur)
+  }, [])
 
   // Showing the window before the backdrop is ready would put a fully
   // transparent, click-swallowing rectangle over a screen that is still moving,
@@ -153,16 +192,34 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   }
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // Only the left button draws. Any other one would throw the current
+    // selection away and open a drag that its own release never ends, because
+    // a right-click on the backdrop is not an instruction to select anything.
+    if (event.button !== PRIMARY_BUTTON) return
     dragStart.current = { x: event.clientX, y: event.clientY }
     setSelection({ x: event.clientX, y: event.clientY, width: 0, height: 0 })
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // No button held means this move is not part of a gesture. If one is still
+    // recorded its release was lost, which happens when the pointer comes up
+    // outside the window, and acting on it would resize the selection under a
+    // pointer that is only passing over.
+    if (event.buttons === 0) {
+      endGesture()
+      return
+    }
     const pointer = { x: event.clientX, y: event.clientY }
     // A handle drag is checked first: it starts without touching `dragStart`,
     // so the two are never both live.
-    if (activeHandle.current && selection) {
-      setSelection(resizeRect(selection, activeHandle.current, pointer, bounds))
+    if (activeHandle.current && resizeOrigin.current) {
+      // Measured from the rect the handle was pressed on, never from the live
+      // selection. Feeding the current rect back in destroys the anchor the
+      // moment the pointer crosses the opposite edge: the edge that was
+      // anchored becomes wherever the pointer was one event ago, so the
+      // selection stops growing and starts sliding, as wide as the distance
+      // between two move events.
+      setSelection(resizeRect(resizeOrigin.current, activeHandle.current, pointer, bounds))
       return
     }
     if (!dragStart.current) return
@@ -175,8 +232,13 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   // make all three dead UI, because the overlay would already be gone by the
   // time the user reached for them.
   const onPointerUp = () => {
-    activeHandle.current = null
-    dragStart.current = null
+    endGesture()
+    // A press with no drag, or a resize collapsed onto itself, leaves a rect
+    // with no area. Nothing confirms it any more, so it would stay on screen
+    // as a one-pixel outline with all eight handles stacked into a single
+    // white square and a readout saying `0 × 0`. Dropping it restores the
+    // plain dim sheet, which is what a stray click should leave behind.
+    setSelection((current) => (current && isUsable(current) ? current : null))
   }
 
   return (
@@ -245,7 +307,10 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
                 // fresh drag, which throws away the selection being resized.
                 onPointerDown={(event) => {
                   event.stopPropagation()
+                  if (event.button !== PRIMARY_BUTTON) return
                   activeHandle.current = handle
+                  // The anchor for this entire resize, frozen at the press.
+                  resizeOrigin.current = selection
                 }}
                 style={{
                   position: 'absolute',

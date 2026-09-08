@@ -60,6 +60,30 @@ describe('resizeRect', () => {
     })
   })
 
+  it('keeps growing once the pointer has crossed the opposite edge', () => {
+    // Two steps, not one. The caller resizes from the rect the handle was
+    // pressed on, so the west edge stays at 100 for every event and the width
+    // tracks how far past it the pointer has walked. A single-step assertion
+    // cannot tell that apart from a rect that has stopped growing and started
+    // sliding along with the pointer.
+    const origin = { x: 100, y: 100, width: 100, height: 100 }
+    expect(resizeRect(origin, 'e', { x: 80, y: 150 }, bounds)).toEqual({
+      x: 80, y: 100, width: 20, height: 100,
+    })
+    expect(resizeRect(origin, 'e', { x: 70, y: 150 }, bounds)).toEqual({
+      x: 70, y: 100, width: 30, height: 100,
+    })
+  })
+
+  it('moves both edges of a corner handle', () => {
+    // The only case that pins the `handle.includes` dispatch: `nw` has to move
+    // the west edge and the north edge, and leave the other two alone.
+    const rect = { x: 100, y: 100, width: 100, height: 100 }
+    expect(resizeRect(rect, 'nw', { x: 60, y: 40 }, bounds)).toEqual({
+      x: 60, y: 40, width: 140, height: 160,
+    })
+  })
+
   it('clamps a resize that leaves the display', () => {
     const rect = { x: 900, y: 100, width: 50, height: 50 }
     expect(resizeRect(rect, 'e', { x: 1200, y: 150 }, bounds)).toEqual({
