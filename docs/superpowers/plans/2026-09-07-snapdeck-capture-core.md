@@ -983,6 +983,12 @@ bu API sürüm kapısı altında değildir.
 
 - [ ] **Step 1: Başarısız testi yaz**
 
+> **Aşılmış kod.** Aşağıdaki blok görevin başlangıç noktasıdır, sevk edilen hali değil. Bu görevin
+> sonundaki "Task 3 incelemesinden gelen ek kurallar" bölümü onu geçersiz kılar: ilk eşleşen ekran
+> yerine en büyük kesişim, `as u32` kesmesi yerine yuvarlama ve 1 piksel tabanı, ekran başlangıcında
+> duran anlamsız entegrasyon testi yerine saf yardımcı birim testleri. Gerçek kod
+> `crates/capture/src/macos/mod.rs` içindedir.
+
 `crates/capture/tests/macos_capture.rs`:
 
 ```rust
@@ -1028,6 +1034,12 @@ Run: `cargo test -p snapdeck-capture --test macos_capture`
 Expected: FAIL, `could not find macos in snapdeck_capture`.
 
 - [ ] **Step 3: Implementasyonu yaz**
+
+> **Aşılmış kod.** Aşağıdaki blok görevin başlangıç noktasıdır, sevk edilen hali değil. Bu görevin
+> sonundaki "Task 3 incelemesinden gelen ek kurallar" bölümü onu geçersiz kılar: ilk eşleşen ekran
+> yerine en büyük kesişim, `as u32` kesmesi yerine yuvarlama ve 1 piksel tabanı, ekran başlangıcında
+> duran anlamsız entegrasyon testi yerine saf yardımcı birim testleri. Gerçek kod
+> `crates/capture/src/macos/mod.rs` içindedir.
 
 Önce `crates/capture/src/lib.rs` içindeki Task 2'den kalan yer tutucu yorumu gerçek bildirimle değiştir:
 
