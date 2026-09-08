@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/OWNER/snapdeck"
+repository = "https://github.com/denizbarish/snapdeck"
 
 [workspace.dependencies]
 # `macos_14_0` gates the whole `screenshot_manager` module, which holds
