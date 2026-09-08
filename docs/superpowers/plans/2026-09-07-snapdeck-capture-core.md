@@ -1231,6 +1231,28 @@ Not: `SCRunningApplication::application_name()` `String` döner, `Option<String>
 
 Not: `crates/capture/build.rs`, Swift çalışma zamanı kütüphaneleri için rpath ekler. Onsuz test binary'leri yüklenmeden çöker.
 
+Task 3 incelemesinden gelen ek kurallar:
+
+- **Hedef ekran seçimi en büyük kesişimle yapılır**, ilk eşleşenle değil. `content.displays()` sırası
+  belgelenmemiştir; ilk eşleşme, iki ekrana değen bir bölgede hangi yarının kazanacağını rastlantıya bırakır.
+  Aynı kural pencerenin ölçek katsayısını bulurken de geçerlidir: 1x ekran listede önce gelirse 2x ekrandaki
+  pencere 1x yakalanır.
+- **Bölge tek bir ekranın içinde olmak zorundadır.** Overlay her monitör için ayrı pencere açtığı ve seçimi o
+  pencerenin sınırlarına kırptığı için bu, arayüzün zaten sağladığı bir sözleşmedir. Seçilen ekranın dışına
+  taşan bölge sessizce kırpılmaz, açık hata döner: ScreenCaptureKit `sourceRect`'i kırpar ama çıktıyı yine
+  istenen tam boyuta yerleştirir, sonuç kısmen siyah ve yanlış ölçekli bir "başarılı" karedir.
+- **Koordinat aritmetiği saf bir yardımcıya çıkarılır** (`source_rect_for(region, display_bounds) -> CGRect`)
+  ve birim testleri yazılır: negatif başlangıçlı ikincil ekran (`x: -1920`), `y: -1080` ve ekran başlangıcı
+  olmayan bölge. Donanımın erişemediği dal budur; entegrasyon testi birincil ekranın başlangıcında çalıştığı
+  için `rect.x - bounds.x` her zaman 0 çıkar ve aritmetiği hiç sınamaz.
+- **`map_err` yalnızca variant'a bakar.** İngilizce alt dizi kontrolü kaldırılır: hem yanıltıcıdır hem de
+  bu dosyanın var oluş sebebine aykırıdır. Dört dal için birim testi yazılır (izin reddi, kullanıcı reddi
+  kodu, paylaşılabilir içerik yok, ve `Platform`'a düşen herhangi bir variant).
+- **Piksel boyutları yuvarlanır, kırpılmaz**, ve eksen başına en az 1 piksel istenir. `as u32` kesmesi
+  kesirli seçimde eksen başına bir piksel kaybettirir ve nokta altı bir bölgede 0x0 yakalama ister.
+- `ScreenCapturer` metotları çağıran iş parçacığını platform gidiş dönüşü boyunca bloklar. Task 5 bunları
+  Tauri ana iş parçacığında çağırmamalıdır; trait'in doküman yorumuna yazılır.
+
 - [ ] **Step 4: Testleri çalıştır**
 
 Run: `cargo test -p snapdeck-capture`
