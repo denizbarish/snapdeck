@@ -27,7 +27,10 @@ pub fn run() {
                 .build(),
         )
         .manage(AppState::new())
-        .invoke_handler(tauri::generate_handler![commands::close_overlays])
+        .invoke_handler(tauri::generate_handler![
+            commands::close_overlays,
+            commands::list_windows
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
             tray::build_tray(&handle)?;

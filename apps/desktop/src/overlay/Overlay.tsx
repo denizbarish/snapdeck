@@ -12,9 +12,15 @@ import {
   type Point,
   type Rect,
 } from './selection'
+import { toLocalRect, windowUnderPoint, type WindowBounds } from './snap'
 
 export interface OverlayProps {
   displayId: number
+  /**
+   * `'window'` picks whole windows by hovering them; anything else drags a
+   * free region. Written by Rust into the overlay URL, so the two modes never
+   * change under a live overlay.
+   */
   mode: string
   scale: number
   /**
@@ -44,6 +50,9 @@ const PRIMARY_BUTTON = 0
 /** Dimming applied to everything outside the selection. */
 const DIM = 'rgba(0,0,0,0.35)'
 
+/** The mode that snaps to whole windows instead of dragging a region. */
+const WINDOW_MODE = 'window'
+
 /**
  * The overlay for one display: a frozen backdrop with a selection drawn on it.
  *
@@ -55,11 +64,23 @@ const DIM = 'rgba(0,0,0,0.35)'
  * deadline instead: it built the window, it can see whether it ever became
  * visible, and it closes the ones that did not.
  *
- * Everything the selection is allowed to do lives in `./selection`, which is
- * pure and unit tested. What is left here is event plumbing and paint.
+ * Two ways to end up with a selection, and only one is live at a time. Region
+ * mode drags one out and then lets it be adjusted; window mode snaps it to
+ * whatever window is under the pointer and takes a click. The branches are
+ * kept apart at the top of each handler rather than blended, because the two
+ * gestures disagree about what a press and a move mean.
+ *
+ * Everything the selection is allowed to do lives in `./selection` and
+ * `./snap`, both pure and unit tested. What is left here is event plumbing and
+ * paint.
  */
-export function Overlay({ displayId, scale, framePath }: OverlayProps) {
+export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
+  const snapsToWindows = mode === WINDOW_MODE
   const [selection, setSelection] = useState<Rect | null>(null)
+  /** Candidate windows, in global points and in the order `list_windows` gave. */
+  const [windows, setWindows] = useState<WindowBounds[]>([])
+  /** Where this display sits in the global point space. */
+  const [displayOrigin, setDisplayOrigin] = useState<Point>({ x: 0, y: 0 })
   /** Where the current drag began, or `null` when no drag is in progress. */
   const dragStart = useRef<Point | null>(null)
   /** The handle being dragged, or `null` when the pointer is not on one. */
@@ -106,6 +127,28 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
     resizeOrigin.current = null
   }
 
+  // Fetched once, when a window-mode overlay mounts, and never again. The
+  // screen is frozen for the whole life of this overlay, so the windows cannot
+  // move or restack underneath it; asking again on every pointer move would
+  // pay two ScreenCaptureKit round trips per mouse movement to be told the
+  // same thing. The list arrives after the first paint, so hovering during
+  // that window highlights nothing, which is the same as hovering empty
+  // desktop and needs no separate state.
+  useEffect(() => {
+    if (!snapsToWindows) return
+    invoke<{ windows: WindowBounds[]; origin: Point }>('list_windows', { displayId })
+      .then((result) => {
+        setWindows(result.windows)
+        setDisplayOrigin(result.origin)
+      })
+      // Not fatal: the overlay stays up with nothing to snap to, and Escape
+      // still works. Closing it would answer a failed enumeration by throwing
+      // away the frozen frame the user is looking at.
+      .catch((error: unknown) => {
+        console.error(`overlay: could not list the windows on display ${displayId}`, error)
+      })
+  }, [displayId, snapsToWindows])
+
   // No dependency array on purpose. The handler closes over `selection` and
   // `bounds`, both of which change on almost every render, so a memoised
   // listener would nudge a stale rect. Re-subscribing costs one
@@ -116,6 +159,11 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
       if (event.key === 'Escape') return dismissAll()
       if (!selection) return
       if (event.key === 'Enter') return confirm(selection)
+      // Nothing to nudge in window mode: the selection is a window's own
+      // rectangle, and the next pointer move recomputes it from scratch, so a
+      // moved rect would either be discarded or capture a region that is no
+      // longer the window it is drawn around.
+      if (snapsToWindows) return
       const step = event.shiftKey ? NUDGE_STEP_COARSE : NUDGE_STEP
       const deltas: Record<string, [number, number]> = {
         ArrowLeft: [-step, 0],
@@ -192,6 +240,11 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   }
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // A press starts nothing in window mode. The selection is whatever the
+    // pointer is over, so opening a drag here would replace a highlighted
+    // window with a zero-size rect at the press and then follow the pointer
+    // instead of the windows.
+    if (snapsToWindows) return
     // Only the left button draws. Any other one would throw the current
     // selection away and open a drag that its own release never ends, because
     // a right-click on the backdrop is not an instruction to select anything.
@@ -201,6 +254,21 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // Checked before the button guard below: hovering is the whole gesture in
+    // window mode, and it happens with no button held.
+    if (snapsToWindows) {
+      // The pointer is display-local and the windows are global, so one of
+      // them has to move into the other's space. The pointer goes global, one
+      // addition per event, instead of rebasing every window in the list.
+      const hit = windowUnderPoint(windows, {
+        x: event.clientX + displayOrigin.x,
+        y: event.clientY + displayOrigin.y,
+      })
+      // Clamped because a window may hang off this display, and the overlay
+      // may only offer what its own display can capture.
+      setSelection(hit ? clampRect(toLocalRect(hit.bounds, displayOrigin), bounds) : null)
+      return
+    }
     // No button held means this move is not part of a gesture. If one is still
     // recorded its release was lost, which happens when the pointer comes up
     // outside the window, and acting on it would resize the selection under a
@@ -226,12 +294,21 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
     setSelection(clampRect(normalizeRect(dragStart.current, pointer), bounds))
   }
 
-  // Releasing the pointer ends the drag or the resize and confirms nothing. The
-  // selection stays adjustable, so the eight handles and the arrow keys are
-  // reachable: Enter captures it, Escape cancels. Capturing on release would
-  // make all three dead UI, because the overlay would already be gone by the
-  // time the user reached for them.
-  const onPointerUp = () => {
+  // In region mode, releasing the pointer ends the drag or the resize and
+  // confirms nothing. The selection stays adjustable, so the eight handles and
+  // the arrow keys are reachable: Enter captures it, Escape cancels. Capturing
+  // on release would make all three dead UI, because the overlay would already
+  // be gone by the time the user reached for them. Window mode has none of
+  // those three to protect, which is why it does capture on release.
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // A click picks the highlighted window. On the release rather than the
+    // press, so the gesture is still a click the user can back out of by
+    // moving off the window, and so a stray press does not capture before the
+    // highlight has been read.
+    if (snapsToWindows) {
+      if (event.button === PRIMARY_BUTTON && selection) confirm(selection)
+      return
+    }
     endGesture()
     // A press with no drag, or a resize collapsed onto itself, leaves a rect
     // with no area. Nothing confirms it any more, so it would stay on screen
@@ -296,36 +373,46 @@ export function Overlay({ displayId, scale, framePath }: OverlayProps) {
               capture have to be visible; otherwise a finished selection just
               sits there with no clue how to commit it.
             */}
-            <span style={{ opacity: 0.7, marginLeft: 8 }}>Enter to capture · Esc to cancel</span>
+            <span style={{ opacity: 0.7, marginLeft: 8 }}>
+              {snapsToWindows ? 'Click to capture' : 'Enter to capture'} · Esc to cancel
+            </span>
           </div>
-          {HANDLES.map((handle) => {
-            const position = handlePosition(selection, handle)
-            return (
-              <div
-                key={handle}
-                // Without this the press also reaches the backdrop and starts a
-                // fresh drag, which throws away the selection being resized.
-                onPointerDown={(event) => {
-                  event.stopPropagation()
-                  if (event.button !== PRIMARY_BUTTON) return
-                  activeHandle.current = handle
-                  // The anchor for this entire resize, frozen at the press.
-                  resizeOrigin.current = selection
-                }}
-                style={{
-                  position: 'absolute',
-                  left: position.left - HANDLE_SIZE / 2,
-                  top: position.top - HANDLE_SIZE / 2,
-                  width: HANDLE_SIZE,
-                  height: HANDLE_SIZE,
-                  background: '#fff',
-                  border: '1px solid #000',
-                  boxSizing: 'border-box',
-                  cursor: `${handle}-resize`,
-                }}
-              />
-            )
-          })}
+          {/*
+            No handles in window mode. The rectangle belongs to a window rather
+            than to the user, and the next pointer move replaces it, so a
+            handle could never be dragged anywhere; all it would do is sit on
+            the outline swallowing the click that picks the window.
+          */}
+          {!snapsToWindows &&
+            HANDLES.map((handle) => {
+              const position = handlePosition(selection, handle)
+              return (
+                <div
+                  key={handle}
+                  // Without this the press also reaches the backdrop and starts
+                  // a fresh drag, which throws away the selection being
+                  // resized.
+                  onPointerDown={(event) => {
+                    event.stopPropagation()
+                    if (event.button !== PRIMARY_BUTTON) return
+                    activeHandle.current = handle
+                    // The anchor for this entire resize, frozen at the press.
+                    resizeOrigin.current = selection
+                  }}
+                  style={{
+                    position: 'absolute',
+                    left: position.left - HANDLE_SIZE / 2,
+                    top: position.top - HANDLE_SIZE / 2,
+                    width: HANDLE_SIZE,
+                    height: HANDLE_SIZE,
+                    background: '#fff',
+                    border: '1px solid #000',
+                    boxSizing: 'border-box',
+                    cursor: `${handle}-resize`,
+                  }}
+                />
+              )
+            })}
         </>
       )}
     </div>

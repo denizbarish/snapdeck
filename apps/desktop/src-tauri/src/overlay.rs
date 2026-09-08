@@ -516,6 +516,54 @@ fn raise_above_menu_bar(window: &WebviewWindow) {
 #[cfg(not(target_os = "macos"))]
 fn raise_above_menu_bar(_window: &WebviewWindow) {}
 
+/// Window-server ids of this application's overlay windows.
+///
+/// Window mode hovers whatever sits under the pointer, and the overlays are on
+/// top of everything and cover their whole display, so ScreenCaptureKit lists
+/// them like any other window. Left in, every hover would land on an overlay
+/// and every pick would be the overlay itself.
+///
+/// Identified by id rather than by level. The frontend also drops everything
+/// above the normal layer, which happens to exclude these too because
+/// `raise_above_menu_bar` puts them at 25, but that is a statement about where
+/// the window is stacked, not about whose it is: lower the level and window
+/// mode would silently start picking the overlay. `NSWindow`'s `windowNumber`
+/// is the window server's own id for the window, which is exactly what
+/// `SCWindow.windowID` reports, so the two lists name the same windows.
+///
+/// Main thread only, for the same reason as `raise_above_menu_bar`. Returns
+/// nothing rather than panicking when called from anywhere else, because there
+/// is no answer to give and this runs inside an AppKit callback.
+#[cfg(target_os = "macos")]
+pub fn overlay_window_ids(app: &AppHandle) -> Vec<u32> {
+    let Some(_mtm) = MainThreadMarker::new() else {
+        eprintln!("snapdeck: the overlay window ids were requested off the main thread");
+        return Vec::new();
+    };
+    app.webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(OVERLAY_LABEL_PREFIX))
+        .filter_map(|(_, window)| window.ns_window().ok())
+        .filter_map(|handle| {
+            // SAFETY: `ns_window` hands back this window's live `NSWindow`,
+            // which outlives the borrow, and `_mtm` proves this is the thread
+            // AppKit requires for every `NSWindow` call.
+            let ns_window: &NSWindow = unsafe { &*handle.cast::<NSWindow>() };
+            // A window that the server has not assigned yet carries a number
+            // of 0 or a negative one, neither of which is an id that could
+            // match anything ScreenCaptureKit reports.
+            u32::try_from(ns_window.windowNumber())
+                .ok()
+                .filter(|id| *id != 0)
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn overlay_window_ids(_app: &AppHandle) -> Vec<u32> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
