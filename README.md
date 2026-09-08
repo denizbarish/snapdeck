@@ -26,3 +26,12 @@ System Settings > Privacy & Security > Screen & System Audio Recording, then try
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Known limitations
+
+- **Fullscreen Spaces.** Capturing while another app owns a fullscreen Space does not work yet. The
+  overlay window is created with the frozen frame intact, but macOS keeps it on a normal Space, so
+  nothing appears over the fullscreen app. Setting `canJoinAllSpaces | fullScreenAuxiliary`, raising the
+  window level, ordering the window in on the same run loop turn and activating the app were all tried
+  and none of them place the overlay above another app's fullscreen Space.
+
