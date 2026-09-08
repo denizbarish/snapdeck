@@ -2646,6 +2646,38 @@ git add apps/desktop/src/overlay
 git commit -m "feat(overlay): snap selection to the window under the cursor"
 ```
 
+### Task 8 incelemesinden gelen ek kurallar
+
+**1. Katman filtresi tek yönlü olamaz.** `w.layer <= 0`, 0'ın üstündekileri eler ama altındaki her şeyi
+kabul eder; macOS duvar kağıdını, masaüstü ikon katmanını ve arka durdurucu pencereyi oradadır ve
+hepsi tüm ekranı kaplar. Bu makinede ölçüldü: `layer=-2147483603 Finder 1710x1112`,
+`layer=-2147483624 Dock 1710x1112`, `layer=-2147483626 Window Server 1710x1112`. `SCShareableContent::get()`
+masaüstü pencerelerini dışlayan varyant değildir, yani hepsi listeye gelir. Sonuç: boş masaüstüne gelince
+hiçbir şey yerine tüm ekran vurgulanır ve tıklamak tam ekran yakalar. Filtre tam eşleşme olur
+(`w.layer === NORMAL_LAYER`) ve testine tam ekran kaplayan negatif katmanlı bir pencere eklenir.
+
+**2. Pencere listesi z-sırasına göre sıralanır.** `SCShareableContent.windows()` hiçbir sıra garantisi
+vermez ve ölçümle üst üste binen iki pencereyi ters sırada verdiği kanıtlandı; `windowUnderPoint`'in
+"ilk eşleşen kazanır, liste önden arkaya" sözleşmesi bu yüzden ihlal ediliyor. Kullanıcı üst üste binen
+pencerelerde arkadakini seçiyor ve donmuş karenin üstüne çizilen çerçeve altındaki resimle çelişiyor.
+`CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)` önden arkaya sıralıdır;
+liste bu sıradaki indekse göre sıralanır, orada bulunmayan id'ler sona konur. `core-graphics` zaten
+workspace bağımlılığıdır, bu bir sıralama anahtarıdır, yeni bir bağlama katmanı değil. Yeri
+`crates/capture`, diğer platform kodunun yanı.
+
+**3. Overlay pencere kimlikleri kurulum anında saklanır.** Şu an komut, ana iş parçacığına 500 ms zaman
+aşımlı bir sıçrama yapıp `NSWindow.windowNumber` okuyor; çok ekranlı kurulumda pencere kurulumu ana iş
+parçacığını meşgul ettiği için bu zaman aşımına uğrayabilir, komut tamamen başarısız olur ve pencere modu
+hiçbir şey vurgulamadan sessizce ölür. Kimlikler `build_overlay_windows` içinde, zaten ana iş
+parçacığındayken okunup `AppState`'e yazılır; komut yalnızca okur. Sıçrama ve zaman aşımı tamamen kalkar.
+
+**4. Süzme mantığı test edilebilir saf bir fonksiyona çıkarılır.** `(Vec<WindowInfo>, &[u32]) -> Vec<WindowInfo>`
+imzasıyla; `AppHandle` gerektiren kısımlar test dışı kalır. `snap.test.ts` tarafında da negatif katmanlı
+tam ekran penceresi ve negatif başlangıçlı ekran için `toLocalRect` durumu eklenir.
+
+**5. Pencere modunda da ok tuşları sayfaya sızmaz.** Task 7'nin `preventDefault` garantisi pencere
+modunda erken dönüş yüzünden kayboldu; geri konur.
+
 ---
 
 ### Task 9: Büyüteç ve renk seçici
