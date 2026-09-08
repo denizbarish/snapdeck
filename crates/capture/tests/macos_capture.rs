@@ -2,11 +2,17 @@
 
 use snapdeck_capture::{macos::MacCapturer, CaptureTarget, Rect, ScreenCapturer};
 
+/// Smoke test for the whole ScreenCaptureKit round trip: it proves a region
+/// capture returns a self-consistent frame at the display's native
+/// resolution. It does not prove the coordinate arithmetic, which the
+/// `source_rect_for` unit tests in `macos::tests` cover with synthetic
+/// multi-display geometry and no permission grant.
+///
 /// Requires screen recording permission; run manually with
 /// `cargo test -p snapdeck-capture -- --ignored`.
 #[test]
 #[ignore]
-fn captures_a_region_at_native_resolution() {
+fn a_region_capture_round_trip_returns_a_consistent_frame() {
     let capturer = MacCapturer::new();
     let displays = capturer.displays().expect("displays");
     let primary = displays
@@ -14,9 +20,11 @@ fn captures_a_region_at_native_resolution() {
         .find(|d| d.is_primary)
         .expect("primary display");
 
+    // Offset from the display origin so the request is not the degenerate
+    // case where the local and global coordinates happen to coincide.
     let region = Rect {
-        x: primary.bounds.x,
-        y: primary.bounds.y,
+        x: primary.bounds.x + 40.0,
+        y: primary.bounds.y + 30.0,
         width: 100.0,
         height: 50.0,
     };
@@ -25,8 +33,8 @@ fn captures_a_region_at_native_resolution() {
         .expect("capture");
 
     let scale = primary.scale_factor;
-    assert_eq!(frame.width, (100.0 * scale) as u32);
-    assert_eq!(frame.height, (50.0 * scale) as u32);
+    assert_eq!(frame.width, (100.0 * scale).round() as u32);
+    assert_eq!(frame.height, (50.0 * scale).round() as u32);
     assert_eq!(frame.scale_factor, scale);
     assert_eq!(frame.data.len(), frame.stride * frame.height as usize);
 }
