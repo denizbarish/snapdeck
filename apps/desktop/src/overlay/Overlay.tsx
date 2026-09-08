@@ -116,6 +116,25 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
    * re-render the overlay for an event the user cannot see.
    */
   const pixels = useRef<{ data: Uint8ClampedArray; width: number } | null>(null)
+  /**
+   * Width of the decoded frame in device pixels, once there is one.
+   *
+   * The same number `pixels.current.width` holds, mirrored into state because
+   * the magnifier needs it while rendering and a ref read during render is not
+   * a subscription: the buffer arrives after the first paint, and nothing would
+   * re-render to pick it up. Only the width is duplicated, never the buffer.
+   */
+  const [frameWidth, setFrameWidth] = useState<number | null>(null)
+  /**
+   * Flipped once the backdrop has loaded and the window has been shown.
+   *
+   * The gate on the offscreen decode below. Rust gives the overlay a fixed
+   * deadline to become visible, and the decode is a second full read of the
+   * same multi-megabyte file plus a full-frame `getImageData` copy, all on the
+   * main thread. Started on mount it competes with the backdrop load inside
+   * that deadline for a feature nobody can use until the window is on screen.
+   */
+  const [revealed, setRevealed] = useState(false)
   /** Where the pointer is, in display points, or null before it has moved. */
   const [pointer, setPointer] = useState<Point | null>(null)
   /** Colour of the device pixel under the pointer, or null until one is read. */
@@ -138,6 +157,15 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   // go stale, and `getImageData` on a full display costs about 30 MB and a
   // full-frame copy that has no business running on every pointer move.
   //
+  // Deliberately not on mount. This is the second read and the second decode of
+  // the same file, and because it is a CORS-mode request while the backdrop is
+  // no-cors it cannot be served from the backdrop's response: two reads, two
+  // decodes and a 30 MB copy, all on the main thread. Rust times the reveal and
+  // closes an overlay that misses its deadline, so gating on `revealed` puts
+  // every byte of this after the window is already up. The magnifier appears a
+  // fraction of a second into an overlay that lives for seconds, which is the
+  // cheap half of the trade.
+  //
   // `crossOrigin` is the load-bearing line, and it was measured rather than
   // assumed. The frozen frame is served over Tauri's asset protocol from
   // `asset://localhost`, which is a different origin from the page, so a plain
@@ -148,9 +176,17 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   // fetch so that header is honoured, and the canvas stays readable. It relaxes
   // nothing: without it the response header is simply ignored.
   useEffect(() => {
+    if (!revealed) return
     const image = new Image()
     image.crossOrigin = 'anonymous'
+    // An image load cannot be cancelled, so the cleanup revokes the handlers
+    // instead and this flag makes that decision stick. `StrictMode` mounts the
+    // effect twice in development, and without it the first load would still be
+    // in flight when the second starts and would write its buffer over the
+    // newer one on arrival.
+    let abandoned = false
     image.onload = () => {
+      if (abandoned) return
       const canvas = document.createElement('canvas')
       canvas.width = image.naturalWidth
       canvas.height = image.naturalHeight
@@ -162,16 +198,23 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
       context.drawImage(image, 0, 0)
       const buffer = context.getImageData(0, 0, canvas.width, canvas.height)
       pixels.current = { data: buffer.data, width: canvas.width }
+      setFrameWidth(canvas.width)
     }
     // The backdrop's own `onError` already closes the overlay when the file is
     // missing, so this is here for the case the two loads disagree, which is
     // exactly the CORS one above. Without it a refused load leaves a magnifier
     // that silently never appears and nothing anywhere saying why.
     image.onerror = () => {
+      if (abandoned) return
       console.error(`overlay: could not decode ${frozenSrc} for the magnifier`)
     }
     image.src = frozenSrc
-  }, [frozenSrc])
+    return () => {
+      abandoned = true
+      image.onload = null
+      image.onerror = null
+    }
+  }, [frozenSrc, revealed])
 
   /**
    * Records where the pointer is and what colour is under it.
@@ -184,11 +227,17 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
     setPointer({ x, y })
     const frame = pixels.current
     // The pointer is in CSS points and the frozen frame is in device pixels.
-    // `scale` is the whole conversion, and Task 6 kept the frame unresampled
-    // and lossless precisely so the pixel it lands on is the pixel the user is
-    // pointing at rather than an average of the ones around it.
+    // The conversion is measured from the frame that was actually decoded, not
+    // taken from the `scale` in the URL: the frame is exactly `bounds.width`
+    // points wide by definition, so `frame.width / bounds.width` is the ratio
+    // by construction, where `scale` is only equal to it as long as the two
+    // agree. Task 6 kept the frame unresampled and lossless precisely so the
+    // pixel it lands on is the pixel the user is pointing at rather than an
+    // average of the ones around it, and sampling with a ratio that is merely
+    // probably right would give that away for a wrong colour with no symptom.
+    const ratio = frame ? frame.width / bounds.width : 0
     setHoverColor(
-      frame ? samplePixel(frame.data, frame.width, { x: x * scale, y: y * scale }) : null,
+      frame ? samplePixel(frame.data, frame.width, { x: x * ratio, y: y * ratio }) : null,
     )
   }
 
@@ -343,6 +392,10 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
       // `show` because AppKit ignores a focus request for a window that is not
       // on screen yet.
       .then(() => getCurrentWindow().setFocus())
+      // Only now is the magnifier's own decode allowed to start. Rust's reveal
+      // deadline has been met by this point, so the second read of the frame
+      // can no longer be the reason the window missed it.
+      .then(() => setRevealed(true))
       // A terminal handler rather than `void`. There is no floating-promise
       // lint in this repo to satisfy; the point is that the rejection is
       // handled instead of merely marked. A window that cannot show itself has
@@ -544,13 +597,17 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
         be read pixel for pixel, and anything drawn on top of it would be
         reporting a colour it was covering.
       */}
-      {pointer && hoverColor && (
+      {pointer && hoverColor && frameWidth !== null && (
         <Magnifier
           frozenSrc={frozenSrc}
           pointer={pointer}
           color={hoverColor}
           bounds={bounds}
-          scale={scale}
+          // The same ratio `trackPointer` sampled with, so the marker lands on
+          // the pixel whose colour is in the readout. Deriving one of them from
+          // the frame and the other from the URL's `scale` would let the two
+          // drift apart on any display where they disagree.
+          pixelsPerPoint={frameWidth / bounds.width}
         />
       )}
     </div>
@@ -562,7 +619,8 @@ type MagnifierProps = {
   pointer: Point
   color: Rgba
   bounds: Rect
-  scale: number
+  /** Device pixels of the decoded frame per display point. */
+  pixelsPerPoint: number
 }
 
 /**
@@ -575,7 +633,7 @@ type MagnifierProps = {
  * point is `MAGNIFIER_ZOOM` CSS pixels, and `background-position` slides the
  * source region under the clip.
  */
-function Magnifier({ frozenSrc, pointer, color, bounds, scale }: MagnifierProps) {
+function Magnifier({ frozenSrc, pointer, color, bounds, pixelsPerPoint }: MagnifierProps) {
   const source = magnifierSourceRect(pointer, MAGNIFIER_SOURCE, bounds)
   const { left, top } = magnifierPlacement(pointer, bounds)
   // The marked pixel is the one `samplePixel` was asked for, recomputed the
@@ -583,11 +641,11 @@ function Magnifier({ frozenSrc, pointer, color, bounds, scale }: MagnifierProps)
   // clamps, and there the pointer is not at the centre; a marker fixed to the
   // middle would then point at a pixel whose colour is not the one on show.
   const marker = {
-    left: (Math.floor(pointer.x * scale) / scale - source.x) * MAGNIFIER_ZOOM,
-    top: (Math.floor(pointer.y * scale) / scale - source.y) * MAGNIFIER_ZOOM,
+    left: (Math.floor(pointer.x * pixelsPerPoint) / pixelsPerPoint - source.x) * MAGNIFIER_ZOOM,
+    top: (Math.floor(pointer.y * pixelsPerPoint) / pixelsPerPoint - source.y) * MAGNIFIER_ZOOM,
     // One device pixel, which is what a sample is. On a Retina display that is
     // half of what one display point occupies in the zoomed view.
-    size: MAGNIFIER_ZOOM / scale,
+    size: MAGNIFIER_ZOOM / pixelsPerPoint,
   }
 
   return (

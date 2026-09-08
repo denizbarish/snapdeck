@@ -10,10 +10,14 @@
  * `samplePixel` reads the frozen frame, which is in **device pixels**: the
  * frame is an unresampled, lossless copy of the display, so one entry in the
  * buffer is one physical pixel of the screen. The overlay's pointer events
- * arrive in **display-local CSS points**. The caller multiplies by the
- * display's `scale` before asking, which is the only reason the colour under
- * the cursor is the colour of the pixel the user is pointing at rather than an
- * average of the ones near it.
+ * arrive in **display-local CSS points**. The caller multiplies by the ratio
+ * between the two before asking, which is the only reason the colour under the
+ * cursor is the colour of the pixel the user is pointing at rather than an
+ * average of the ones near it. That ratio is `frame.width / bounds.width`,
+ * measured from the frame that was actually decoded rather than taken from the
+ * display's advertised scale factor: the two agree today, but only the first
+ * one is exact by construction, and a disagreement would show up as nothing but
+ * a wrong colour.
  *
  * `magnifierSourceRect` takes no side in that: it is plain geometry and works
  * in whichever space its `point` and `bounds` are already in.
@@ -49,6 +53,17 @@ export function samplePixel(
  * display, so every pixel in it is opaque, and a fourth channel would only ever
  * read `FF` while making the string harder to paste anywhere that expects a
  * six-digit hex colour.
+ *
+ * Colour space: these digits are the display's **native** values, not sRGB. No
+ * conversion happens anywhere in the chain, which is the point. The frozen PNG
+ * is written untagged, the canvas it is decoded into is a default sRGB one, and
+ * an untagged source passes through unconverted, so the bytes that come back
+ * out of `getImageData` are the bytes ScreenCaptureKit put in. On a P3 panel
+ * that means the hex names a P3 colour while looking like any other hex, and
+ * pasting it into a tool that assumes sRGB will land somewhere slightly
+ * different. This matches what Digital Color Meter reports by default, so it is
+ * the number a user comparing the two would expect, but it is a choice and not
+ * a colour-managed answer.
  */
 export function toHex(color: Rgba): string {
   const channel = (value: number) => value.toString(16).padStart(2, '0').toUpperCase()
