@@ -2860,6 +2860,37 @@ git add apps/desktop/src/overlay
 git commit -m "feat(overlay): add magnifier with pixel color readout"
 ```
 
+### Task 9 incelemesinden gelen ek kurallar
+
+**1. Büyütecin çözme işi, pencerenin gösterilmesini geciktirmez.** Ekran dışı çözme şu an mount'ta
+başlıyor ve Task 6'nın Rust tarafındaki 2 sn'lik gösterme son tarihinin içine giriyor: aynı dosya bir kez
+arka plan için (no-cors), bir kez büyüteç için (CORS modunda, bu yüzden aynı yanıttan servis edilemiyor)
+okunup çözülüyor, üstüne 30 MB'lık `getImageData` kopyası da ana iş parçacığında. Bu proje o son tarihe
+bir overlay kaybetti. Çözme, arka planın `onLoad`'undan sonra, pencere gösterildikten sonra tetiklenir.
+Efektin temizliği de yazılır: `StrictMode` geliştirmede efekti iki kez çağırıyor, iptal edilemeyen iki
+okuma ve eski bir yüklemenin yenisini ezmesine karşı koruma yok.
+
+**2. Dönüşüm çözülmüş karenin genişliğinden türetilir.** Yakınlaştırma `bounds.width * ZOOM` (görünüm
+noktaları) üzerinden, örnekleme ise `frame.width` (gerçek piksel) üzerinden hesaplanıyor; kurgu yalnızca
+`frame.width === bounds.width * scale` olduğu sürece doğru. Tutmadığı gün okuma, işaretçi ve
+yakınlaştırılmış görüntü birbirinden kayar ve tek belirti yanlış renktir, ki bir renk seçici için en kötü
+başarısızlık budur. `frame.width / bounds.width` yapı gereği kesindir ve URL'deki `scale`'i örnekleme
+için gereksiz kılar.
+
+**3. Sekiz test yetmiyor, dördü daha eklenir.** Mutasyonla doğrulandı: `Math.floor` yerine `round` ya da
+`ceil` konsa sekiz test de geçiyor, çünkü tüm girdiler tam sayı; oysa imleç koordinatları kesirlidir ve
+`x = 200.3` noktada `scale = 2` ile floor 400, round 401 piksel seçer, yani farklı renk. Tampon uzunluk
+koruması alt kenar için de sabitlenmemiş: 2x2 tamponda `{x:0, y:2}` koruma kaldırılınca `undefined`
+kanallı bir nesne döndürüyor ve `toHex` orada `TypeError` ile overlay'i çökertiyor. `magnifierSourceRect`
+hiç sıfır olmayan bir `bounds` başlangıcıyla sınanmamış. Ve beklenen değerlerin hiçbirinde onaltılık harf
+yok, yani `.toUpperCase()` silinse testler geçer. Eklenecekler: 2x2 satır taşması, son satırın altı,
+kesirli nokta, sıfır olmayan başlangıçlı `bounds`, ve harf içeren bir onaltılık beklenti.
+
+**4. Renk uzayı doküman yorumunda yazılır.** PNG etiketsizdir ve varsayılan sRGB canvas'a dönüştürülmeden
+geçer, alfa 255'tir, yani zincirde dönüşüm yoktur. Ama bu baytlar ekranın **doğal** değerleridir: P3 bir
+panelde onaltılık kod bir P3 rengini adlandırır, düz sRGB gibi sunulsa da. Digital Color Meter'ın
+varsayılan davranışı da budur; savunulabilir ama yazılmalıdır.
+
 ---
 
 ### Task 10: Yakalama komutları ve çıktı yolu
