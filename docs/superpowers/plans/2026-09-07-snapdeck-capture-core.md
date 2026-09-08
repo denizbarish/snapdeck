@@ -3241,6 +3241,39 @@ git add apps/desktop README.md
 git commit -m "feat(app): capture selected region to file and clipboard"
 ```
 
+### Task 10 incelemesinden gelen ek kurallar
+
+**1. Donmuş kareler her yolda silinir.** `dismiss_overlays_and_wait` başarılı olduktan sonra yedi ayrı
+hata yolu (`displays`, `capture`, `picture_dir`, `create_dir_all`, `save_png`, `to_rgba8`, `write_image`)
+erken dönüyor ve temizliği atlıyor. O noktada overlay'ler çoktan kapandığı için frontend'in `.catch`
+yedeği de çalışmaz: pencere yok, reddetme kimseye ulaşmaz. Sonuç, kullanıcının ekranındaki her şeyin tam
+çözünürlüklü kayıpsız kopyasının cache'de kalmasıdır ve bunu tetikleyen en olası senaryo (dondurma ile
+Enter arasında iznin kaybı) kullanıcının kısayola bir daha basmadığı senaryodur, yani artık temizlenmez.
+Beklemeden sonraki gövde bir yardımcıya alınır, temizlik sonucu ne olursa olsun, slot hâlâ tutulurken
+çalıştırılır.
+
+**2. Dosya adı yerel saati taşır.** UTC yalnızca saati değil tarihi de kaydırır: Greenwich'in batısında
+akşam çekilen bir görüntü yarının tarihine düşer. `chrono` eklenir (varsayılan özellikler kapalı, `clock`
+açık) ve `render_filename` yerel saatle beslenir.
+
+**3. Tam ekran kısayolu gerçekten tam ekran yakalar.** `Cmd+Shift+9` şu an bölge overlay'i açıyor;
+spec'in v1 kapsamı "bölge / pencere / tam ekran" diyor. `mode === 'display'` geldiğinde seçim, o ekranın
+tamamı olarak önceden kurulur; kullanıcı `Enter` ile yakalar, `Esc` ile iptal eder. Donmuş kare yine
+gösterilir, böylece üç mod da aynı akışı paylaşır.
+
+**4. Aynı adlı dosya sessizce ezilmez.** `File::create` kırpar. Varsayılan şablonda çakışma penceresi bir
+saniye olduğu için bugün ulaşılamaz, ama `DEFAULT_FILENAME_TEMPLATE`'in kendi dokümanı şablonun
+değiştirilebileceğini söylüyor; `{time}` içermeyen bir şablonda her yakalama bir öncekini yok eder.
+macOS tarzı sonek verilir (`ad.png`, `ad 2.png`, ...).
+
+**5. `close_overlays` komutu kareleri yalnızca yakalama slotunu kapabildiğinde siler.** Aksi halde
+kapanmakta olan eski bir overlay'den gelen başarısız bir `capture_region`, yeni bir yakalamanın yazmakta
+olduğu kareleri silebilir.
+
+**6. `civil_from_days` test edilir** (artık yıl, yüzyıl sınırı, yıl sonu) ve README'ye iki cümle eklenir:
+dosyanın içeriği `Enter` anında canlı olarak yeniden yakalanır, yani seçim sırasında görülen donmuş kare
+değildir; ve pencere modunda seçilen dikdörtgenin üstünü örten başka bir pencere varsa o da görüntüye girer.
+
 ---
 
 ## Bu planın dışı
