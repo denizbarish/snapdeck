@@ -1458,7 +1458,12 @@ mod tests {
         let shortcuts = Shortcuts::default();
         let parsed = shortcuts.parse_all().expect("defaults must parse");
         assert_eq!(parsed.len(), Shortcuts::MODES.len());
-        assert_eq!(shortcuts.mode_for_parsed(&parsed[1]), Some("window"));
+        // Every position, not just one: swapping MODES 0 and 2 would otherwise
+        // pass, and would silently make the region shortcut capture the whole
+        // screen once Task 6 acts on the mode.
+        for (index, mode) in Shortcuts::MODES.iter().enumerate() {
+            assert_eq!(shortcuts.mode_for_parsed(&parsed[index]), Some(*mode));
+        }
     }
 
     #[test]
@@ -1470,11 +1475,12 @@ mod tests {
 
     #[test]
     fn defaults_do_not_collide_with_each_other() {
-        let s = Shortcuts::default();
-        let mut all = vec![&s.capture_region, &s.capture_window, &s.capture_display];
-        all.sort();
-        all.dedup();
-        assert_eq!(all.len(), 3);
+        // Compare parsed values, not strings: "Cmd+Shift+7" and
+        // "CmdOrCtrl+Shift+7" are different strings that collide at
+        // registration, which is the whole reason mode_for_parsed exists.
+        let mut parsed = Shortcuts::default().parse_all().expect("defaults must parse");
+        parsed.dedup();
+        assert_eq!(parsed.len(), 3);
     }
 }
 ```
@@ -1548,6 +1554,12 @@ pub fn register_shortcuts(app: &AppHandle, shortcuts: &Shortcuts) -> Result<(), 
 }
 ```
 
+Not: `crates/capture/build.rs` Swift köprüsü için bir rpath link argümanı yayar, ama `rustc-link-arg`
+yalnızca onu yayan paketin kendi çıktılarına uygulanır, bağımlılarına değil. `MacCapturer` uygulamaya
+bağlandığı anda aynı satırın `apps/desktop/src-tauri/build.rs` içinde de bulunması gerekir; yoksa
+uygulama `dyld: Library not loaded: @rpath/libswift_Concurrency.dylib` ile `main` öncesi çöker. Bu
+tekrar kasıtlıdır, tekilleştirilmemelidir.
+
 `apps/desktop/src-tauri/src/state.rs`:
 
 ```rust
@@ -1601,7 +1613,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .icon(app.default_window_icon().cloned().expect("bundled icon"))
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .ok_or_else(|| tauri::Error::UnknownPath)?,
+        )
         .on_menu_event(|app, event| match event.id().as_ref() {
             "capture_region" => request_capture(app, "region"),
             "capture_window" => request_capture(app, "window"),
