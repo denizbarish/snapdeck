@@ -7,7 +7,12 @@ on:
 
 jobs:
   rust:
-    runs-on: macos-14
+    # macos-latest, not a pinned older image: screencapturekit's apple-metal
+    # dependency builds a Swift bridge that needs a recent Metal SDK
+    # (MTLSamplerReductionMode, MTLSamplerDescriptor.lodBias), which macos-14
+    # does not ship. This is the SDK the runner builds with; the app's own
+    # runtime baseline is still macOS 14.0.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
