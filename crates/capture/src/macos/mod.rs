@@ -1,4 +1,4 @@
-// Task 4 adds: pub mod permission;
+pub mod permission;
 
 use core_graphics::display::{CGDisplay, CGMainDisplayID};
 use screencapturekit::error::SCStreamErrorCode;
@@ -6,6 +6,7 @@ use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
 use screencapturekit::CGImage;
 
+use self::permission::{screen_capture_permission, PermissionState};
 use crate::{
     error::CaptureError,
     types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo},
@@ -42,13 +43,27 @@ fn map_err(err: SCError) -> CaptureError {
             code: SCStreamErrorCode::UserDeclined,
             ..
         } => CaptureError::PermissionDenied,
-        // A failed shareable-content request arrives as this variant carrying
-        // only the localized description, so the variant itself is the signal.
-        // Missing screen recording approval is what makes that request fail.
-        // This over-reports a transient XPC failure as a permission problem;
-        // Task 4 revisits it once a real preflight check exists.
-        SCError::NoShareableContent(_) => CaptureError::PermissionDenied,
+        // Ambiguous on its own, so it is resolved against the real TCC state.
+        no_content @ SCError::NoShareableContent(_) => {
+            map_no_shareable_content(no_content, screen_capture_permission())
+        }
         other => CaptureError::Platform(other.to_string()),
+    }
+}
+
+/// Resolves a failed shareable-content request against the screen recording
+/// grant.
+///
+/// Every `SCShareableContent` accessor reports every failure as
+/// `NoShareableContent` carrying only the localized description, so the
+/// variant cannot tell a missing grant from a transient XPC failure. The
+/// preflight can: with the grant held, the failure is a platform problem and
+/// its message is the only diagnostic it carries, so it has to survive.
+fn map_no_shareable_content(err: SCError, permission: PermissionState) -> CaptureError {
+    if permission.is_granted() {
+        CaptureError::Platform(err.to_string())
+    } else {
+        CaptureError::PermissionDenied
     }
 }
 
@@ -439,10 +454,26 @@ mod tests {
     }
 
     #[test]
-    fn maps_a_failed_shareable_content_request() {
+    fn a_failed_shareable_content_request_is_a_denial_when_the_preflight_says_so() {
         assert_eq!(
-            map_err(SCError::NoShareableContent("xpc failed".to_string())),
+            map_no_shareable_content(
+                SCError::NoShareableContent("xpc failed".to_string()),
+                PermissionState::Denied,
+            ),
             CaptureError::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn a_failed_shareable_content_request_is_a_platform_failure_when_permission_is_held() {
+        // The grant is real, so the request failed for some other reason. Its
+        // message is the only diagnostic such a failure carries, so it has to
+        // survive the mapping intact.
+        let err = SCError::NoShareableContent("xpc failed".to_string());
+        let message = err.to_string();
+        assert_eq!(
+            map_no_shareable_content(err, PermissionState::Granted),
+            CaptureError::Platform(message)
         );
     }
 
