@@ -2331,9 +2331,11 @@ export function Overlay({ displayId, scale }: Props) {
     setSelection(clampRect(rect, bounds))
   }
 
+  // Releasing the mouse ends the drag but does not capture: the selection
+  // stays adjustable so the handles and the arrow keys are reachable. Enter
+  // captures, Escape cancels.
   const onPointerUp = () => {
     dragStart.current = null
-    if (selection) confirm(selection)
   }
 
   return (
@@ -2373,6 +2375,7 @@ export function Overlay({ displayId, scale }: Props) {
             }}
           >
             {Math.round(selection.width * scale)} × {Math.round(selection.height * scale)}
+            <span style={{ opacity: 0.7, marginLeft: 8 }}>Enter to capture · Esc to cancel</span>
           </div>
         </>
       )}
@@ -2443,20 +2446,18 @@ Seçim varken tutamakları çiz. `stopPropagation` şart, yoksa tutamağa basmak
   })}
 ```
 
-`onPointerUp` içinde `activeHandle.current` doluysa seçim onaylanmaz, sadece tutamak bırakılır:
+`onPointerUp` yalnızca sürüklemeyi veya tutamağı bırakır, hiçbir şeyi onaylamaz:
 
 ```tsx
 const onPointerUp = () => {
-  if (activeHandle.current) {
-    activeHandle.current = null
-    return
-  }
+  activeHandle.current = null
   dragStart.current = null
-  if (selection) confirm(selection)
 }
 ```
 
-Yeniden boyutlandırıldıktan sonra seçim `Enter` ile onaylanır.
+**Akış kararı:** fare bırakıldığında yakalama yapılmaz. Seçim düzenlenebilir kalır; kullanıcı tutamaklarla
+ve ok tuşlarıyla düzeltir, `Enter` ile yakalar, `Esc` ile iptal eder. Bırakınca anında yakalayan bir akışta
+tutamaklar ve ok tuşları erişilemez ölü koda dönüşürdü. Okuma pili bu yüzden ipucu metnini de gösterir.
 
 - [ ] **Step 7: Commit**
 
@@ -2814,7 +2815,10 @@ git commit -m "feat(overlay): add magnifier with pixel color readout"
 - Produces:
   - `render_filename(template: &str, at: OffsetDateTimeParts, width: u32, height: u32) -> String`
   - `struct OffsetDateTimeParts { year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8 }`, `OffsetDateTimeParts::now()`
-  - Tauri komutları: `permission_state`, `request_permission`, `list_windows`, `capture_region`, `close_overlays`
+  - Tauri komutları: `permission_state`, `request_permission`, `list_windows`, `capture_region`
+  - `close_overlays` komutu Task 7'de zaten eklendi ve pencereleri kapatmanın yanında donmuş kareleri de
+    siler. Üzerine yazma: temizlik olmadan, iptal edilen her yakalamadan sonra ekranın tam çözünürlüklü
+    kopyaları cache'de kalır.
 
 - [ ] **Step 1: Başarısız testi yaz**
 
@@ -3129,7 +3133,8 @@ Run: `pnpm tauri dev`
 
 Sırayla doğrula:
 1. `CmdOrCtrl+Shift+7` bas, ekran donar.
-2. Bir bölge seç, fareyi bırak. Overlay kapanır.
+2. Bir bölge seç ve fareyi bırak: overlay açık kalır, seçim düzenlenebilir. Tutamaklarla boyutlandır,
+   ok tuşlarıyla kaydır, sonra `Enter` ile yakala. Overlay kapanır. (`Esc` iptal eder, dosya oluşmaz.)
 3. `~/Pictures` altında `Snapdeck <tarih> at <saat>.png` dosyası oluşur.
 4. Dosyanın piksel boyutu, seçtiğin nokta boyutunun `scale_factor` katıdır (Retina'da 2x).
 5. Bir metin düzenleyiciye yapıştır, görüntü panodan gelir.
