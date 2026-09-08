@@ -109,10 +109,12 @@ mod tests {
         // Compare parsed values, not strings: "Cmd+Shift+7" and
         // "CmdOrCtrl+Shift+7" are different strings that collide at
         // registration, which is the whole reason mode_for_parsed exists.
-        let mut parsed = Shortcuts::default()
+        // A set, not dedup(): dedup only collapses adjacent duplicates, so a
+        // collision between the first and third binding would slip through.
+        let parsed = Shortcuts::default()
             .parse_all()
             .expect("defaults must parse");
-        parsed.dedup();
-        assert_eq!(parsed.len(), 3);
+        let unique: std::collections::HashSet<_> = parsed.iter().collect();
+        assert_eq!(unique.len(), 3);
     }
 }
