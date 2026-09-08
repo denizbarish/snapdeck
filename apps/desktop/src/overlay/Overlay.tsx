@@ -1,7 +1,9 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, SyntheticEvent } from 'react'
+import { magnifierSourceRect, samplePixel, toHex, type Rgba } from './magnifier'
 import {
   clampRect,
   isUsable,
@@ -53,6 +55,21 @@ const DIM = 'rgba(0,0,0,0.35)'
 /** The mode that snaps to whole windows instead of dragging a region. */
 const WINDOW_MODE = 'window'
 
+/** CSS pixels the magnifier gives each display point. */
+const MAGNIFIER_ZOOM = 8
+
+/** Edge of the region the magnifier shows, in display points. */
+const MAGNIFIER_SOURCE = 16
+
+/** Edge of the magnifier itself, in CSS pixels. */
+const MAGNIFIER_SIZE = MAGNIFIER_SOURCE * MAGNIFIER_ZOOM
+
+/** Gap between the pointer and the magnifier, in CSS pixels. */
+const MAGNIFIER_GAP = 16
+
+/** Height of the hex readout under the magnifier, in CSS pixels. */
+const MAGNIFIER_READOUT_HEIGHT = 32
+
 /**
  * The overlay for one display: a frozen backdrop with a selection drawn on it.
  *
@@ -91,12 +108,99 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
    * which is what keeps the three edges the user is not dragging anchored.
    */
   const resizeOrigin = useRef<Rect | null>(null)
+  /**
+   * The frozen frame's pixels, in device pixels, once it has been decoded.
+   *
+   * A ref rather than state: it is written once, nothing renders differently
+   * because of it, and putting 30 MB of image data through `useState` would
+   * re-render the overlay for an event the user cannot see.
+   */
+  const pixels = useRef<{ data: Uint8ClampedArray; width: number } | null>(null)
+  /** Where the pointer is, in display points, or null before it has moved. */
+  const [pointer, setPointer] = useState<Point | null>(null)
+  /** Colour of the device pixel under the pointer, or null until one is read. */
+  const [hoverColor, setHoverColor] = useState<Rgba | null>(null)
+
+  // Built once per render and shared by the backdrop, the magnifier's zoomed
+  // view and the offscreen decode, so all three name the same URL and the
+  // webview is asked for the file under one name.
+  const frozenSrc = convertFileSrc(framePath)
 
   // The window is exactly one display, so the viewport is the display and the
   // selection may go anywhere in it. Read every render rather than cached: a
   // display that changes resolution while the overlay is up would otherwise
   // clamp against a size that no longer exists.
   const bounds = { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }
+
+  // The magnifier reads pixels, and pixels only come out of a canvas, so the
+  // frame is decoded a second time into an offscreen one. Once per overlay: the
+  // screen is frozen for the whole life of this window, so the buffer can never
+  // go stale, and `getImageData` on a full display costs about 30 MB and a
+  // full-frame copy that has no business running on every pointer move.
+  //
+  // `crossOrigin` is the load-bearing line, and it was measured rather than
+  // assumed. The frozen frame is served over Tauri's asset protocol from
+  // `asset://localhost`, which is a different origin from the page, so a plain
+  // load taints the canvas and `getImageData` throws
+  // `SecurityError: The operation is insecure`. Tauri's asset protocol already
+  // answers with `Access-Control-Allow-Origin` set to this window's own origin;
+  // `crossOrigin = 'anonymous'` is what makes the webview perform a CORS-mode
+  // fetch so that header is honoured, and the canvas stays readable. It relaxes
+  // nothing: without it the response header is simply ignored.
+  useEffect(() => {
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      const context = canvas.getContext('2d', { willReadFrequently: true })
+      if (!context) {
+        console.error('overlay: no 2d context, the magnifier will stay hidden')
+        return
+      }
+      context.drawImage(image, 0, 0)
+      const buffer = context.getImageData(0, 0, canvas.width, canvas.height)
+      pixels.current = { data: buffer.data, width: canvas.width }
+    }
+    // The backdrop's own `onError` already closes the overlay when the file is
+    // missing, so this is here for the case the two loads disagree, which is
+    // exactly the CORS one above. Without it a refused load leaves a magnifier
+    // that silently never appears and nothing anywhere saying why.
+    image.onerror = () => {
+      console.error(`overlay: could not decode ${frozenSrc} for the magnifier`)
+    }
+    image.src = frozenSrc
+  }, [frozenSrc])
+
+  /**
+   * Records where the pointer is and what colour is under it.
+   *
+   * Called at the top of every pointer move, before the two modes split. The
+   * magnifier belongs to neither of them and both return early, so anywhere
+   * further down would leave it frozen in one mode or the other.
+   */
+  const trackPointer = (x: number, y: number) => {
+    setPointer({ x, y })
+    const frame = pixels.current
+    // The pointer is in CSS points and the frozen frame is in device pixels.
+    // `scale` is the whole conversion, and Task 6 kept the frame unresampled
+    // and lossless precisely so the pixel it lands on is the pixel the user is
+    // pointing at rather than an average of the ones around it.
+    setHoverColor(
+      frame ? samplePixel(frame.data, frame.width, { x: x * scale, y: y * scale }) : null,
+    )
+  }
+
+  /** Puts the hex under the pointer on the clipboard. */
+  const copyHex = (color: Rgba) => {
+    // Handled rather than merely marked with `void`: this is a menu bar agent
+    // with no console in a release build, and a colour that silently did not
+    // reach the clipboard is indistinguishable from one that did.
+    writeText(toHex(color)).catch((error: unknown) => {
+      console.error('overlay: could not copy the colour to the clipboard', error)
+    })
+  }
 
   const confirm = (rect: Rect) => {
     // Enter on a selection too small to be worth capturing does nothing, and
@@ -157,6 +261,15 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') return dismissAll()
+      // Before the selection guard, because the colour picker works on bare
+      // desktop: there is nothing to select for a colour to belong to, and a
+      // magnifier showing a hex that only some of the time can be copied would
+      // be worse than no key at all. No modifier check, so Cmd-C reaches it
+      // too, which is the shortcut a hand goes to for "copy this" anyway.
+      if (event.key.toLowerCase() === 'c') {
+        if (hoverColor) copyHex(hoverColor)
+        return
+      }
       if (!selection) return
       if (event.key === 'Enter') return confirm(selection)
       const step = event.shiftKey ? NUDGE_STEP_COARSE : NUDGE_STEP
@@ -197,6 +310,12 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
     const onBlur = () => {
       endGesture()
       setSelection(null)
+      // The magnifier goes with it. The pointer events that would move it are
+      // going somewhere else now, so what is left is a frozen swatch claiming
+      // to be the colour under a cursor it can no longer see, and a `C` that
+      // would copy it. The next pointer move over this display brings it back.
+      setPointer(null)
+      setHoverColor(null)
     }
     window.addEventListener('blur', onBlur)
     return () => window.removeEventListener('blur', onBlur)
@@ -257,6 +376,7 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    trackPointer(event.clientX, event.clientY)
     // Checked before the button guard below: hovering is the whole gesture in
     // window mode, and it happens with no button held.
     if (snapsToWindows) {
@@ -329,7 +449,7 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
       style={{ position: 'relative', width: '100%', height: '100%' }}
     >
       <img
-        src={convertFileSrc(framePath)}
+        src={frozenSrc}
         alt=""
         onLoad={revealWindow}
         onError={reportMissingFrame}
@@ -418,8 +538,133 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
             })}
         </>
       )}
+      {/*
+        Last child, so the magnifier paints over the dim sheet, the selection
+        outline and the handles. It is the one thing on screen that is meant to
+        be read pixel for pixel, and anything drawn on top of it would be
+        reporting a colour it was covering.
+      */}
+      {pointer && hoverColor && (
+        <Magnifier
+          frozenSrc={frozenSrc}
+          pointer={pointer}
+          color={hoverColor}
+          bounds={bounds}
+          scale={scale}
+        />
+      )}
     </div>
   )
+}
+
+type MagnifierProps = {
+  frozenSrc: string
+  pointer: Point
+  color: Rgba
+  bounds: Rect
+  scale: number
+}
+
+/**
+ * The zoomed view of the frozen frame under the pointer, and the hex it reads.
+ *
+ * The zoom is a background image rather than a canvas because the frame is
+ * already decoded for the backdrop: naming the same URL reuses that decode,
+ * where a canvas would mean a third copy of a full-display image and a redraw
+ * on every pointer move. `background-size` stretches the frame so one display
+ * point is `MAGNIFIER_ZOOM` CSS pixels, and `background-position` slides the
+ * source region under the clip.
+ */
+function Magnifier({ frozenSrc, pointer, color, bounds, scale }: MagnifierProps) {
+  const source = magnifierSourceRect(pointer, MAGNIFIER_SOURCE, bounds)
+  const { left, top } = magnifierPlacement(pointer, bounds)
+  // The marked pixel is the one `samplePixel` was asked for, recomputed the
+  // same way, and not the middle of the view. Near an edge `magnifierSourceRect`
+  // clamps, and there the pointer is not at the centre; a marker fixed to the
+  // middle would then point at a pixel whose colour is not the one on show.
+  const marker = {
+    left: (Math.floor(pointer.x * scale) / scale - source.x) * MAGNIFIER_ZOOM,
+    top: (Math.floor(pointer.y * scale) / scale - source.y) * MAGNIFIER_ZOOM,
+    // One device pixel, which is what a sample is. On a Retina display that is
+    // half of what one display point occupies in the zoomed view.
+    size: MAGNIFIER_ZOOM / scale,
+  }
+
+  return (
+    <div style={{ position: 'absolute', left, top, pointerEvents: 'none' }}>
+      <div
+        style={{
+          position: 'relative',
+          width: MAGNIFIER_SIZE,
+          height: MAGNIFIER_SIZE,
+          backgroundImage: `url("${frozenSrc}")`,
+          backgroundRepeat: 'no-repeat',
+          backgroundSize: `${bounds.width * MAGNIFIER_ZOOM}px ${bounds.height * MAGNIFIER_ZOOM}px`,
+          backgroundPosition: `${-source.x * MAGNIFIER_ZOOM}px ${-source.y * MAGNIFIER_ZOOM}px`,
+          // Without this the webview smooths the enlargement and the magnifier
+          // shows a blurred average of the pixels instead of the pixels, while
+          // the hex underneath still reports a single one of them.
+          imageRendering: 'pixelated',
+          outline: '1px solid #fff',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            left: marker.left,
+            top: marker.top,
+            width: marker.size,
+            height: marker.size,
+            // Both rings are drawn outside the box, so the pixel being reported
+            // stays visible inside them. The dark one is what keeps the white
+            // one findable over a light pixel.
+            outline: '1px solid #fff',
+            boxShadow: '0 0 0 2px rgba(0,0,0,0.55)',
+          }}
+        />
+      </div>
+      <div
+        style={{
+          boxSizing: 'border-box',
+          width: MAGNIFIER_SIZE,
+          height: MAGNIFIER_READOUT_HEIGHT,
+          padding: '2px 6px',
+          background: '#000',
+          color: '#fff',
+          font: '12px ui-monospace, monospace',
+          lineHeight: '15px',
+          textAlign: 'center',
+        }}
+      >
+        {toHex(color)}
+        {/* Same reason the size readout spells out Enter and Esc: a keystroke
+            nothing on screen mentions is a feature nobody finds. */}
+        <div style={{ opacity: 0.7, fontSize: 10, lineHeight: '11px' }}>C to copy</div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Where the magnifier sits, in display points.
+ *
+ * Beside the pointer, and it flips to the other side rather than sliding along
+ * an edge: a magnifier pushed back from the right edge would end up underneath
+ * the pointer, hiding the pixels it exists to show.
+ */
+function magnifierPlacement(pointer: Point, bounds: Rect): { left: number; top: number } {
+  const height = MAGNIFIER_SIZE + MAGNIFIER_READOUT_HEIGHT
+  const right = pointer.x + MAGNIFIER_GAP
+  const below = pointer.y + MAGNIFIER_GAP
+  const left =
+    right + MAGNIFIER_SIZE <= bounds.x + bounds.width
+      ? right
+      : pointer.x - MAGNIFIER_GAP - MAGNIFIER_SIZE
+  const top =
+    below + height <= bounds.y + bounds.height ? below : pointer.y - MAGNIFIER_GAP - height
+  // A display narrower than the magnifier is not a real case; the clamp is
+  // here so a flipped box cannot start off the top-left of the screen.
+  return { left: Math.max(bounds.x, left), top: Math.max(bounds.y, top) }
 }
 
 /** Centre of a handle, in the same display-local points as the selection. */
