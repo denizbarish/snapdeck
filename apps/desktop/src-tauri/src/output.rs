@@ -1,10 +1,18 @@
 use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::{BufWriter, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 
+use chrono::Local;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 use snapdeck_capture::Frame;
+
+/// How many names a capture may try before giving up on the directory.
+///
+/// A bound rather than an open loop: every iteration is a `create_new` syscall,
+/// and a directory that answers `AlreadyExists` to all of them is a situation
+/// to report, not to spin in.
+const MAX_NAME_ATTEMPTS: u32 = 10_000;
 
 /// How hard the PNG encoder works.
 ///
@@ -46,14 +54,78 @@ impl PngCompression {
     }
 }
 
-/// Writes a frame as PNG. Row padding is removed and BGRA is converted by
-/// `Frame::to_rgba8`, so the file is always tightly packed RGBA.
+/// Writes a frame as PNG, replacing whatever is at `path`. Row padding is
+/// removed and BGRA is converted by `Frame::to_rgba8`, so the file is always
+/// tightly packed RGBA.
+///
+/// Truncating is right for the one caller that uses it: the frozen backdrop is
+/// rewritten by every capture and is meant to be. Anything the user keeps goes
+/// through `save_png_without_overwriting` instead.
 pub fn save_png(frame: &Frame, path: &Path, compression: PngCompression) -> Result<(), String> {
-    let rgba = frame.to_rgba8().map_err(|e| e.to_string())?;
     let file =
         File::create(path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    encode_png(frame, file, compression)
+}
+
+/// Writes a frame as PNG under `directory`, adding a macOS-style ` 2`, ` 3`, …
+/// to `stem` until it finds a name nothing holds, and returns the path used.
+///
+/// `File::create` truncates, so the plain `save_png` next door would destroy a
+/// capture that happens to render the same name. The default template's
+/// one-second resolution makes that unreachable today, but the template is
+/// configurable by design, and one without `{time}` in it would leave the user
+/// with exactly one file no matter how many captures they took.
+///
+/// The name is claimed with `create_new`, not with an "does it exist" check
+/// followed by a write: the check would answer for a moment that has passed by
+/// the time the file is opened, and the whole point here is that nothing is
+/// overwritten.
+pub fn save_png_without_overwriting(
+    frame: &Frame,
+    directory: &Path,
+    stem: &str,
+    compression: PngCompression,
+) -> Result<PathBuf, String> {
+    for attempt in 1..=MAX_NAME_ATTEMPTS {
+        let path = directory.join(suffixed_file_name(stem, attempt));
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                encode_png(frame, file, compression)?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("failed to create {}: {err}", path.display())),
+        }
+    }
+    Err(format!(
+        "failed to find a free name for {stem}.png in {} after {MAX_NAME_ATTEMPTS} tries",
+        directory.display()
+    ))
+}
+
+/// The file name for the `attempt`-th try at `stem`, counting from one.
+///
+/// The first attempt is the bare name, so a capture that collides with nothing
+/// is named exactly what the template rendered; only a taken name grows a
+/// suffix, which is what the Finder does with a duplicate.
+fn suffixed_file_name(stem: &str, attempt: u32) -> String {
+    if attempt <= 1 {
+        format!("{stem}.png")
+    } else {
+        format!("{stem} {attempt}.png")
+    }
+}
+
+/// Encodes a frame into an open sink, so both save paths share one encoder and
+/// one conversion and differ only in how they got the file.
+fn encode_png<W: Write>(
+    frame: &Frame,
+    writer: W,
+    compression: PngCompression,
+) -> Result<(), String> {
+    let rgba = frame.to_rgba8().map_err(|e| e.to_string())?;
     let (compression_type, filter) = compression.encoder_settings();
-    PngEncoder::new_with_quality(BufWriter::new(file), compression_type, filter)
+    PngEncoder::new_with_quality(BufWriter::new(writer), compression_type, filter)
         .write_image(&rgba, frame.width, frame.height, ExtendedColorType::Rgba8)
         .map_err(|e| format!("failed to save png: {e}"))
 }
@@ -71,17 +143,22 @@ pub struct OffsetDateTimeParts {
 }
 
 impl OffsetDateTimeParts {
-    /// The current UTC wall clock, read from the system clock.
+    /// The current local wall clock, zone and daylight saving included.
     ///
-    /// UTC rather than local time, because `std` carries no time zone database
-    /// and this crate has no date library. A file therefore gets the UTC hour,
-    /// which east of Greenwich is not the hour the user took the screenshot.
+    /// Local rather than UTC, because the offset moves the date and not only
+    /// the hour: an evening capture west of Greenwich lands on tomorrow's date,
+    /// so a day's screenshots sort into two folders' worth of names for no
+    /// reason the user can see.
+    ///
+    /// `chrono` is asked for one thing, how far this machine is from UTC at
+    /// this instant, which is the part that needs a zone database. The calendar
+    /// maths below is unchanged and stays pure, so `civil_from_days` is still
+    /// testable without a clock.
     pub fn now() -> Self {
-        // std has no calendar math, so derive the parts from the Unix epoch.
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = Local::now();
+        // Shifting the epoch by the offset turns the UTC instant into the local
+        // wall clock, which the civil maths then decomposes exactly as before.
+        let secs = now.timestamp() + i64::from(now.offset().local_minus_utc());
         let days = secs.div_euclid(86_400);
         let time_of_day = secs.rem_euclid(86_400);
         let (year, month, day) = civil_from_days(days);
@@ -153,6 +230,14 @@ mod tests {
             scale_factor: 2.0,
             captured_at: SystemTime::now(),
         }
+    }
+
+    /// A directory of this test's own, so the collision tests only ever meet
+    /// the files they wrote themselves.
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let directory = temp_path(name);
+        std::fs::create_dir_all(&directory).expect("create the temporary directory");
+        directory
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -232,5 +317,94 @@ mod tests {
     fn strips_path_separators_from_the_result() {
         let name = render_filename("a/b{width}", parts(), 5, 5);
         assert_eq!(name, "a-b5");
+    }
+
+    /// The three dates the calendar maths can get wrong on its own. Day numbers
+    /// are Unix days, and each expectation is the date that day number is, not
+    /// a value read back out of the function it is testing.
+    #[test]
+    fn civil_from_days_handles_a_leap_day() {
+        // 29 February 2024: the extra day of a leap year, which a plain
+        // 365-day year would render as 1 March.
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(civil_from_days(19_783), (2024, 3, 1));
+    }
+
+    #[test]
+    fn civil_from_days_handles_the_century_rules() {
+        // 2000 is a leap year (divisible by 400) and 1900 is not (divisible by
+        // 100 but not 400), so both centuries have to be crossed, and the two
+        // rules disagree about the same February. 1900 is also before the
+        // epoch, so its day number is negative and the rebasing onto the
+        // proleptic era has to absorb the sign before anything divides.
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+        assert_eq!(civil_from_days(-25_509), (1900, 2, 28));
+        assert_eq!(civil_from_days(-25_508), (1900, 3, 1));
+    }
+
+    #[test]
+    fn civil_from_days_handles_a_year_end() {
+        assert_eq!(civil_from_days(20_818), (2026, 12, 31));
+        assert_eq!(civil_from_days(20_819), (2027, 1, 1));
+    }
+
+    /// The epoch itself, as a fixed point that pins the whole day numbering.
+    #[test]
+    fn civil_from_days_puts_day_zero_at_the_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn the_first_capture_of_a_name_keeps_the_name() {
+        let directory = temp_dir("first");
+        let path = save_png_without_overwriting(
+            &sample_frame(),
+            &directory,
+            "Snapdeck 2026-09-07 at 04.05.06",
+            PngCompression::Fast,
+        )
+        .expect("save");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("Snapdeck 2026-09-07 at 04.05.06.png")
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The point of the whole function: a second capture rendering the same
+    /// name must not truncate the first one.
+    #[test]
+    fn a_colliding_name_is_suffixed_rather_than_overwritten() {
+        let directory = temp_dir("collision");
+        let first =
+            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+                .expect("first save");
+        let first_bytes = std::fs::read(&first).expect("read the first file");
+
+        let second =
+            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+                .expect("second save");
+        let third =
+            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+                .expect("third save");
+
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("shot 2.png")
+        );
+        assert_eq!(
+            third.file_name().and_then(|name| name.to_str()),
+            Some("shot 3.png")
+        );
+        // Not merely a different path: the first file still holds its own
+        // pixels, which is the claim a truncating create would break.
+        assert_eq!(
+            std::fs::read(&first).expect("re-read the first file"),
+            first_bytes
+        );
+        assert!(first.exists() && second.exists() && third.exists());
+        std::fs::remove_dir_all(&directory).ok();
     }
 }

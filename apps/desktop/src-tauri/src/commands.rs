@@ -21,7 +21,7 @@ use tauri::{image::Image, AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::{
-    output::{render_filename, save_png, OffsetDateTimeParts, PngCompression},
+    output::{render_filename, save_png_without_overwriting, OffsetDateTimeParts, PngCompression},
     overlay,
     state::AppState,
 };
@@ -127,12 +127,20 @@ pub fn request_permission() -> PermissionReport {
 /// the keyboard, and an Escape that closed the focused window alone would
 /// leave the other displays covered with nothing left to press Escape in.
 ///
-/// The frames go too. `overlay::close_overlays` deliberately leaves them,
-/// because it also runs from inside a capture that is still writing them; here
-/// there is no such doubt. A dismissal means the user has finished with this
-/// capture, and the frames are full-resolution, lossless copies of everything
-/// that was on their screen, so keeping them in `~/Library/Caches` until the
-/// next capture happens to overwrite them is a privacy cost with no upside.
+/// The frames go too, but only when this dismissal can claim the capture slot.
+/// `overlay::close_overlays` deliberately leaves them, because it also runs
+/// from inside a capture that is still writing them. A dismissal usually means
+/// the user has finished with this capture, and the frames are
+/// full-resolution, lossless copies of everything that was on their screen, so
+/// keeping them in `~/Library/Caches` until the next capture happens to
+/// overwrite them is a privacy cost with no upside.
+///
+/// "Usually", because a failed `capture_region` sends the overlay here through
+/// its own `.catch`, and a second capture may already be under way by then. It
+/// holds the slot for exactly as long as it is writing the frames its own
+/// overlays will show, so a claim that fails means the frames on disk belong
+/// to that capture and not to this dismissal. They are then left to whoever
+/// owns them: the next trigger discards them before it freezes again.
 ///
 /// Synchronous on purpose, which is the opposite of `list_windows` next door:
 /// `WebviewWindow::close` has to run on the main thread on macOS, and a
@@ -140,7 +148,9 @@ pub fn request_permission() -> PermissionReport {
 #[tauri::command]
 pub fn close_overlays(app: AppHandle) {
     overlay::close_overlays(&app);
-    overlay::discard_cached_frozen_frames(&app);
+    if let Some(_guard) = app.state::<AppState>().begin_capture() {
+        overlay::discard_cached_frozen_frames(&app);
+    }
 }
 
 /// The windows window mode may highlight, plus the origin of the display the
@@ -253,6 +263,34 @@ fn capture_selection(
 
     dismiss_overlays_and_wait(app)?;
 
+    let result = capture_and_write(app, &state, display_id, rect);
+    // Unconditionally, and here rather than inside: every step below the
+    // dismissal can fail, and the overlays are already off the screen by then,
+    // so a `?` that returned straight to the caller would leave a
+    // full-resolution, lossless copy of everything that was on the user's
+    // screen in `~/Library/Caches`. The frontend cannot make up for it either:
+    // its `.catch` needs a live webview, and this capture destroyed the one
+    // that asked. The likeliest failure of the lot, a grant lost between the
+    // freeze and Enter, is also the one where the user stops pressing the
+    // shortcut, so nothing later would come along and clear the residue.
+    //
+    // Still inside the guard, so no capture started in the meantime can be
+    // writing the frames this deletes.
+    overlay::discard_cached_frozen_frames(app);
+    result
+}
+
+/// The capture itself, once the screen is clear: everything from the display
+/// lookup to the clipboard write.
+///
+/// Split out from `capture_selection` so that its caller can run the frozen
+/// frame cleanup on every path out of it, successful or not.
+fn capture_and_write(
+    app: &AppHandle,
+    state: &AppState,
+    display_id: u32,
+    rect: Rect,
+) -> Result<CaptureResult, String> {
     let display = state
         .capturer
         .displays()
@@ -285,23 +323,20 @@ fn capture_selection(
         frame.width,
         frame.height,
     );
-    let path = directory.join(format!("{name}.png"));
     // `Default`, not the `Fast` the backdrop uses. The backdrop is a throwaway
     // the user is blocked on; this is a file they keep, where Task 6 measured
     // `Fast` + `NoFilter` at 29.9 MB against 2.3 MB here, and nobody is
     // waiting on the write.
-    save_png(&frame, &path, PngCompression::Default)?;
+    //
+    // The saved path comes back from the write rather than being built here,
+    // because a name already taken gets a suffix instead of the previous
+    // capture's contents.
+    let path = save_png_without_overwriting(&frame, &directory, &name, PngCompression::Default)?;
 
     let rgba = frame.to_rgba8().map_err(|err| err.to_string())?;
     app.clipboard()
         .write_image(&Image::new(&rgba, frame.width, frame.height))
         .map_err(|err| format!("failed to copy the capture to the clipboard: {err}"))?;
-
-    // Only now: the frames are the backdrop of the overlay this capture just
-    // closed, and they are full-resolution copies of everything that was on
-    // screen. Leaving them in `~/Library/Caches` until the next capture happens
-    // to overwrite them is the same privacy cost the dismissal exists to avoid.
-    overlay::discard_cached_frozen_frames(app);
 
     Ok(CaptureResult {
         path: path.to_string_lossy().into_owned(),

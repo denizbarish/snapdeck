@@ -19,9 +19,10 @@ import { toLocalRect, windowUnderPoint, type WindowBounds } from './snap'
 export interface OverlayProps {
   displayId: number
   /**
-   * `'window'` picks whole windows by hovering them; anything else drags a
-   * free region. Written by Rust into the overlay URL, so the two modes never
-   * change under a live overlay.
+   * `'window'` picks whole windows by hovering them, `'display'` starts with
+   * the whole display selected, and anything else drags a free region. Written
+   * by Rust into the overlay URL, so the mode never changes under a live
+   * overlay.
    */
   mode: string
   scale: number
@@ -54,6 +55,9 @@ const DIM = 'rgba(0,0,0,0.35)'
 
 /** The mode that snaps to whole windows instead of dragging a region. */
 const WINDOW_MODE = 'window'
+
+/** The mode that arrives with the whole display already selected. */
+const DISPLAY_MODE = 'display'
 
 /** CSS pixels the magnifier gives each display point. */
 const MAGNIFIER_ZOOM = 8
@@ -267,8 +271,12 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
     // and by the time it answers there is no webview left to answer to.
     invoke('capture_region', { displayId, rect }).catch((error: unknown) => {
       console.error(`overlay: could not capture the selection on display ${displayId}`, error)
-      // Reached only while this window is somehow still alive, which means the
-      // command gave up before it closed anything. Leaving every display
+      // Reachable for exactly the two failures that happen while this window is
+      // still on screen: the refused capture slot, and the dismissal that timed
+      // out, which is the one that leaves the overlays up. Everything after
+      // that point has already destroyed this webview, so its rejection is
+      // delivered to nobody and this never runs; the cleanup those paths need
+      // is Rust's, not this one's. Where it does run, leaving every display
       // covered under a selection the user already confirmed is the one
       // outcome worse than a missing file.
       dismissAll()
@@ -307,6 +315,21 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
         console.error(`overlay: could not list the windows on display ${displayId}`, error)
       })
   }, [displayId, snapsToWindows])
+
+  // Full-screen mode is region mode with the selection already made: the whole
+  // display is selected the moment the overlay appears, so `Enter` captures it
+  // and `Esc` cancels, the same two keys the other two modes end on. That is
+  // the entire difference between the modes, which is why there is no third
+  // branch anywhere below: the drag, the handles and the arrow keys all keep
+  // working on the preselected rect, so a full-screen shortcut pressed by
+  // mistake is one drag away from being a region.
+  //
+  // Once, on mount. Re-running it would put the display back under a selection
+  // the user has since trimmed.
+  useEffect(() => {
+    if (mode !== DISPLAY_MODE) return
+    setSelection({ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight })
+  }, [mode])
 
   // No dependency array on purpose. The handler closes over `selection` and
   // `bounds`, both of which change on almost every render, so a memoised

@@ -33,22 +33,32 @@ Snapdeck lives in the menu bar. Take a capture from the menu, or with a shortcut
 | --- | --- |
 | `Cmd+Shift+7` | Region |
 | `Cmd+Shift+8` | Window |
-| `Cmd+Shift+9` | Full screen (see Known limitations) |
+| `Cmd+Shift+9` | Full screen |
 
 The screen freezes and every display is covered by the selection overlay.
 
 - **Region.** Drag out a rectangle. Releasing the mouse does not capture it: the selection stays
   editable, so you can drag the eight handles to resize it, or nudge it with the arrow keys, one
   point at a time and ten with Shift held. Press `Enter` to capture it.
-- **Window.** Move the pointer over a window to highlight it, then click to capture it.
+- **Window.** Move the pointer over a window to highlight it, then click to capture it. Whatever
+  covers the highlighted window is photographed with it: the capture is a picture of that
+  rectangle of screen, not of the window on its own, so move an overlapping window away first.
+- **Full screen.** The whole display arrives already selected, so press `Enter` to capture it.
+  It is an ordinary selection until you do, so you can still drag out a smaller one, resize it
+  with the handles, or nudge it with the arrow keys.
 - **`Esc`** cancels, on every display at once, and writes no file.
-- **`C`** copies the hex colour under the magnifier to the clipboard, in region and window mode
-  alike, whether or not anything is selected.
+- **`C`** copies the hex colour under the magnifier to the clipboard, in all three modes alike,
+  whether or not anything is selected.
 
-Every capture is saved as a PNG under `~/Pictures`, named `Snapdeck <date> at <time>.png`, and is
-put on the clipboard at the same time, ready to paste. The region is captured again at the
-display's own pixel density rather than cropped out of the frozen frame, so on a Retina display
-the file is twice the size in pixels that you selected in points.
+Every capture is saved as a PNG under `~/Pictures`, named `Snapdeck <date> at <time>.png` in your
+own time zone, and is put on the clipboard at the same time, ready to paste. The region is
+captured again at the display's own pixel density rather than cropped out of the frozen frame, so
+on a Retina display the file is twice the size in pixels that you selected in points.
+
+That second capture happens the moment you press `Enter`, not when the screen froze, so the file
+holds the screen as it is then rather than the frozen frame you selected against. For still
+content the two are the same picture; over a video, an animation or anything else that moves, the
+saved pixels are the ones from the instant you confirmed.
 
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 
@@ -58,11 +68,6 @@ MIT, see [LICENSE](LICENSE).
 
 ## Known limitations
 
-- **Full screen mode selects rather than captures.** `Cmd+Shift+9` and the menu's Capture Full
-  Screen open the overlay in the same free-selection mode as `Cmd+Shift+7`. They do not yet capture
-  the whole display in one keystroke; select the area you want and press `Enter`.
-- **Filenames carry the UTC time, not yours.** A capture taken at 20:05 in UTC+3 is saved as
-  `... at 17.05.06.png`. The name is built from the system clock without a time zone database.
 - **Fullscreen Spaces.** Capturing while another app owns a fullscreen Space does not work yet. The
   overlay window is created with the frozen frame intact, but macOS keeps it on a normal Space, so
   nothing appears over the fullscreen app. Setting `canJoinAllSpaces | fullScreenAuxiliary`, raising the
