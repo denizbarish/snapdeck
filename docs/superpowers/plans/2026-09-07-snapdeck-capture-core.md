@@ -2466,6 +2466,33 @@ git add apps/desktop/src/overlay
 git commit -m "feat(overlay): add selection geometry, drag-to-select, and resize handles"
 ```
 
+### Task 7 incelemesinden gelen ek kurallar
+
+**1. Yeniden boyutlandırma sabit bir çapadan hesaplanır.** `resizeRect` çapayı kendisine verilen
+dikdörtgenden türetiyor; çağıran ona her hareket olayında güncel seçimi verdiği için kullanıcı karşı
+kenarı geçtiği anda çapa yok oluyor ve seçim büyümek yerine ötelenmeye başlıyor: genişliği, iki olay
+arasında farenin gittiği mesafe kadar, yani birkaç piksellik bir kayış. Tutamağa basıldığında o anki
+seçim bir ref'e alınır ve her hareket o sabit kaynaktan hesaplanır. Testine, karşı kenarı geçtikten
+sonraki **ikinci** adım da eklenir; tek adımlık test bu hatayı görmez.
+
+**2. Kullanılamaz seçimde Enter oturumu bitirmez.** `isUsable` başarısız olduğunda tüm overlay'leri
+kapatmak, kullanıcı bilinçli olarak Enter'a bastıktan sonra hiçbir açıklama olmadan her şeyi
+sonlandırmak demektir. Enter, kullanılamaz bir dikdörtgende hiçbir şey yapmaz ve overlay açık kalır.
+`dismissAll` yalnızca Escape ve gerçek bir yakalama içindir.
+
+**3. Boş tıklama ekranda 0x0 artefakt bırakmaz.** `onPointerDown` koşulsuz olarak sıfır boyutlu bir
+seçim kuruyor ve bırakma artık onaylamadığı için ekranda 1 piksellik bir çerçeve, üst üste binmiş sekiz
+tutamak ve `0 × 0` yazan bir pil kalıyor. `onPointerUp`, seçim kullanılabilir değilse onu `null` yapar.
+
+**4. Aynı anda yalnızca bir overlay seçim gösterir.** Çok ekranlı kurulumda kullanıcı A ekranında çizip
+B ekranına geçebilir; A'da beyaz dikdörtgen ve "Enter to capture" ipucu asılı kalır, oysa Enter yalnızca
+odaktaki pencereye gider. Pencere odağı kaybettiğinde seçim temizlenir.
+
+**5. Küçük sertleştirmeler.** `onPointerMove` başında `event.buttons === 0` ise sürükleme durumu
+sıfırlanır (kaçan bir `pointerup` sonrası sessiz yeniden boyutlandırmayı engeller); `onPointerDown` sol
+tuş dışındaki düğmeleri yok sayar; `selection.test.ts`'e en az bir köşe tutamağı (`nw`, iki kenarı
+birden taşır) eklenir, çünkü şu an sekiz tutamaktan yalnızca `e` sınanıyor.
+
 ---
 
 ### Task 8: Pencereye yapışma
