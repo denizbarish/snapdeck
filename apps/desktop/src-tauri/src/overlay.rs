@@ -136,8 +136,8 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
                 panic_text(payload.as_ref())
             );
             let handle = app.clone();
-            // Any overlay that did get built is unusable now, and Task 7's
-            // Escape does not exist yet. Whatever is left of the guard rides
+            // Any overlay that did get built is unusable now: it is showing
+            // a backdrop for a capture that died. Whatever is left of the guard rides
             // into the closure and drops only after the cleanup has run, so the
             // slot stays claimed for the whole recovery.
             let _ = app.run_on_main_thread(move || {
@@ -383,8 +383,9 @@ fn build_overlay_windows(
             }
         }
     }
-    // A half-open set of overlays is worse than none: the windows that did open
-    // swallow every click with no way to dismiss them before Task 7's Escape.
+    // A half-open set of overlays is worse than none: the displays that did open
+    // are frozen against displays that are still live, and the user cannot tell
+    // which is which.
     // The frames go too: the capture is over, this thread still holds the
     // capture slot, so nothing can be writing them.
     if failed {

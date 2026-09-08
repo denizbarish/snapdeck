@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
-  "description": "The overlay window is built hidden and shows itself once the frozen frame has painted, so the user never faces a transparent click-swallowing rectangle. It closes itself when the frame fails to load, otherwise the window would stay hidden forever and hold its label against the next capture; the deadline for a load that neither succeeds nor fails is enforced in Rust, which does not need a permission. Nothing else is needed: the frame's absolute path arrives as a query parameter, and reading the PNG uses the asset protocol scope declared in tauri.conf.json.",
+  "description": "The overlay window is built hidden and shows itself once the frozen frame has painted, so the user never faces a transparent click-swallowing rectangle. It then asks for focus, because this is a menu bar agent that is not the active application and its Escape, Enter and arrow keys would otherwise reach nobody. It closes itself when the frame fails to load, otherwise the window would stay hidden forever and hold its label against the next capture; the deadline for a load that neither succeeds nor fails is enforced in Rust, which does not need a permission. Nothing else is needed: the frame's absolute path arrives as a query parameter, reading the PNG uses the asset protocol scope declared in tauri.conf.json, and this application's own commands are not gated by the ACL.",
   "windows": ["overlay-*"],
-  "permissions": ["core:window:allow-show", "core:window:allow-close"]
+  "permissions": ["core:window:allow-show", "core:window:allow-set-focus", "core:window:allow-close"]
 }

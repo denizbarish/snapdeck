@@ -1,3 +1,4 @@
+mod commands;
 mod output;
 mod overlay;
 mod shortcuts;
@@ -26,6 +27,7 @@ pub fn run() {
                 .build(),
         )
         .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![commands::close_overlays])
         .setup(|app| {
             let handle = app.handle().clone();
             tray::build_tray(&handle)?;
