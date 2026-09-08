@@ -2043,6 +2043,40 @@ alındığında belirlenir), (b) `LSUIElement` uygulamasında `NSApp.activate` i
 İkisi de tutmazsa bu, README'de yazılı bilinen bir sınırlama olarak kabul edilir ve daha fazla
 zorlanmaz.
 
+
+### Task 6 üçüncü incelemesinden gelen ek kurallar
+
+**15. Gösterme son tarihi Rust tarafındadır, JavaScript'te değil.** Pencere `.visible(false)` kurulduğu
+için sayfa hiç kompoze edilmez; WebKit görünmeyen sayfada DOM zamanlayıcılarını kısar, yani 500 ms'lik
+emniyet zamanlayıcısı zamanında ateşlenmeyebilir. Dahası React mount olmadan (eksik sorgu parametresi,
+paket yükleme hatası, CSP reddi) hiç kurulmaz ve pencere etiketini tutan gizli bir hayalet olarak kalır.
+Bunun yerine pencereler kurulduktan sonra Rust tarafında bir son tarih işletilir: süre dolduğunda ana iş
+parçacığında hâlâ görünür olmayan her overlay kapatılır. Frontend yalnızca `onLoad` sonrası gösterir ve
+`onError` durumunda kapatır; JavaScript zamanlayıcısı tamamen kaldırılır.
+
+**16. Panik kurtarma yolu, uçuştaki başka bir yakalamanın karelerini silmemelidir.** Guard şu an
+`run_capture`'a taşınıyor, yani panik çözülürken `catch_unwind` dönmeden önce serbest kalıyor; bu aralıkta
+yeni bir yakalama slotu kapıp kare yazabiliyor, sonra panikleyen yakalamanın kuyruğa alınmış
+`close_overlays`'i o taze kareleri siliyor ve yeni pencereler var olmayan dosyaları gösteriyor. Guard,
+spawn kapanışında tutulur ve kurtarma kapanışına taşınır, böylece slot kurtarma bitene kadar dolu kalır.
+
+**17. Kare silme işlemi `close_overlays`'ten ayrılır.** Şu an `close_overlays` hem pencereleri kapatıyor
+hem dosyaları siliyor. Task 7 Escape'i bağladığında, uçuşta bir yakalama varken basılan Escape işçinin
+yazmakta olduğu kareleri silecek ve kullanıcı hiç overlay göremeyecek. `discard_frozen_frames` ayrı bir
+fonksiyon olarak çağrılır.
+
+**18. Kareler oturum sonunda da silinir.** Task 6'da `close_overlays`'i tetikleyen tek şey bir sonraki
+yakalamadır; Escape Task 7'de gelir. Yani kullanıcı yakalama yapıp uygulamayı kapattığında her ekranın
+tam çözünürlüklü kayıpsız kopyası `~/Library/Caches` altında kalır. Çıkış olayında da silinir.
+
+**19. Ana iş parçacığındaki `MainThreadMarker` iddiası panik etmez.** `expect`, `catch_unwind` kapsamı
+dışındaki bir kapanışta AppKit olay döngüsünü çökertir. `let Some(_) = ... else { log; return; }` kullanılır.
+Doküman yorumu "kanıtlar" değil "iddia eder" der: ham işaretçi dönüşümü hâlâ denetlenmemiştir.
+
+**20. `discard_frozen_frames` bir dizin yolu alır, `AppHandle` değil.** Paylaşılan bir dizinden dosya
+silen bir fonksiyonun testi, geçici bir dizine `frozen-1.png`, `frozen-abc.png` ve bir yem dosyası koyup
+tam olarak birinin silindiğini doğrulayabilmelidir.
+
 ---
 
 ### Task 7: Seçim geometrisi ve overlay arayüzü
