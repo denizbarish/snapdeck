@@ -109,7 +109,7 @@ Global kısayol tetiklendiğinde:
 
 ### 5.3 İzinler
 
-macOS ekran kaydı izni (TCC) ilk yakalamada istenir. Reddedilirse uygulama sessizce boş kare
+macOS ekran kaydı izni (TCC) ilk yakalamada istenir. İzin verildikten sonra çalışan süreç bunu yeniden başlatılmadan göremez, bu yüzden yönlendirme metni kullanıcıya uygulamayı yeniden başlatmasını da söyler. Reddedilirse uygulama sessizce boş kare
 üretmez; yönlendiren bir modal açar ve Sistem Ayarları'ndaki ilgili panele derin link verir.
 İzin durumu her yakalama öncesi kontrol edilir, kullanıcı izni sonradan geri alabilir.
 

@@ -1401,6 +1401,14 @@ git add crates/capture
 git commit -m "feat(capture): add macOS screen recording permission checks"
 ```
 
+**Aşağı akış uyarısı (Task 6 ve Task 10 bunu bilmek zorunda).** Çalışan bir süreç, ekran kaydı izni
+verildikten sonra bunu yeniden başlatılmadan göremez; macOS'un ayarlar panelinde "Quit & Reopen"
+önermesinin sebebi budur. Kullanıcı `SETTINGS_DEEP_LINK`'i izleyip anahtarı açar ve uygulamaya geri
+dönerse, preflight `Granted` derken `SCShareableContent::get()` hâlâ başarısız olabilir; hata o zaman
+`PermissionDenied` değil `Platform` olarak gelir. Yani içerik listelemeden gelen bir `Platform` hatası,
+iznin kullanılabilir olduğunun kanıtı değildir. İzin yönlendirme arayüzü kullanıcıya anahtarı açtıktan
+sonra uygulamayı yeniden başlatmasını da söylemelidir.
+
 ---
 
 ### Task 5: Uygulama durumu, tepsi menüsü ve global kısayol
