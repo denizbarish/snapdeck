@@ -3,10 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <title>Snapdeck Overlay</title>
+    <style>
+      html, body, #overlay-root { margin: 0; height: 100%; width: 100%; overflow: hidden; }
+      body { background: transparent; cursor: crosshair; user-select: none; }
+    </style>
   </head>
   <body>
-    <!-- Placeholder overlay entry point. Task 6 replaces this file with the real
-         overlay document and its /src/overlay/main.tsx module script. -->
     <div id="overlay-root"></div>
+    <script type="module" src="/src/overlay/main.tsx"></script>
   </body>
 </html>

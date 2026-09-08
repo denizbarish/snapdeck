@@ -1,3 +1,5 @@
+mod output;
+mod overlay;
 mod shortcuts;
 mod state;
 mod tray;

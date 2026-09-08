@@ -2,8 +2,8 @@ use snapdeck_capture::macos::MacCapturer;
 
 /// Shared application state. The capturer is stateless and cheap to share.
 pub struct AppState {
-    /// Read by the capture commands added in Task 10.
-    #[allow(dead_code)]
+    /// Read by `overlay::open_overlays` and by the capture commands added in
+    /// Task 10.
     pub capturer: MacCapturer,
 }
 

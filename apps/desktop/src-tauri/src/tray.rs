@@ -5,10 +5,10 @@ use tauri::{
 };
 
 /// Single entry point for every capture request, from the tray or a shortcut.
-/// Task 6 replaces the body with `crate::overlay::open_overlays`.
 pub fn request_capture(app: &AppHandle, mode: &str) {
-    let _ = app;
-    println!("capture requested: {mode}");
+    if let Err(err) = crate::overlay::open_overlays(app, mode) {
+        eprintln!("failed to open overlays: {err}");
+    }
 }
 
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {

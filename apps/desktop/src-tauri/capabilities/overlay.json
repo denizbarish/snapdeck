@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "The overlay windows resolve the app cache directory and join the frozen frame's filename. Without this the ACL denies both calls and the overlay renders nothing. Reading the PNG itself needs no permission: the asset protocol scope lives in tauri.conf.json.",
+  "windows": ["overlay-*"],
+  "permissions": ["core:path:allow-resolve-directory", "core:path:allow-join"]
+}
