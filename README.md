@@ -4,7 +4,7 @@ Snapdeck is an open-source macOS menu bar app for capturing, annotating, and sha
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 14 or later
 - Rust stable toolchain
 - Node.js 24
 - pnpm 11

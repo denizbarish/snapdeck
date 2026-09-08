@@ -37,7 +37,7 @@ diğerlerinden ayrıştığı nokta.
 | Masaüstü çerçeve | Tauri v2 (2.9.x) | ~10 MB bundle, düşük RAM. Electron'un ~150 MB'ı "lightweight" hedefiyle çelişiyor. |
 | Çekirdek dil | Rust | Yakalama ve görüntü işleme sıcak yolu; native API'lere doğrudan bağlanır. |
 | Arayüz | React 19 + TypeScript + Tailwind + shadcn/ui | Mevcut stack, editör için canvas ile iyi çalışıyor. |
-| macOS yakalama | `screencapturekit` crate (macOS 13+) | Güvenli, idiomatik binding. `scap` bakımsız; `xcap`'in frame tipinde stride, pixel format ve timestamp yok. |
+| macOS yakalama | `screencapturekit` crate (macOS 14+) | Güvenli, idiomatik binding. `scap` bakımsız; `xcap`'in frame tipinde stride, pixel format ve timestamp yok. Taban 14.0, çünkü `SCScreenshotManager` Apple'da macOS 14 API'si; 13.0 için yakalamanın `SCStream` üzerine kurulması gerekirdi. |
 | Windows yakalama (v2) | `windows-capture` (Windows.Graphics.Capture) | Trait arkasında, üst katman değişmeden takılır. |
 | Eklenti | Manifest V3 + TypeScript + Vite/CRXJS | MV3 zorunlu; `captureBeyondViewport` yalnızca CDP'de olduğu için eklenti scroll+stitch yapar. |
 | Paket yöneticisi | pnpm workspaces + Cargo workspace | Tek monorepo, iki dil. |

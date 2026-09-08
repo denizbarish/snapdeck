@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Hedef platform: macOS 13.0+ (ScreenCaptureKit gereksinimi). Windows/Linux bu planın dışında.
+- Hedef platform: macOS 14.0+. `SCScreenshotManager` Apple'da macOS 14 API'sidir, crate'te `macos_14_0` feature'ı arkasındadır; taban bu yüzden 13.0 değil 14.0. Windows/Linux bu planın dışında.
 - Doğrulanmış sürümler, birebir kullanılacak: `tauri = "2.11.5"`, `tauri-plugin-global-shortcut = "2.3.2"`, `tauri-plugin-clipboard-manager = "2.3.3"`, `tauri-plugin-store = "2.4.4"`, `screencapturekit = "9.0.1"`, `core-graphics = "0.25"`, `image = "0.25"`.
 - Kod, yorum, commit mesajı, README ve uygulama arayüzü metinleri **İngilizce**. Açık kaynak proje, uluslararası katkıcı hedefliyor. Sadece `docs/superpowers/` altındaki tasarım ve plan dokümanları Türkçe.
 - Hiçbir ağ çağrısı yok. Uygulama tamamen yereldir, telemetri yoktur.
@@ -357,7 +357,7 @@ pub fn run() {
     "active": true,
     "targets": ["dmg", "app"],
     "icon": ["icons/icon.icns"],
-    "macOS": { "minimumSystemVersion": "13.0" }
+    "macOS": { "minimumSystemVersion": "14.0" }
   }
 }
 ```
@@ -431,7 +431,7 @@ jobs:
 
 `LICENSE`: standart MIT metni, telif satırı `Copyright (c) 2026 Snapdeck contributors`.
 
-`README.md` şunları içermeli: tek cümlelik ürün tanımı, gereksinimler (macOS 13+, Rust stable, Node 24, pnpm 11), `pnpm install` ve `pnpm tauri dev` adımları, ekran kaydı izninin ilk yakalamada isteneceği notu, ve şu uyarı bölümü:
+`README.md` şunları içermeli: tek cümlelik ürün tanımı, gereksinimler (macOS 14+, Rust stable, Node 24, pnpm 11), `pnpm install` ve `pnpm tauri dev` adımları, ekran kaydı izninin ilk yakalamada isteneceği notu, ve şu uyarı bölümü:
 
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 
@@ -974,7 +974,7 @@ Doğrulanmış screencapturekit 9.0.1 API'si:
 `SCStreamConfiguration::new().with_width(u32).with_height(u32).with_pixel_format(PixelFormat::BGRA).with_shows_cursor(bool).with_source_rect(CGRect)`;
 
 Sürüm kapısı uyarısı: `capture_image_in_rect` crate'in `macos_15_2` feature'ı arkasındadır ve macOS 15.2 gerektirir.
-Ürün tabanı macOS 13.0 olduğu için kullanılmaz. Bölge yakalama, ekran filtresi + `with_source_rect` ile yapılır;
+Ürün tabanı macOS 14.0 olduğu için kullanılmaz. Bölge yakalama, ekran filtresi + `with_source_rect` ile yapılır;
 bu API sürüm kapısı altında değildir.
 `SCScreenshotManager::capture_image(&filter, &config) -> Result<CGImage, SCError>`;
 `SCStreamConfiguration::with_source_rect(CGRect)`, ekranın kendi başlangıç noktasına göre bölge seçer;
@@ -1050,7 +1050,7 @@ use crate::{
     ScreenCapturer,
 };
 
-/// ScreenCaptureKit-backed capturer. Requires macOS 13.0 or newer.
+/// ScreenCaptureKit-backed capturer. Requires macOS 14.0 or newer.
 pub struct MacCapturer;
 
 impl MacCapturer {
