@@ -16,6 +16,21 @@ import type { EditorDocument } from './model'
 import { renderDocument, viewOf } from './render'
 
 /**
+ * The formats a finished picture can leave in.
+ *
+ * Two, and WebP is deliberately not the third. A canvas is the only encoder
+ * this package has, and WKWebView's canvas does not encode WebP: asking for it
+ * returns PNG bytes, silently, which the guard in `toBlob` now refuses. A
+ * format that can only ever fail is worse than one that is not offered, so it
+ * is not offered.
+ *
+ * PNG is lossless and is what a capture already is, so it is the default and
+ * the one Save re-writes in place. JPEG is here because a full-resolution
+ * screenshot is a large file to send someone.
+ */
+export type ExportType = 'image/png' | 'image/jpeg'
+
+/**
  * Render a document to an offscreen canvas at full source resolution.
  *
  * No transform is set, so one source pixel is one output pixel and the canvas
@@ -41,9 +56,9 @@ export function exportCanvas(image: CanvasImageSource, doc: EditorDocument): Off
 /**
  * Encode a document to an image file.
  *
- * `quality` is ignored by the PNG encoder and applies to JPEG and WebP, which
- * is the platform's rule rather than one imposed here; it is passed through
- * untouched so the caller's number means what the spec says it means.
+ * `quality` is ignored by the PNG encoder and applies to JPEG, which is the
+ * platform's rule rather than one imposed here; it is passed through untouched
+ * so the caller's number means what the spec says it means.
  *
  * A format the platform will not encode is refused rather than substituted.
  * `convertToBlob` is specified to fall back to PNG when it cannot honour the
@@ -51,13 +66,16 @@ export function exportCanvas(image: CanvasImageSource, doc: EditorDocument): Off
  * build, asking WKWebView for `image/webp` returns a blob of PNG bytes. The
  * caller names the file after the format it asked for, so without this check
  * the app writes PNG under `.webp` and hands the user a file whose extension
- * is a lie. Refusing surfaces in the editor's own status bar, where a save
- * that did not happen is visible; the substitution was not visible anywhere.
+ * is a lie. WebP is no longer on `ExportType` for exactly that reason, and the
+ * check stays anyway: it is the type system's word against the encoder's, and
+ * the encoder is the one holding the bytes. Refusing surfaces in the editor's
+ * own status bar, where a save that did not happen is visible; the substitution
+ * was not visible anywhere.
  */
 export async function toBlob(
   image: CanvasImageSource,
   doc: EditorDocument,
-  type: 'image/png' | 'image/jpeg' | 'image/webp',
+  type: ExportType,
   quality?: number,
 ): Promise<Blob> {
   const blob = await exportCanvas(image, doc).convertToBlob({ type, quality })

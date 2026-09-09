@@ -51,14 +51,32 @@ const MAX_STROKE = 24
 const PIXEL_SLACK = 2
 
 /**
- * What left through the props, and a switch to make one handover refuse.
+ * What left through the props, and two switches to steer one handover.
  *
  * `failNext` is how a host that cannot take the picture is stood up: the only
  * operation in this component that can fail in a way the user has to be told
  * about is the handover, and the status bar's behaviour around that failure is
  * not reachable any other way.
+ *
+ * `savedAs` is the file name a host reports back, and it is null by default
+ * because a host that names nothing is the case every other test in this file
+ * mounts: naming one would put a message in the status bar that those tests
+ * assert the absence of.
+ *
+ * `types` is what `onExport` was told the blob is, kept beside the blobs
+ * because the two are separate claims. The type argument is what picks the
+ * extension on the host's side, and the blob's own type is what the encoder
+ * actually produced; a format control that changed one without the other would
+ * be the exact defect that put PNG bytes in a `.webp` file.
  */
-type Delivered = { saved: Blob[]; copied: Blob[]; closed: number; failNext: boolean }
+type Delivered = {
+  saved: Blob[]
+  types: string[]
+  copied: Blob[]
+  closed: number
+  failNext: boolean
+  savedAs: string | null
+}
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
@@ -70,7 +88,7 @@ let container: HTMLDivElement | null = null
  * mid-export still resolves, and a shared record would let the last test's
  * picture arrive in the next test's list and be measured there.
  */
-let delivered: Delivered = { saved: [], copied: [], closed: 0, failNext: false }
+let delivered: Delivered = { saved: [], types: [], copied: [], closed: 0, failNext: false, savedAs: null }
 
 async function mountEditor(): Promise<void> {
   container = document.createElement('div')
@@ -81,7 +99,7 @@ async function mountEditor(): Promise<void> {
   container.style.height = `${CONTAINER.height}px`
   document.body.appendChild(container)
 
-  const own: Delivered = { saved: [], copied: [], closed: 0, failNext: false }
+  const own: Delivered = { saved: [], types: [], copied: [], closed: 0, failNext: false, savedAs: null }
   delivered = own
   // Transparent, not noise: this file measures ink, and a picture under it
   // would make every pixel opaque and `inkBounds` the whole canvas.
@@ -93,12 +111,14 @@ async function mountEditor(): Promise<void> {
       image={image}
       width={SOURCE.width}
       height={SOURCE.height}
-      onExport={(blob) => {
+      onExport={(blob, type) => {
         if (own.failNext) {
           own.failNext = false
           throw new Error('the host would not take the picture')
         }
         own.saved.push(blob)
+        own.types.push(type)
+        return own.savedAs ?? undefined
       }}
       onCopy={(blob) => {
         own.copied.push(blob)
@@ -665,6 +685,52 @@ describe('the status bar', () => {
     await userEvent.click(byTestId('save'))
     await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
     await vi.waitFor(() => expect(maybeTestId('notice')).toBeNull())
+  })
+})
+
+describe('the save format', () => {
+  // The control exists because the format decides the file: PNG replaces the
+  // capture, JPEG lands beside it. That only holds if pressing JPEG reaches
+  // both the encoder and the type the host names the file after, so both are
+  // asserted rather than the button's own colour.
+  it('opens on PNG and encodes JPEG once JPEG is chosen', async () => {
+    expect(byTestId('format-png').getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('format-jpeg').getAttribute('aria-pressed')).toBe('false')
+
+    await userEvent.click(byTestId('save'))
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    expect(delivered.types[0]).toBe('image/png')
+    expect((delivered.saved[0] as Blob).type).toBe('image/png')
+
+    await userEvent.click(byTestId('format-jpeg'))
+    expect(byTestId('format-jpeg').getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('format-png').getAttribute('aria-pressed')).toBe('false')
+
+    await userEvent.click(byTestId('save'))
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(2))
+    expect(delivered.types[1]).toBe('image/jpeg')
+    expect((delivered.saved[1] as Blob).type).toBe('image/jpeg')
+  })
+
+  // A clipboard image is pixels handed to the next application, not a file, so
+  // there is nothing for a lossy encode to buy and detail for it to cost.
+  it('copies losslessly even with JPEG chosen', async () => {
+    await userEvent.click(byTestId('format-jpeg'))
+    await userEvent.click(byTestId('copy'))
+    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    expect((delivered.copied[0] as Blob).type).toBe('image/png')
+  })
+
+  // Saving as PNG overwrites the capture and saving as JPEG leaves a second
+  // file beside it. The name is the only thing that tells those two apart, and
+  // the editor has no path of its own, so the host's answer has to reach the
+  // status bar unchanged.
+  it('shows the name the host says it wrote', async () => {
+    delivered.savedAs = 'Snapdeck 2026-09-09 at 12.00.01.jpg'
+    await userEvent.click(byTestId('save'))
+    await vi.waitFor(() =>
+      expect(byTestId('notice').textContent).toBe('Saved Snapdeck 2026-09-09 at 12.00.01.jpg'),
+    )
   })
 })
 

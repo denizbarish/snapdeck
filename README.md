@@ -93,10 +93,26 @@ had drawn in it, so a capture taken while you are still annotating cannot destro
 The colour swatches, the custom-colour well and the width slider apply to the tool in hand and to
 the selected annotation. Width also sets the text size, the badge size and the redaction strength.
 
-`Save` writes the edited picture back over the capture in `~/Pictures`, under the same name, by
-writing a temporary file beside it and renaming it into place: a failed save leaves the picture
-you already had rather than half of a new one. `Copy` puts the edited picture on the clipboard.
-`Close` closes the window and keeps the file on disk.
+### Saving
+
+`PNG` and `JPEG` beside `Save` choose the format, and `PNG` is where it starts.
+
+Saving as PNG writes the edited picture back over the capture in `~/Pictures`, under the same
+name, by writing a temporary file beside it and renaming it into place: a failed save leaves the
+picture you already had rather than half of a new one. Saving as JPEG cannot overwrite a PNG, so
+it writes a second file beside the capture, same name, `.jpg` instead of `.png`, and leaves the
+original untouched. Either way the status bar names the file that was written.
+
+JPEG is worth choosing when the picture has to travel and it is mostly photographic: a 2200 x 1500
+capture of a desktop measured 544 KB as a PNG and 393 KB as a JPEG. A small capture of flat
+interface goes the other way, because that is what PNG is good at: 103 KB as a PNG and 118 KB as a
+JPEG. It is encoded at quality 0.92, which is high for this format on purpose, because a
+screenshot is mostly text and flat colour and those are what JPEG handles worst. Text will still
+be very slightly softer than the PNG. If that matters, keep PNG.
+
+`Copy` puts the edited picture on the clipboard. It is unaffected by the format buttons: a
+clipboard image is handed to the next application as pixels rather than as a file, so it is always
+the lossless one. `Close` closes the window and keeps the file on disk.
 
 ### Keyboard
 
@@ -104,7 +120,7 @@ you already had rather than half of a new one. `Copy` puts the edited picture on
 | --- | --- |
 | `Cmd+Z` / `Cmd+Shift+Z` | Undo, redo. Every edit is one step, including a slider drag. |
 | `Cmd+C` | Copy the edited picture to the clipboard. |
-| `Cmd+S` | Save it over the capture. |
+| `Cmd+S` | Save it, in the format the toolbar is set to. |
 | `Delete` / `Backspace` | Remove the selected annotation. |
 | `Esc` | Drop the selection; press it again with nothing selected to close the window. |
 

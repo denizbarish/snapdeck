@@ -30,7 +30,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ChangeEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
 import { TOOLBAR_MIN_WIDTH } from './chrome'
 import { addLayer, History, removeLayer, setCrop, updateLayer, type Command } from './commands'
-import { exportCanvas, toBlob } from './export'
+import { exportCanvas, toBlob, type ExportType } from './export'
 import { handleAtPoint, layerAtPoint, moveLayer, resizeLayer, type Handle } from './hit'
 import {
   boundsOf,
@@ -67,13 +67,68 @@ export type EditorProps = {
   image: CanvasImageSource
   width: number
   height: number
-  onExport(blob: Blob, type: string): void | Promise<void>
+  /**
+   * Takes the finished picture, and may name what it wrote.
+   *
+   * A returned string is shown in the status bar verbatim, which is how the
+   * user finds out whether Save replaced the capture or left a second file
+   * beside it. The editor cannot work that out for itself: it has no path, by
+   * design, and the host is the only side that knows where the bytes landed.
+   * Returning nothing is not an error, it simply says nothing.
+   */
+  onExport(blob: Blob, type: ExportType): void | string | Promise<void | string>
   onCopy(blob: Blob): void | Promise<void>
   onClose(): void
 }
 
-/** What the two callbacks are handed. The only format this editor writes. */
-const EXPORT_TYPE = 'image/png'
+/**
+ * The formats Save offers, in the order they appear, and the one it opens on.
+ *
+ * PNG first and PNG by default: the capture on disk is already a PNG, so it is
+ * the format in which Save updates the file the user has rather than leaving a
+ * second one beside it, and it is lossless, which is what a screenshot of text
+ * wants. JPEG is the deliberate choice, for the case where the picture is going
+ * to somebody over a link that will not take twelve megabytes.
+ */
+const FORMATS: { type: ExportType; label: string }[] = [
+  { type: 'image/png', label: 'PNG' },
+  { type: 'image/jpeg', label: 'JPEG' },
+]
+const DEFAULT_FORMAT: ExportType = 'image/png'
+
+/**
+ * The quality JPEG is encoded at.
+ *
+ * High, and deliberately higher than a photograph would be given, because a
+ * screenshot is the worst case for this encoder rather than its best one. JPEG
+ * spends its bit budget on smooth gradients and throws away the high-frequency
+ * detail a photograph does not miss; a screenshot is almost entirely the thing
+ * it throws away, hard edges between flat colours, and every one of those edges
+ * is a glyph. The visible failure is ringing around text, which turns a
+ * screenshot of a terminal into a screenshot of a terminal seen through water,
+ * and it is worse on coloured text because the encoder subsamples chroma.
+ *
+ * 0.92 rather than 1.0: the top of the scale roughly doubles the file for
+ * artefacts that are already below what the eye finds on text, which gives up
+ * the entire reason somebody chose JPEG. Anything under about 0.85 starts to
+ * show on thin glyph strokes, which is the one thing a screenshot is usually of.
+ */
+const JPEG_QUALITY = 0.92
+
+/** What to encode `type` at. PNG is lossless and takes no quality at all. */
+function qualityFor(type: ExportType): number | undefined {
+  return type === 'image/jpeg' ? JPEG_QUALITY : undefined
+}
+
+/**
+ * What Copy encodes, whatever the toolbar says.
+ *
+ * The format control is about a file: how big it is on disk and whether the
+ * capture is replaced or joined by a second one. A clipboard image is neither.
+ * It is handed to the next application as pixels, so encoding it as JPEG on the
+ * way would throw detail away in exchange for nothing at all.
+ */
+const COPY_TYPE: ExportType = 'image/png'
 
 /** `PointerEvent.button` for the left mouse button, the only one that draws. */
 const PRIMARY_BUTTON = 0
@@ -183,9 +238,17 @@ type TextSession = { origin: Point; content: string }
  */
 type StrokeGesture = { origin: Layer | null }
 
-/** Which of the two things that can fail put a message in the status bar. */
+/** Which of the two things that can speak put a message in the status bar. */
 type NoticeSource = 'paint' | 'deliver'
-type Notice = { source: NoticeSource; message: string }
+/**
+ * Whether the line is a warning or a plain report of something that worked.
+ *
+ * The two share one line and must not look alike: a save that named the file it
+ * wrote is information, and colouring it like the failures would train the user
+ * to read past the failures.
+ */
+type NoticeTone = 'warning' | 'report'
+type Notice = { source: NoticeSource; tone: NoticeTone; message: string }
 
 export function Editor({ image, width, height, onExport, onCopy, onClose }: EditorProps): JSX.Element {
   const historyRef = useRef<History | null>(null)
@@ -199,6 +262,8 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     strokeWidth: DEFAULT_STROKE,
     obscureMode: DEFAULT_OBSCURE_MODE,
   })
+  /** The format Save encodes in. Not a tool setting: it is about the file. */
+  const [format, setFormat] = useState<ExportType>(DEFAULT_FORMAT)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   /** The layer a drag is building or transforming, shown in place of the stored one. */
   const [draft, setDraft] = useState<Layer | null>(null)
@@ -321,7 +386,11 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     if (!canvas || box.width <= 0 || box.height <= 0) return
     const ctx = canvas.getContext('2d')
     if (!ctx) {
-      setNotice({ source: 'paint', message: 'This browser would not give the editor a 2D canvas.' })
+      setNotice({
+        source: 'paint',
+        tone: 'warning',
+        message: 'This browser would not give the editor a 2D canvas.',
+      })
       return
     }
     // The backing store is in device pixels and the element is in CSS pixels,
@@ -390,6 +459,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
       console.error('editor: could not draw the document', error)
       setNotice({
         source: 'paint',
+        tone: 'warning',
         message: 'Some layers could not be drawn. Do not treat this preview as redacted.',
       })
     }
@@ -659,11 +729,15 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     if (draft && draft.id === active.origin.id) run(updateLayer(active.origin.id, draft))
   }
 
-  const deliver = (send: (blob: Blob) => void | Promise<void>, what: string): void => {
+  const deliver = (
+    send: (blob: Blob) => void | string | Promise<void | string>,
+    what: string,
+    type: ExportType,
+  ): void => {
     // The history's document rather than the preview: a drag still in progress
     // has not been committed, and exporting it would ship a shape the user has
     // not let go of yet.
-    toBlob(image, history.document, EXPORT_TYPE)
+    toBlob(image, history.document, type, qualityFor(type))
       .then((blob) => {
         // Cleared only once the handover has happened, and only the delivery's
         // own message: a warning about a file that was never written has no
@@ -671,14 +745,35 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
         clearNotice('deliver')
         return send(blob)
       })
+      .then((written) => {
+        // Only when the host said where it put them. Saving as JPEG leaves a
+        // second file beside the capture and saving as PNG overwrites it, and
+        // the file name is the only thing that tells those two apart; a host
+        // that names nothing simply leaves the line as it was.
+        if (typeof written === 'string' && written.length > 0) {
+          setNotice({ source: 'deliver', tone: 'report', message: `Saved ${written}` })
+        }
+      })
       .catch((error: unknown) => {
         console.error(`editor: could not ${what} the picture`, error)
         setNotice({
           source: 'deliver',
+          tone: 'warning',
           message: `The picture could not be ${what === 'copy' ? 'copied' : 'saved'}.`,
         })
       })
   }
+
+  /**
+   * The two ways a picture leaves, named once.
+   *
+   * Save is reachable from the button, from Cmd+S and from Cmd+S inside an open
+   * text box, and all three have to encode in the format the toolbar is showing
+   * and tell the host which one that was. Writing that out three times is how
+   * one of them ends up saving in yesterday's format.
+   */
+  const save = (): void => deliver((blob) => onExport(blob, format), 'save', format)
+  const copy = (): void => deliver(onCopy, 'copy', COPY_TYPE)
 
   // No dependency array. The handler closes over the document, the selection
   // and the settings, all of which change on almost every render, so a
@@ -721,7 +816,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
           // `History.run` is synchronous, so the layer this adds is already in
           // `history.document` by the time `deliver` reads it.
           commitText()
-          deliver((blob) => onExport(blob, EXPORT_TYPE), 'save')
+          save()
         }
         return
       }
@@ -741,13 +836,13 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
       }
       if (meta && key === 'c') {
         event.preventDefault()
-        deliver(onCopy, 'copy')
+        copy()
         return
       }
       if (meta && key === 's') {
         // Without this the browser's own save dialog opens over the editor.
         event.preventDefault()
-        deliver((blob) => onExport(blob, EXPORT_TYPE), 'save')
+        save()
         return
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -806,6 +901,14 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
           flexWrap: 'wrap',
           padding: '8px 12px',
           borderBottom: '1px solid #3a3a3c',
+          // `min-width` is a content-box measurement by default, so the toolbar
+          // was demanding its minimum PLUS its 24 points of padding: at the
+          // window's own minimum width, which is this same number, the last
+          // buttons hung past the right edge and the window clipped them.
+          // Close and the width readout were the two that went. With
+          // `border-box` the number means the same thing on both sides of the
+          // boundary, which is the only way one constant can serve both.
+          boxSizing: 'border-box',
           // The one number the host also needs, so it is stated here, in the
           // component that owns the layout, and read from there by everything
           // else. Below this the right-hand group wraps onto a third row and
@@ -939,14 +1042,44 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
           </div>
         </div>
 
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <button type="button" data-testid="copy" onClick={() => deliver(onCopy, 'copy')} style={actionButtonStyle}>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/*
+            Buttons rather than a `<select>`, for the reason set out over the
+            obscure modes above: a native menu costs the page the `pointerdown`
+            of the next press on the canvas, and the canvas draws from
+            `pointerdown`. A format menu sits one press away from the picture,
+            so it would lose the same press in the same way.
+
+            It carries no visible word of its own, where the obscure group
+            carries "Obscure". The difference is that these two labels are the
+            answer and the question at once: `PNG` and `JPEG` beside `Save` say
+            what they do, while `Blur` on its own does not say what it blurs.
+            The group is still named for assistive technology, by
+            `aria-label`, and the toolbar keeps the width the word would have
+            taken, which at the minimum window width is a row of the picture.
+          */}
+          <div role="group" aria-label="Save format" style={{ display: 'flex', gap: 2, marginRight: 6 }}>
+            {FORMATS.map((entry) => (
+              <button
+                key={entry.type}
+                type="button"
+                data-testid={`format-${entry.label.toLowerCase()}`}
+                aria-pressed={format === entry.type}
+                title={`Save as ${entry.label}`}
+                onClick={() => setFormat(entry.type)}
+                style={modeButtonStyle(format === entry.type)}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+          <button type="button" data-testid="copy" onClick={copy} style={actionButtonStyle}>
             Copy
           </button>
           <button
             type="button"
             data-testid="save"
-            onClick={() => deliver((blob) => onExport(blob, EXPORT_TYPE), 'save')}
+            onClick={save}
             style={actionButtonStyle}
           >
             Save
@@ -1143,7 +1276,14 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
             has no menu bar of its own to put them in. */}
         <span style={{ marginLeft: 'auto' }}>⌘Z undo · ⌘C copy · ⌘S save · Esc close</span>
         {notice && (
-          <span data-testid="notice" role="status" style={{ color: '#ff9f0a' }}>
+          <span
+            data-testid="notice"
+            role="status"
+            // The report is the surface's own foreground rather than another
+            // grey readout, so a save that named its file is legible without
+            // borrowing the colour that means something went wrong.
+            style={{ color: notice.tone === 'warning' ? '#ff9f0a' : '#f5f5f7' }}
+          >
             {notice.message}
           </span>
         )}
@@ -1176,9 +1316,9 @@ function toolButtonStyle(active: boolean): CSSProperties {
 }
 
 /**
- * One of the obscure tool's mode buttons.
+ * A toolbar button that carries a word: an obscure mode, or a save format.
  *
- * `toolButtonStyle`'s height and its active blue, because the two groups are
+ * `toolButtonStyle`'s height and its active blue, because all three groups are
  * the same kind of choice and sit on the same row; the width is the label's
  * rather than fixed, because these carry words and the tools carry a glyph.
  */

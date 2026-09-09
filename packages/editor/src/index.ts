@@ -52,6 +52,7 @@ export { handleAtPoint, layerAtPoint, moveLayer, resizeLayer } from './hit'
 export type { RenderTarget } from './render'
 export { renderDocument } from './render'
 
+export type { ExportType } from './export'
 export { exportCanvas, toBlob } from './export'
 
 export type { EditorProps } from './Editor'

@@ -15,11 +15,11 @@
  * cheapest thing to send is its path.
  *
  * The finished picture goes back the other way as encoded bytes, which does
- * cross the IPC boundary. That is a PNG rather than a bitmap, roughly a
- * thirtieth of the size, and it is what the file needs anyway.
+ * cross the IPC boundary. That is an encoded image rather than a bitmap,
+ * roughly a thirtieth of the size, and it is what the file needs anyway.
  */
 
-import { Editor } from '@snapdeck/editor'
+import { Editor, type ExportType } from '@snapdeck/editor'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useEffect, useState } from 'react'
@@ -36,15 +36,17 @@ export type EditorWindowProps = {
 /**
  * The file extension each format the editor can encode is saved under.
  *
- * The editor writes PNG today and hands the type it used to `onExport`, so this
- * is the whole of the format decision on this side: the extension picks the
- * path, and the path is what decides whether the capture is updated or a second
- * file appears beside it. Rust refuses anything not on this list.
+ * The editor hands the type it encoded to `onExport`, so this is the whole of
+ * the format decision on this side: the extension picks the path, and the path
+ * is what decides whether the capture is updated or a second file appears
+ * beside it. Rust refuses anything not on its own list.
+ *
+ * No `image/webp`. WKWebView does not encode it, and the editor no longer
+ * offers it; an entry here would only describe a file that cannot be made.
  */
-const EXTENSIONS: Record<string, string> = {
+const EXTENSIONS: Record<ExportType, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
-  'image/webp': 'webp',
 }
 
 /**
@@ -59,7 +61,7 @@ const EXTENSIONS: Record<string, string> = {
  * it cannot happen from this editor, and writing `.undefined` would be worse
  * than writing the format the user asked to replace.
  */
-export function savePathFor(path: string, type: string): string {
+export function savePathFor(path: string, type: ExportType): string {
   const extension = EXTENSIONS[type]
   if (!extension) return path
   // Only a trailing extension, and only in the last path segment: a directory
@@ -163,11 +165,18 @@ export function EditorWindow({ path, width, height }: EditorWindowProps): JSX.El
       // delivery wrapper catches them and shows the user that the picture was
       // not saved, which is the surface closest to the button they pressed and
       // the only one that stops a failed save from looking like a save.
+      // The name of the file that was written goes back to the editor, which
+      // puts it in its status bar. It is the only thing that tells a Save that
+      // replaced the capture apart from a Save that left a JPEG beside it, and
+      // this side is the one that knows: Rust answers with the path it used,
+      // and only the last segment is worth showing, because the directory is
+      // the same one every time and would push the name off the line.
       onExport={async (blob, type) => {
-        await invoke<string>('save_edited', {
+        const written = await invoke<string>('save_edited', {
           path: savePathFor(path, type),
           bytes: new Uint8Array(await blob.arrayBuffer()),
         })
+        return written.slice(written.lastIndexOf('/') + 1)
       }}
       onCopy={async (blob) => {
         await invoke('copy_edited', { bytes: new Uint8Array(await blob.arrayBuffer()) })

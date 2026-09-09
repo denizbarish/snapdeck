@@ -16,9 +16,15 @@ import metrics from '../chrome.json'
  * The narrowest the toolbar can be laid out at without wrapping onto a third
  * row, in CSS pixels.
  *
- * Measured against the packaged editor: at this width the toolbar fills two
- * rows and its right-hand button group ends about thirteen points from the
- * edge. It is a property of the toolbar's contents, so it changes when the
- * toolbar does, and everything that depends on it reads this one number.
+ * It is a property of the toolbar's contents, so it changes when the toolbar
+ * does, and everything that depends on it reads this one number. It was 720
+ * until the save format buttons were added beside Save, which is a hundred
+ * points of second row that were not there before.
+ *
+ * Re-measured against the packaged editor by resizing the window a step at a
+ * time: the third row appears between 730 and 735 points, where the width
+ * slider stops fitting beside the palette. 750 rather than 735, because the
+ * wrap threshold is a text measurement and a system font that renders `Width`
+ * a few points wider would otherwise cost a row of the picture silently.
  */
 export const TOOLBAR_MIN_WIDTH: number = metrics.toolbarMinWidth
