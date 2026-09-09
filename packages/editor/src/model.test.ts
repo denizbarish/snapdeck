@@ -61,6 +61,16 @@ describe('boundsOf', () => {
     expect(boundsOf(line)).toEqual({ x: 10, y: 10, width: 20, height: 70 })
   })
 
+  // The `Layer` type permits a line with no samples, so the always-positive
+  // box this promises has to hold for one. An `Infinity` box is worse than a
+  // crash: `JSON.stringify` writes it as `null`, so a saved and reloaded
+  // document yields `NaN` in hit testing and resizing with nothing left
+  // pointing at where it came from.
+  it('returns a zero box for a line with no points', () => {
+    const empty: Layer = { id: 'a', kind: 'line', points: [], style: stroke }
+    expect(boundsOf(empty)).toEqual({ x: 0, y: 0, width: 0, height: 0 })
+  })
+
   it('returns the stored rect for the rect-shaped layers', () => {
     const rect = { x: 5, y: 6, width: 70, height: 80 }
     const shape: Layer = { id: 'a', kind: 'rect', rect, style: { stroke, fill: null } }

@@ -26,6 +26,10 @@ export type BadgeStyle = { fill: Color; color: Color; size: number }
  * `boundsOf` has to bridge. `arrow`, `line` and `step` are anchored by points
  * the user dragged or clicked, so their box is computed. The rest carry a rect
  * that the tool already normalised, so their box is that rect.
+ *
+ * `id` must be unique within a document. The commands in `./commands` address
+ * every layer that matches an id rather than the first, so a duplicate makes
+ * one removal drop two layers and one undo restore only one of them.
  */
 export type Layer =
   | { id: string; kind: 'arrow'; from: Point; to: Point; style: StrokeStyle }
@@ -106,12 +110,17 @@ export function boundsOf(layer: Layer): Rect {
  * so its box is the badge diameter laid out around that centre rather than a
  * zero-sized box at it.
  *
- * `points` is never empty in practice. An arrow has both ends from the moment
- * it is created, and a freehand line carries at least the point where the
- * stroke started, because the pointer-down that creates it is also its first
- * sample.
+ * An empty `points` list yields the zero rect at the origin. The `Layer` type
+ * permits a `line` with no samples, so the always-positive box promised above
+ * has to hold for one, and an `Infinity` box would be worse than a crash:
+ * `JSON.stringify` writes it as `null`, so a saved and reloaded document
+ * carries `NaN` into hit testing and resizing with no stack trace pointing at
+ * where it came from. No live tool creates such a line today, but this package
+ * is consumed by hosts whose input paths are written elsewhere.
  */
 function boxAround(points: Point[], size = 0): Rect {
+  if (points.length === 0) return { x: 0, y: 0, width: 0, height: 0 }
+
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity

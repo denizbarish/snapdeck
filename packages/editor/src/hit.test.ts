@@ -49,6 +49,27 @@ describe('layerAtPoint', () => {
   it('finds a filled rectangle through its interior', () => {
     expect(layerAtPoint([filledRect('a', 100, 100)], { x: 150, y: 150 }, 4)?.id).toBe('a')
   })
+
+  // The reach is the tolerance plus half the stroke, because half the stroke
+  // is where the ink ends. A click on ink the user can plainly see has to
+  // land, and on a thick stroke that ink is well outside the tolerance alone.
+  it('finds thick-stroked layers on their ink, beyond the bare tolerance', () => {
+    const thick = { color: '#ff0000', width: 20 }
+    const arrow: Layer = {
+      id: 'a', kind: 'arrow', from: { x: 100, y: 100 }, to: { x: 200, y: 100 }, style: thick,
+    }
+    // 10 from the centreline: outside the tolerance of 2, inside the ink.
+    expect(layerAtPoint([arrow], { x: 150, y: 110 }, 2)?.id).toBe('a')
+
+    // Same for the surface kinds, whose stroke straddles the rect edge.
+    const box: Layer = {
+      id: 'b',
+      kind: 'rect',
+      rect: { x: 100, y: 100, width: 100, height: 100 },
+      style: { stroke: thick, fill: '#00ff00' },
+    }
+    expect(layerAtPoint([box], { x: 90, y: 150 }, 2)?.id).toBe('b')
+  })
 })
 
 describe('handleAtPoint', () => {
@@ -146,6 +167,49 @@ describe('resizeLayer', () => {
 
     expect(origin.kind === 'rect' && origin.rect).toEqual({
       x: 100, y: 100, width: 100, height: 100,
+    })
+  })
+
+  // The rect branch returns the dragged box directly and never reaches the
+  // point projection, so the kinds an annotator drags most, the arrow and the
+  // line, need their own case. A horizontal arrow is also the shape whose
+  // origin box has zero height: without the flat-axis guard in `interpolate`
+  // the y term divides by zero and both endpoints become `NaN`, which is the
+  // arrow vanishing on the first pointermove.
+  it('projects both ends of a horizontal arrow from the fixed origin', () => {
+    const origin: Layer = {
+      id: 'a', kind: 'arrow', from: { x: 100, y: 100 }, to: { x: 200, y: 100 }, style: stroke,
+    }
+
+    // Dragging the east handle west of the anchor mirrors the arrow. The
+    // projection preserves the order of the points, so the end the user
+    // grabbed lands on the anchor and the arrow reverses on screen; that is
+    // the behaviour, and it is pinned here so a change to it is deliberate.
+    const first = resizeLayer(origin, 'e', { x: 80, y: 150 }, origin)
+    expect(first).toEqual({ ...origin, from: { x: 80, y: 100 }, to: { x: 100, y: 100 } })
+
+    // The live layer is fed back in, as the editor does on every pointer move.
+    const second = resizeLayer(first, 'e', { x: 70, y: 150 }, origin)
+    expect(second).toEqual({ ...origin, from: { x: 70, y: 100 }, to: { x: 100, y: 100 } })
+
+    expect(origin.kind === 'arrow' && origin.from).toEqual({ x: 100, y: 100 })
+  })
+
+  it('projects every point of a freehand line into the new box', () => {
+    const origin: Layer = {
+      id: 'a',
+      kind: 'line',
+      points: [{ x: 10, y: 10 }, { x: 20, y: 30 }, { x: 30, y: 50 }],
+      style: stroke,
+    }
+
+    // Box 10..30 by 10..50 dragged to 10..50 by 10..90: both axes doubled, so
+    // every sample keeps its position relative to the box rather than only
+    // the two that touch its edges.
+    const resized = resizeLayer(origin, 'se', { x: 50, y: 90 }, origin)
+    expect(resized).toEqual({
+      ...origin,
+      points: [{ x: 10, y: 10 }, { x: 30, y: 50 }, { x: 50, y: 90 }],
     })
   })
 })

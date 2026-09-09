@@ -108,18 +108,26 @@ export function moveLayer(layer: Layer, dx: number, dy: number): Layer {
  *
  * The new box may be a flip of the old one, and that is the point: dragging
  * the east edge past the west one mirrors the shape rather than refusing to
- * move, because refusing makes the handle feel stuck.
+ * move, because refusing makes the handle feel stuck. For the point-anchored
+ * kinds the mirroring is visible as a swap: the projection preserves the order
+ * of the points, so past a flip the end the user grabbed lands on the anchor
+ * and an arrow reverses on screen. That matches what the same drag does in
+ * Figma, and it is what the arrow test pins.
+ *
+ * `origin` must be `layer` as it stood when the drag began, and therefore of
+ * the same kind. Nothing else is a coherent anchor, so the contract is the
+ * caller's to keep rather than something this branches on.
  */
 export function resizeLayer(layer: Layer, handle: Handle, pointer: Point, origin: Layer): Layer {
   const before = boundsOf(origin)
   const after = dragEdges(before, handle, pointer)
 
-  // `origin` has to be the same layer `layer` came from; a caller that pairs
-  // two different kinds has nothing meaningful to anchor to, so the layer's
-  // own points are the closest thing to a sane answer left.
   switch (layer.kind) {
     case 'arrow': {
-      const source = origin.kind === 'arrow' ? origin : layer
+      // The cast states the contract above: TypeScript cannot narrow a second
+      // parameter through a switch on the first, and there is no fallback
+      // worth writing for a pairing that is a caller bug.
+      const source = origin as Extract<Layer, { kind: 'arrow' }>
       return {
         ...layer,
         from: project(source.from, before, after),
@@ -127,7 +135,7 @@ export function resizeLayer(layer: Layer, handle: Handle, pointer: Point, origin
       }
     }
     case 'line': {
-      const source = origin.kind === 'line' ? origin : layer
+      const source = origin as Extract<Layer, { kind: 'line' }>
       return { ...layer, points: source.points.map((point) => project(point, before, after)) }
     }
     case 'step':
@@ -162,20 +170,29 @@ function hitsLayer(layer: Layer, point: Point, tolerance: number): boolean {
     }
     // An unfilled shape is a frame, not a surface. Hit testing it by its box
     // would let it swallow every click meant for whatever it is drawn around.
-    case 'rect':
+    case 'rect': {
+      // Filled or not, the stroke straddles the edge of the rect, so half of
+      // it is painted outside the box. Reaching by the tolerance alone would
+      // miss a click on the visible ink of a thick-stroked filled shape.
+      const reach = reachOf(tolerance, layer.style.stroke.width)
       return layer.style.fill === null
-        ? onEdge(layer.rect, point, reachOf(tolerance, layer.style.stroke.width), containsPoint)
-        : containsPoint(inflate(layer.rect, tolerance), point)
-    case 'ellipse':
+        ? onEdge(layer.rect, point, reach, containsPoint)
+        : containsPoint(inflate(layer.rect, reach), point)
+    }
+    case 'ellipse': {
+      const reach = reachOf(tolerance, layer.style.stroke.width)
       return layer.style.fill === null
-        ? onEdge(layer.rect, point, reachOf(tolerance, layer.style.stroke.width), insideEllipse)
-        : insideEllipse(inflate(layer.rect, tolerance), point)
+        ? onEdge(layer.rect, point, reach, insideEllipse)
+        : insideEllipse(inflate(layer.rect, reach), point)
+    }
     // Opaque surfaces: text sits in a box the tool sized to it, and the other
-    // two are painted regions.
+    // two are painted regions. None carries a stroke, so the reach is the
+    // tolerance alone; it goes through `reachOf` all the same, so every kind
+    // reads its target size from one place.
     case 'text':
     case 'highlight':
     case 'obscure':
-      return containsPoint(inflate(layer.rect, tolerance), point)
+      return containsPoint(inflate(layer.rect, reachOf(tolerance, 0)), point)
     case 'step':
       return Math.hypot(point.x - layer.center.x, point.y - layer.center.y) <=
         layer.style.size / 2 + tolerance
