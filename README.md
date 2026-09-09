@@ -3,7 +3,8 @@
 Snapdeck is an open-source macOS menu bar app for capturing screenshots: pick a region, a window
 or a whole display, and the capture is saved as a PNG and put on the clipboard.
 
-Annotation and sharing are planned and are not part of this release.
+An editor opens on the capture afterwards, for arrows, captions, highlights, redaction and
+cropping. Sharing is planned and is not part of this release.
 
 ## Requirements
 
@@ -63,6 +64,90 @@ holds the screen as it is then rather than the frozen frame you selected against
 content the two are the same picture; over a video, an animation or anything else that moves, the
 saved pixels are the ones from the instant you confirmed.
 
+## The editor
+
+Every capture that produced a file opens in an editor window: the title bar carries the file's
+name, and the picture is shown at its own size or fitted down if it does not fit the screen.
+
+The editor is an offer, not a step. By the time it appears the capture is already finished: the
+PNG is in `~/Pictures` and the image is on the clipboard. Closing the window without touching
+anything leaves both exactly as they were.
+
+Take a second capture and a second editor opens beside the first. The first keeps whatever you
+had drawn in it, so a capture taken while you are still annotating cannot destroy your work.
+
+### Tools
+
+| Tool | What it does |
+| --- | --- |
+| Select | Pick an annotation, move it, or resize it by its eight handles. |
+| Arrow | Drag from tail to head. |
+| Rectangle, Ellipse | Drag out an outline. |
+| Freehand line | Draw with the pointer held down. |
+| Text | Click to open a box, type the caption, click away to commit it. |
+| Highlight | Drag a translucent band over what you want the eye to land on. |
+| Obscure | Drag over what has to be hidden. Three modes, see below. |
+| Step number | Click to drop a numbered badge; the number counts up on its own. |
+| Crop | Drag out what to keep. Saving writes the cropped picture. |
+
+The colour swatches, the custom-colour well and the width slider apply to the tool in hand and to
+the selected annotation. Width also sets the text size, the badge size and the redaction strength.
+
+`Save` writes the edited picture back over the capture in `~/Pictures`, under the same name, by
+writing a temporary file beside it and renaming it into place: a failed save leaves the picture
+you already had rather than half of a new one. `Copy` puts the edited picture on the clipboard.
+`Close` closes the window and keeps the file on disk.
+
+### Keyboard
+
+| Shortcut | What it does |
+| --- | --- |
+| `Cmd+Z` / `Cmd+Shift+Z` | Undo, redo. Every edit is one step, including a slider drag. |
+| `Cmd+C` | Copy the edited picture to the clipboard. |
+| `Cmd+S` | Save it over the capture. |
+| `Delete` / `Backspace` | Remove the selected annotation. |
+| `Esc` | Drop the selection; press it again with nothing selected to close the window. |
+
+While a text box is open the keys belong to the box: `Esc` closes the box, `Cmd+Enter` commits
+the caption, and `Cmd+S` commits it and then saves.
+
+### Redaction: what each mode actually does
+
+The obscure tool has three modes, and only one of them destroys anything.
+
+- **Black out** writes a constant over the region. Nothing of the original survives it.
+- **Pixelate** replaces each block with the average of that block.
+- **Blur** replaces each pixel with an average of its neighbours.
+
+Pixelate and blur are **attenuation, not destruction**. Both preserve local ink density, so "there
+was writing here" survives by construction, and a region that is mostly one colour comes back as
+that colour. Their strength is never allowed to be trivial: the block size and the blur radius are
+raised to a floor derived from the region, so a box drawn round large text is redacted harder than
+one drawn round small text. In source pixels, the block is at least `max(strength, ⌈shorter side /
+4⌉, 6)` and the radius at least `max(strength, ⌈shorter side / 6⌉, 4)`.
+
+Measured on this build, from the packaged app: one line of 28-point bold monospaced text captured
+on a Retina display, a 1074 x 100 pixel band drawn over it, default width, the numbers read back
+out of the saved PNG. Stroke contrast is peak-to-trough luminance across the band, where 255 is
+untouched text and 0 is a flat field; correlation is against the same pixels in the original,
+where 1 is untouched.
+
+| Mode | Stroke contrast | Correlation with the original | Distinct colours in the band | Original text pixels left |
+| --- | --- | --- | --- | --- |
+| Black out | **0** | **0** (the band has no variation at all) | 1498 → **1** | none |
+| Pixelate | 189 | 0.44 | 1498 → 52 | none |
+| Blur | 107 | 0.42 | 1498 → 408 | none |
+
+None of the three leaves a legible glyph, and none of the three leaves the original pixels in
+place. But blackout is the only one whose output carries no signal at all: the correlation for
+pixelate and blur bottoms out near 0.4 on text however hard they are pushed, because that is what
+averaging does. **Use Black out for anything whose recovery would matter** (a password, a token, a
+card number, an address). Blur and pixelate are for the face in the background and the name on the
+tab, where the point is that nobody reads it over your shoulder.
+
+The redaction is applied to the picture before it is encoded, not drawn on top of it, so the
+hidden pixels are not in the saved file at all and no undo of the file can bring them back.
+
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 
 ## License
@@ -85,6 +170,13 @@ MIT, see [LICENSE](LICENSE).
 - **A window outline can disagree with the frozen pixels.** Window mode lists the windows after the
   screen has been frozen, so a window that moves in between is outlined where it now is rather than
   where the frozen frame shows it.
+- **Closing an editor throws away unsaved annotations without asking.** The capture itself is
+  never at risk, since the file and the clipboard are finished before the editor opens, but
+  `Esc`, the Close button and the title bar's red button all discard whatever has been drawn and
+  not saved.
+- **The obscure tool opens in Blur.** Blur is the gentlest of the three modes and the redaction
+  guidance above recommends Black out for anything that matters, so the mode has to be changed by
+  hand each time it matters.
 - **A partly failed shortcut registration leaves some shortcuts dead.** Registration stops at the
   first shortcut macOS refuses, usually because another app already holds it, and the ones after it
   are never registered. The menu bar item captures in every mode either way.
