@@ -360,6 +360,51 @@ describe('drawing', () => {
   })
 })
 
+/**
+ * The redaction mode the toolbar opens in, and the control that changes it.
+ *
+ * Both assertions are made through the picture rather than through the
+ * toolbar's own state, and the transparent source is what lets them be. Blur
+ * and pixelate average what is under them, and what is under them has alpha 0,
+ * so neither leaves a mark; blackout replaces the region with opaque black
+ * whatever was there. So "there is ink where the drag was" means blackout and
+ * nothing else, and a default quietly moved back to blur fails here rather
+ * than shipping a redaction that can be read through.
+ */
+describe('the obscure tool', () => {
+  const band = { x: 60, y: 60, width: 140, height: 80 }
+
+  it('opens in blackout and blacks out on the first drag', async () => {
+    expect(byTestId('obscure-blackout').getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('obscure-blur').getAttribute('aria-pressed')).toBe('false')
+    expect(byTestId('obscure-pixelate').getAttribute('aria-pressed')).toBe('false')
+
+    await chooseTool('obscure')
+    await dragAcross({ x: band.x, y: band.y }, { x: band.x + band.width, y: band.y + band.height })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+
+    const ink = inkBounds()
+    expect(ink).not.toBeNull()
+    // Both directions: the ink covers the band and nothing outside it.
+    expect(contains(band, ink as Rect)).toBe(true)
+    expect(contains(ink as Rect, band)).toBe(true)
+  })
+
+  it('changes mode from the toolbar', async () => {
+    await userEvent.click(byTestId('obscure-blur'))
+    expect(byTestId('obscure-blur').getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('obscure-blackout').getAttribute('aria-pressed')).toBe('false')
+
+    await chooseTool('obscure')
+    await dragAcross({ x: band.x, y: band.y }, { x: band.x + band.width, y: band.y + band.height })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+
+    // A blur of nothing is nothing. The layer is in the document and the
+    // picture is still empty, which is the mode having really changed.
+    expect(inkBounds()).toBeNull()
+  })
+})
+
 describe('undo and redo', () => {
   it('move the layer count in both directions', async () => {
     await chooseTool('rect')

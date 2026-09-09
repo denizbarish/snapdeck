@@ -86,7 +86,7 @@ had drawn in it, so a capture taken while you are still annotating cannot destro
 | Freehand line | Draw with the pointer held down. |
 | Text | Click to open a box, type the caption, click away to commit it. |
 | Highlight | Drag a translucent band over what you want the eye to land on. |
-| Obscure | Drag over what has to be hidden. Three modes, see below. |
+| Obscure | Drag over what has to be hidden. Opens in Black out; three modes, see below. |
 | Step number | Click to drop a numbered badge; the number counts up on its own. |
 | Crop | Drag out what to keep. Saving writes the cropped picture. |
 
@@ -145,6 +145,10 @@ averaging does. **Use Black out for anything whose recovery would matter** (a pa
 card number, an address). Blur and pixelate are for the face in the background and the name on the
 tab, where the point is that nobody reads it over your shoulder.
 
+**The tool opens in Black out**, for the reason in the table: somebody reaching for a redaction
+tool is usually covering something whose recovery would matter, and the default has to be the mode
+that leaves nothing to recover. The other two are one click away on the toolbar.
+
 The redaction is applied to the picture before it is encoded, not drawn on top of it, so the
 hidden pixels are not in the saved file at all and no undo of the file can bring them back.
 
@@ -174,9 +178,6 @@ MIT, see [LICENSE](LICENSE).
   never at risk, since the file and the clipboard are finished before the editor opens, but
   `Esc`, the Close button and the title bar's red button all discard whatever has been drawn and
   not saved.
-- **The obscure tool opens in Blur.** Blur is the gentlest of the three modes and the redaction
-  guidance above recommends Black out for anything that matters, so the mode has to be changed by
-  hand each time it matters.
 - **A partly failed shortcut registration leaves some shortcuts dead.** Registration stops at the
   first shortcut macOS refuses, usually because another app already holds it, and the ones after it
   are never registered. The menu bar item captures in every mode either way.

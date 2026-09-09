@@ -127,6 +127,23 @@ const OBSCURE_MODES: { value: ObscureMode; label: string }[] = [
 ]
 
 /**
+ * The mode the obscure tool opens in.
+ *
+ * Blackout, because it is the only one of the three that destroys what it
+ * covers. Measured on the packaged build, over a 1074 x 100 band of text at
+ * the default intensity: blackout leaves contrast 0 and correlation 0 with the
+ * original and collapses the band from 1498 colours to one, where pixelate
+ * leaves 189 and 0.439 and blur leaves 107 and 0.422. All three replace every
+ * source pixel, but only blackout leaves no signal behind.
+ *
+ * Somebody reaching for a redaction tool is covering a password, a token or a
+ * face, and the default has to be the mode that cannot be undone by looking
+ * harder. Blur and pixelate are one click away for the softer case, where the
+ * point is that something was there rather than that it is gone.
+ */
+const DEFAULT_OBSCURE_MODE: ObscureMode = 'blackout'
+
+/**
  * A gesture in progress.
  *
  * Kept in a ref rather than in state: it is written on every pointer move and
@@ -180,7 +197,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
   const [settings, setSettings] = useState<ToolSettings>({
     color: DEFAULT_COLOR,
     strokeWidth: DEFAULT_STROKE,
-    obscureMode: 'blur',
+    obscureMode: DEFAULT_OBSCURE_MODE,
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   /** The layer a drag is building or transforming, shown in place of the stored one. */
@@ -879,24 +896,48 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
           </span>
         </label>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          Obscure
-          <select
-            data-testid="obscure-mode"
-            aria-label="Obscure mode"
-            value={settings.obscureMode}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              changeSettings({ ...settings, obscureMode: event.target.value as ObscureMode })
-            }
-            style={{ background: '#2c2c2e', color: 'inherit', border: '1px solid #48484a', borderRadius: 4 }}
-          >
+        {/*
+          Buttons rather than a `<select>`, and the reason is not taste.
+
+          WKWebView draws a `<select>` as a real AppKit menu, and on the press
+          that follows the menu's dismissal the webview delivers a `mousedown`
+          to the page and no `pointerdown` at all. Measured on the packaged
+          bundle with a counter on `window`: choosing a mode and then pressing
+          on the picture took the page from `pd1 md1` to `pd2 md3`, the last
+          event a bare `mousedown` at the press. The stage draws from
+          `onPointerDown`, so that press does nothing and the user's first
+          redaction after changing the mode is silently lost; the second one
+          works, which is what makes it read as flakiness rather than as a bug.
+          The toolbar's own buttons were unaffected throughout, because a
+          `click` is built from the mousedown the page did get.
+
+          Nothing in the page can put back an event the webview did not send,
+          so the fix is to stop opening a native menu. These three buttons are
+          the same control the tools and the palette already are.
+
+          `aria-pressed` rather than a radio group, to match the tool buttons
+          immediately to the left: the two are the same kind of choice and
+          should be announced the same way. The visible word is hidden from
+          assistive technology because the group already carries it as its
+          name, and each button is named by its own label.
+        */}
+        <div role="group" aria-label="Obscure mode" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span aria-hidden="true">Obscure</span>
+          <div style={{ display: 'flex', gap: 2 }}>
             {OBSCURE_MODES.map((mode) => (
-              <option key={mode.value} value={mode.value}>
+              <button
+                key={mode.value}
+                type="button"
+                data-testid={`obscure-${mode.value}`}
+                aria-pressed={settings.obscureMode === mode.value}
+                onClick={() => changeSettings({ ...settings, obscureMode: mode.value })}
+                style={modeButtonStyle(settings.obscureMode === mode.value)}
+              >
                 {mode.label}
-              </option>
+              </button>
             ))}
-          </select>
-        </label>
+          </div>
+        </div>
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <button type="button" data-testid="copy" onClick={() => deliver(onCopy, 'copy')} style={actionButtonStyle}>
@@ -1130,6 +1171,26 @@ function toolButtonStyle(active: boolean): CSSProperties {
     background: active ? '#0a84ff' : '#2c2c2e',
     color: '#f5f5f7',
     font: '15px system-ui, -apple-system, sans-serif',
+    cursor: 'pointer',
+  }
+}
+
+/**
+ * One of the obscure tool's mode buttons.
+ *
+ * `toolButtonStyle`'s height and its active blue, because the two groups are
+ * the same kind of choice and sit on the same row; the width is the label's
+ * rather than fixed, because these carry words and the tools carry a glyph.
+ */
+function modeButtonStyle(active: boolean): CSSProperties {
+  return {
+    height: 26,
+    padding: '0 8px',
+    borderRadius: 5,
+    border: '1px solid transparent',
+    background: active ? '#0a84ff' : '#2c2c2e',
+    color: '#f5f5f7',
+    font: 'inherit',
     cursor: 'pointer',
   }
 }

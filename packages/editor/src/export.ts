@@ -44,6 +44,15 @@ export function exportCanvas(image: CanvasImageSource, doc: EditorDocument): Off
  * `quality` is ignored by the PNG encoder and applies to JPEG and WebP, which
  * is the platform's rule rather than one imposed here; it is passed through
  * untouched so the caller's number means what the spec says it means.
+ *
+ * A format the platform will not encode is refused rather than substituted.
+ * `convertToBlob` is specified to fall back to PNG when it cannot honour the
+ * type it was given, and it does so silently: measured on the packaged macOS
+ * build, asking WKWebView for `image/webp` returns a blob of PNG bytes. The
+ * caller names the file after the format it asked for, so without this check
+ * the app writes PNG under `.webp` and hands the user a file whose extension
+ * is a lie. Refusing surfaces in the editor's own status bar, where a save
+ * that did not happen is visible; the substitution was not visible anywhere.
  */
 export async function toBlob(
   image: CanvasImageSource,
@@ -51,5 +60,9 @@ export async function toBlob(
   type: 'image/png' | 'image/jpeg' | 'image/webp',
   quality?: number,
 ): Promise<Blob> {
-  return exportCanvas(image, doc).convertToBlob({ type, quality })
+  const blob = await exportCanvas(image, doc).convertToBlob({ type, quality })
+  if (blob.type !== type) {
+    throw new Error(`toBlob: this platform encodes ${blob.type} rather than the requested ${type}`)
+  }
+  return blob
 }

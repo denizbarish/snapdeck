@@ -184,6 +184,20 @@ describe('toBlob', () => {
     expect(coarse.size).toBeLessThan(fine.size)
   })
 
+  it('refuses a format this platform will not encode', async () => {
+    const image = noiseImage(32, 32)
+    const doc = documentOf(32, 32, [])
+
+    // `convertToBlob` is specified to answer a type it cannot honour with a
+    // PNG, silently, and the caller names the file after what it asked for.
+    // WKWebView does exactly that with `image/webp`, which is how a `.webp`
+    // holding PNG bytes reached the pictures folder during verification. This
+    // browser encodes all three of the formats the signature offers, so the
+    // case has to be provoked with one it does not; what is under test is the
+    // refusal, not which formats a particular engine happens to support.
+    await expect(toBlob(image, doc, 'image/tiff' as 'image/png')).rejects.toThrow(/image\/tiff/)
+  })
+
   it('leaves nothing of an obscured region in the exported file', async () => {
     const image = noiseImage(64, 64)
     const region = { x: 16, y: 16, width: 32, height: 32 }
