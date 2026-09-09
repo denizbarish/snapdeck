@@ -20,3 +20,6 @@ export { boundsOf, createDocument, nextStepIndex } from './model'
 
 export type { Command } from './commands'
 export { addLayer, History, removeLayer, setCrop, updateLayer } from './commands'
+
+export type { Handle } from './hit'
+export { handleAtPoint, layerAtPoint, moveLayer, resizeLayer } from './hit'
