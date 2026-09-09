@@ -20,16 +20,15 @@ import { renderDocument, viewOf } from './render'
  *
  * No transform is set, so one source pixel is one output pixel and the canvas
  * is the size of the crop, or of the whole capture when there is no crop.
- * Dimensions are rounded and floored at one: a canvas cannot have a fractional
- * or zero side, and a drag that produced a sliver of a crop should still yield
- * a file rather than an exception.
+ *
+ * The size is taken from `viewOf` unrounded, because `viewOf` has already
+ * rounded it: it is the same call the renderer translates by, so the canvas and
+ * the origin drawn into it cannot disagree about where a fractional crop
+ * starts. Rounding again here is how they used to.
  */
 export function exportCanvas(image: CanvasImageSource, doc: EditorDocument): OffscreenCanvas {
   const view = viewOf(doc)
-  const canvas = new OffscreenCanvas(
-    Math.max(1, Math.round(view.width)),
-    Math.max(1, Math.round(view.height)),
-  )
+  const canvas = new OffscreenCanvas(view.width, view.height)
   const ctx = canvas.getContext('2d')
   // Only ever null if the context was already claimed by another mode or the
   // platform refused one. Nothing sane to fall back to, and falling back

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 /**
  * Two projects, because two of the test files need a rasteriser and the rest
@@ -19,7 +19,10 @@ export default defineConfig({
         test: {
           name: 'node',
           include: ['src/**/*.test.ts'],
-          exclude: ['src/render.test.ts', 'src/export.test.ts'],
+          // Extends the defaults rather than replacing them: written as a bare
+          // list, this project would start collecting tests out of
+          // `node_modules` and `dist`.
+          exclude: [...configDefaults.exclude, 'src/render.test.ts', 'src/export.test.ts'],
         },
       },
       {

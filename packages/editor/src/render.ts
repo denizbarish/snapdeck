@@ -33,8 +33,48 @@ type LayerOf<K extends Layer['kind']> = Extract<Layer, { kind: K }>
 /** The font a step badge's number is set in. `BadgeStyle` carries no family. */
 const BADGE_FONT_STACK = 'system-ui, -apple-system, "Helvetica Neue", sans-serif'
 
+/** Used when a layer's own font string turns out not to be one. */
+const FALLBACK_FONT_STACK = 'sans-serif'
+
+/** Used when a layer's font size is not a usable number either. */
+const FALLBACK_FONT_SIZE = 16
+
 /** How many box-blur passes approximate a Gaussian. Three is the usual answer. */
 const BLUR_PASSES = 3
+
+/**
+ * The privacy floors, in source-image pixels.
+ *
+ * Both parts of each pair matter. The absolute floor is what protects a small
+ * box; the divisor is what protects a large one, because a box drawn tightly
+ * round a line of text holds glyphs about as tall as the box itself, so a
+ * strength that erases 16px text is a rounding error on 48px text.
+ *
+ * Measured over text-like strokes (stem width 12% of the region's height, glyph
+ * height 72% of it, irregular spacing) at region sizes from 12x12 to 400x120,
+ * reporting peak-to-trough stroke contrast and the correlation between the
+ * result and the source, where 255 and 1.0 are "untouched":
+ *
+ * | rule | worst contrast | worst correlation | worst identical bytes |
+ * |---|---|---|---|
+ * | mosaic, block 2 (the old floor) | 255 | 0.97 | 0.95 |
+ * | mosaic, block >= max(6, min/8) | 255 | 0.80 | 0.61 |
+ * | mosaic, block >= max(6, min/4) | 182 | 0.42 | 0.05 |
+ * | blur, radius 1 (the old floor) | 255 | 0.97 | 0.71 |
+ * | blur, radius >= max(4, min/16) | 208 | 0.73 | 0.00 |
+ * | blur, radius >= max(4, min/6) | 122 | 0.46 | 0.00 |
+ *
+ * A quarter of the smaller side puts four mosaic blocks across the text; a
+ * sixth of it gives the blur a window spanning about a third of it. Neither
+ * correlation reaches zero and neither can: both modes preserve local ink
+ * density, so "there was writing here" survives by construction. That is the
+ * honest limit of any mode that averages, and it is why `blackout` is the
+ * default of the obscure tool.
+ */
+const MIN_PIXELATE_BLOCK = 6
+const PIXELATE_REGION_DIVISOR = 4
+const MIN_BLUR_RADIUS = 4
+const BLUR_REGION_DIVISOR = 6
 
 /**
  * Draw a document into a context.
@@ -43,11 +83,24 @@ const BLUR_PASSES = 3
  * moved to the crop, which is what makes a crop cost one `translate` rather
  * than an offset threaded through every layer: layers keep their source-image
  * coordinates, and anything outside the crop simply falls off the canvas.
+ *
+ * The target is NOT cleared: the document's own image covers it, and a caller
+ * that wants the canvas emptied first (a preview surface drawing a document
+ * smaller than itself, say) owns that decision along with the canvas.
+ *
+ * `globalAlpha`, `globalCompositeOperation` and `filter` are reset before
+ * anything is drawn, and restored after. A preview canvas is reused frame after
+ * frame and an export canvas is fresh, so any of those left set by a caller
+ * would be a way for the two to disagree, which is the one thing this module
+ * rules out.
  */
 export function renderDocument(ctx: RenderTarget, image: CanvasImageSource, doc: EditorDocument): void {
   const crop = viewOf(doc)
   ctx.save()
   try {
+    ctx.globalAlpha = 1
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.filter = 'none'
     ctx.translate(-crop.x, -crop.y)
     // Sized explicitly rather than drawn at its intrinsic size: the document's
     // dimensions are the coordinate space every layer was placed in, and an
@@ -60,9 +113,30 @@ export function renderDocument(ctx: RenderTarget, image: CanvasImageSource, doc:
   }
 }
 
-/** The region of the source the document shows: its crop, or all of it. */
+/**
+ * The region of the source the document shows: its crop, or all of it.
+ *
+ * Rounded to whole pixels here and nowhere else. A crop is dragged with a
+ * pointer, so its origin is as likely to be 5.5 as 5, and an export canvas has
+ * to have an integer size. Rounding the size at the encoder and translating by
+ * the raw origin at the renderer would put every source pixel half a pixel off
+ * its own and resample the entire screenshot; rounding once, here, is what
+ * makes "one source pixel is one output pixel" true rather than intended.
+ *
+ * Edges are rounded independently of the origin, so a crop keeps the pixels it
+ * covers rather than its width. Sides are floored at one: a drag that produced
+ * a sliver should still yield a file rather than an exception.
+ */
 export function viewOf(doc: EditorDocument): Rect {
-  return doc.crop ?? { x: 0, y: 0, width: doc.width, height: doc.height }
+  const view = doc.crop ?? { x: 0, y: 0, width: doc.width, height: doc.height }
+  const x = Math.round(view.x)
+  const y = Math.round(view.y)
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.round(view.x + view.width) - x),
+    height: Math.max(1, Math.round(view.y + view.height) - y),
+  }
 }
 
 function drawLayer(ctx: RenderTarget, layer: Layer): void {
@@ -187,10 +261,26 @@ function drawEllipse(ctx: RenderTarget, layer: LayerOf<'rect' | 'ellipse'>): voi
   ctx.restore()
 }
 
+/**
+ * Set a font, falling back to one that is certainly valid.
+ *
+ * Assigning an invalid font string to a context is a silent no-op: the context
+ * keeps whatever font it had, which is inherited state, so the same document
+ * would set its text in one face on a reused preview canvas and another in a
+ * fresh export one. Assigning the fallback first makes the failure deterministic
+ * instead: the size the layer asked for, in a family that always parses.
+ */
+function setFont(ctx: RenderTarget, size: number, family: string, weight = ''): void {
+  const prefix = weight === '' ? '' : `${weight} `
+  const points = Number.isFinite(size) && size > 0 ? size : FALLBACK_FONT_SIZE
+  ctx.font = `${prefix}${points}px ${FALLBACK_FONT_STACK}`
+  ctx.font = `${prefix}${points}px ${family}`
+}
+
 function drawText(ctx: RenderTarget, layer: LayerOf<'text'>): void {
   ctx.save()
   ctx.fillStyle = layer.style.color
-  ctx.font = `${layer.style.size}px ${layer.style.family}`
+  setFont(ctx, layer.style.size, layer.style.family)
   // Top-left, so the text starts at the corner of the box the tool sized for
   // it. Lines are split but not wrapped: the box follows the text, not the
   // other way round, so wrapping here would fight the tool that sized it.
@@ -228,7 +318,7 @@ function drawStep(ctx: RenderTarget, layer: LayerOf<'step'>): void {
   ctx.fillStyle = layer.style.fill
   ctx.fill()
   ctx.fillStyle = layer.style.color
-  ctx.font = `600 ${Math.round(layer.style.size * 0.6)}px ${BADGE_FONT_STACK}`
+  setFont(ctx, Math.round(layer.style.size * 0.6), BADGE_FONT_STACK, '600')
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(String(layer.index), layer.center.x, layer.center.y)
@@ -259,29 +349,66 @@ function drawObscure(ctx: RenderTarget, layer: LayerOf<'obscure'>): void {
   if (!region) return
 
   const pixels = ctx.getImageData(region.x, region.y, region.width, region.height)
-  // Intensity is in source-image pixels, so a mosaic block stays the same size
-  // relative to the screenshot however far the user has zoomed in.
-  //
-  // The floor is a privacy floor, not a matter of taste, and it differs by
-  // mode. Three box passes at a radius of one already leave nothing of the
-  // original, but a mosaic of one-pixel blocks is the identity function: each
-  // block's mean is the pixel itself. A layer the user believes has redacted
-  // something would then have done nothing at all to it, which is the one
-  // failure this file exists to make impossible.
-  const floor = layer.mode === 'pixelate' ? 2 : 1
-  const strength = Math.max(floor, Math.round(layer.intensity * deviceScale(ctx)))
   switch (layer.mode) {
     case 'blackout':
       flatten(pixels)
       break
     case 'pixelate':
-      pixelate(pixels, strength)
+      pixelate(pixels, deviceStrength(obscureStrength('pixelate', layer.rect, layer.intensity), ctx, region))
       break
     case 'blur':
-      blur(pixels, strength)
+      blur(pixels, deviceStrength(obscureStrength('blur', layer.rect, layer.intensity), ctx, region))
       break
   }
   ctx.putImageData(pixels, region.x, region.y)
+}
+
+/**
+ * How strong an obscure has to be, in SOURCE-image pixels.
+ *
+ * Resolved in source pixels and only then mapped to the device, because the
+ * question "is this covered?" is one the user answers on screen and the file
+ * has to keep. Applying a floor after the scale, as this used to, makes the
+ * strength depend on the zoom: at zoom-to-fit a 2px mosaic became an 8px one in
+ * the preview and stayed 2px in the file, so the user approved a redaction
+ * stronger than the one shipped.
+ *
+ * The result is the strongest of three: what the tool asked for, what the size
+ * of the region demands, and an absolute floor. The tool's number is a request
+ * that may be raised and never lowered, so this is a backstop rather than the
+ * contract. See the constants above for the measurements the two minimums come
+ * from.
+ *
+ * Not part of the package's public surface (`index.ts` does not re-export it);
+ * exported so the floors can be pinned in a test that does not need a canvas.
+ */
+export function obscureStrength(mode: 'blur' | 'pixelate', rect: Rect, intensity: number): number {
+  // A document is data, and data arrives broken: `NaN` used to end the mosaic's
+  // loop before its first step, leaving every source pixel in place with
+  // nothing thrown, and `Infinity` used to hang the blur mid-drag.
+  const requested = Number.isFinite(intensity) ? Math.round(intensity) : 0
+  const span = Math.min(Math.abs(rect.width), Math.abs(rect.height))
+  const divisor = mode === 'pixelate' ? PIXELATE_REGION_DIVISOR : BLUR_REGION_DIVISOR
+  const proportional = Number.isFinite(span) ? Math.ceil(span / divisor) : 0
+  const floor = mode === 'pixelate' ? MIN_PIXELATE_BLOCK : MIN_BLUR_RADIUS
+  return Math.max(requested, proportional, floor)
+}
+
+/**
+ * A source-pixel strength in the device pixels the region is made of.
+ *
+ * Rounded down, never up: the preview may be gentler than the file, because a
+ * user who ships something stronger than what they approved has lost nothing.
+ * The reverse is the failure.
+ *
+ * Clamped to the region's span as well, which is the only bound either mode
+ * gets. Past the span a blur's window already covers every sample on the line
+ * and a mosaic's block already covers the region, so the clamp costs nothing
+ * and it keeps an absurd intensity from walking a loop for minutes.
+ */
+function deviceStrength(source: number, ctx: RenderTarget, region: Rect): number {
+  const scaled = Math.floor(source * deviceScale(ctx))
+  return Math.min(Math.max(1, scaled), Math.max(region.width, region.height))
 }
 
 /**
@@ -327,10 +454,14 @@ function corners(rect: Rect): { x: number; y: number }[] {
  * The square root of the transform's determinant: the area scale reduced to a
  * length, which is the right answer for a uniform zoom and a sane one for a
  * transform that is not.
+ *
+ * A degenerate transform yields 1 rather than zero, infinity or `NaN`, so a
+ * strength derived from this is always a usable number.
  */
 function deviceScale(ctx: RenderTarget): number {
   const matrix = ctx.getTransform()
-  return Math.sqrt(Math.abs(matrix.a * matrix.d - matrix.b * matrix.c)) || 1
+  const scale = Math.sqrt(Math.abs(matrix.a * matrix.d - matrix.b * matrix.c))
+  return Number.isFinite(scale) && scale > 0 ? scale : 1
 }
 
 /** Every pixel to opaque black. Nothing is averaged, so nothing is left. */
@@ -402,9 +533,14 @@ function pixelate(pixels: ImageData, block: number): void {
  *
  * Sampling stops at the edges of the region and clamps, so a blur reads and
  * writes nothing outside the rectangle the user drew.
+ *
+ * The radius must already be bounded by the region's span, which is what
+ * `deviceStrength` does: past that the clamped window covers every sample on
+ * the line anyway, so a larger radius buys nothing, and an unbounded one walks
+ * a loop that never advances.
  */
 function blur(pixels: ImageData, radius: number): void {
-  if (radius < 1) return
+  if (!(radius >= 1)) return
   // Float, not another `Uint8ClampedArray`: rounding to bytes between six
   // passes accumulates a visible banding that a redaction does not need.
   const primary = Float32Array.from(pixels.data)

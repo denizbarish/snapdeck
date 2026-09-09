@@ -21,6 +21,8 @@ import {
   neighbourDelta,
   noiseImage,
   readPixels,
+  sourceCorrelation,
+  textImage,
 } from './__fixtures__/canvas'
 
 function documentOf(width: number, height: number, layers: Layer[], crop: Rect | null = null): EditorDocument {
@@ -69,6 +71,70 @@ describe('exportCanvas', () => {
 
     const cropped = exportCanvas(image, documentOf(64, 48, [], { x: 5, y: 7, width: 31, height: 23 }))
     expect([cropped.width, cropped.height]).toEqual([31, 23])
+
+    // A fractional crop is rounded once, in `viewOf`, so the size and the
+    // origin the renderer translates by cannot disagree.
+    const fractional = exportCanvas(image, documentOf(64, 48, [], { x: 5.5, y: 7.5, width: 31.2, height: 23.4 }))
+    expect([fractional.width, fractional.height]).toEqual([31, 23])
+  })
+
+  it('never redacts the preview more strongly than the file it hands over', () => {
+    // Zoom-to-fit on a large capture is the default view, so the preview is
+    // usually the smaller of the two. The user judges "is this covered?" on
+    // what is on screen, so the file may not be the weaker of the two.
+    const image = textImage(128, 24)
+    const region = { x: 16, y: 0, width: 96, height: 24 }
+    const doc = documentOf(128, 24, [
+      { id: 'a', kind: 'obscure', rect: region, mode: 'pixelate', intensity: 2 },
+    ])
+    const plain = documentOf(128, 24, [])
+
+    /**
+     * How much of the unredacted picture's structure the redacted one still
+     * carries at a given scale.
+     *
+     * Measured against an unredacted render at the SAME scale, so the detail a
+     * zoomed-out preview loses to resampling divides out and what is left is
+     * the redaction's own effect. Otherwise the two scales are not comparable
+     * and neither is the claim.
+     */
+    const detailAt = (scale: number): number => {
+      const size = { width: Math.round(128 * scale), height: Math.round(24 * scale) }
+      const draw = (document: EditorDocument): ImageData => {
+        const canvas = blankCanvas(size.width, size.height)
+        const ctx = context2d(canvas)
+        ctx.scale(scale, scale)
+        renderDocument(ctx, image, document)
+        return readPixels(canvas)
+      }
+      // Inset by a device pixel, so the rounding of the region's own edges
+      // cannot put a source pixel inside the window being measured.
+      const left = Math.ceil(region.x * scale) + 1
+      const top = Math.ceil(region.y * scale) + 1
+      const window = {
+        x: left,
+        y: top,
+        width: Math.floor((region.x + region.width) * scale) - left - 1,
+        height: Math.floor((region.y + region.height) * scale) - top - 1,
+      }
+      return sourceCorrelation(draw(doc), draw(plain), window)
+    }
+
+    const exported = sourceCorrelation(
+      readPixels(exportCanvas(image, doc)),
+      readPixels(exportCanvas(image, plain)),
+      { x: region.x + 1, y: region.y + 1, width: region.width - 2, height: region.height - 2 },
+    )
+
+    // The export is genuinely redacted, not merely no worse than a preview
+    // that is itself doing nothing.
+    expect(exported).toBeLessThan(0.5)
+    // Scales chosen so the mapping to device pixels is fractional: a six pixel
+    // block is 1.5 device pixels at a quarter scale, where rounding to two
+    // would make the preview a third stronger than the file.
+    for (const scale of [0.25, 0.3, 0.5, 0.6]) {
+      expect(exported).toBeLessThanOrEqual(detailAt(scale) + 0.02)
+    }
   })
 
   it('produces exactly what the preview draws, because it is the same code', () => {

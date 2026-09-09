@@ -32,6 +32,17 @@ export { addLayer, History, removeLayer, setCrop, updateLayer } from './commands
 export type { Handle } from './hit'
 export { handleAtPoint, layerAtPoint, moveLayer, resizeLayer } from './hit'
 
+/**
+ * `renderDocument` draws a document into a context the caller owns.
+ *
+ * Two things a consumer has to know before calling it, because neither is
+ * visible from the signature. It does not clear the target, so a surface
+ * drawing a document smaller than its own canvas clears it first. And it must
+ * not be scrolled by clip: an `obscure` layer writes raw device pixels through
+ * `putImageData`, which ignores the clip, so a surface clipped to a viewport
+ * would have its redactions land outside that clip. Pan and zoom by setting a
+ * transform instead.
+ */
 export type { RenderTarget } from './render'
 export { renderDocument } from './render'
 
