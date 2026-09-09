@@ -138,7 +138,13 @@ export function layerFor(
         style: { stroke, fill: null },
       }
     case 'line':
-      return { id, kind: 'line', points: gesture.samples, style: stroke }
+      // Copied, not aliased. The surface pushes onto the same array on every
+      // pointer move, so handing the reference out would let a layer already
+      // in the document grow with the pointer, and the module header's promise
+      // that everything here returns new values would hold for six kinds out
+      // of seven. It is safe today only because the surface happens to clear
+      // the gesture before committing, which is not a property of this file.
+      return { id, kind: 'line', points: [...gesture.samples], style: stroke }
     case 'highlight':
       return { id, kind: 'highlight', rect: normalizeRect(gesture.start, gesture.current), color: settings.color }
     case 'obscure':
@@ -221,6 +227,14 @@ export function restyleLayer(layer: Layer, settings: ToolSettings): Layer {
       // restyle is not the place to throw it away.
       return { ...layer, style: { stroke, fill: layer.style.fill } }
     case 'text':
+      // The size moves and the box does not, because measuring a box needs a
+      // rasteriser and this file has none. That makes the result an
+      // intermediate value rather than a layer fit to store: `drawText` paints
+      // from the rect's origin at the new size, so a rect left at the old
+      // measurement would leave the selection outline and the hit test
+      // describing a caption that is no longer there. The caller re-measures it
+      // with `measureTextRect` and puts the new rect in the same command; the
+      // editor's `restyled` is where that happens.
       return {
         ...layer,
         style: { ...layer.style, color: settings.color, size: textSizeFor(settings.strokeWidth) },

@@ -67,6 +67,17 @@ describe('layerFor', () => {
     expect(layer?.kind === 'line' && layer.points).toHaveLength(3)
   })
 
+  // The surface pushes onto the gesture's array on every pointer move, so a
+  // layer holding that same array would grow with the pointer after it was
+  // committed. This file promises new values; handing out the caller's array
+  // is the one place it did not.
+  it('copies the samples rather than aliasing the gesture', () => {
+    const gesture = drag(0, 0, 100, 100)
+    const layer = layerFor('line', 'a', gesture, settings, 1)
+    gesture.samples.push({ x: 200, y: 200 })
+    expect(layer?.kind === 'line' && layer.points).toHaveLength(3)
+  })
+
   it('carries the obscure mode and derives its intensity from the width', () => {
     const wide = { ...settings, strokeWidth: 9, obscureMode: 'pixelate' as const }
     const layer = layerFor('obscure', 'a', drag(0, 0, 50, 50), wide, 1)
@@ -204,7 +215,15 @@ describe('restyleLayer', () => {
     expect(restyled).toEqual({ ...obscure, mode: 'pixelate', intensity: obscureIntensityFor(10) })
   })
 
-  it('sizes text from the width knob and never moves it', () => {
+  // The origin is what this function may not move, not the box. The box is a
+  // measurement of the ink at a size this call has just changed, and measuring
+  // needs a rasteriser this file does not have, so the width and the height
+  // that come back are stale by construction and the caller re-measures them in
+  // the same command. Asserting the whole rect here would certify that stale
+  // pair as the answer, which is how a caption twice the size of its own
+  // selection outline got past a green suite once already. `Editor.test.tsx`
+  // covers the box, in a browser, where a glyph can actually be measured.
+  it('sizes text from the width knob and never moves its origin', () => {
     const text: Layer = {
       id: 'a',
       kind: 'text',
@@ -215,7 +234,8 @@ describe('restyleLayer', () => {
     const restyled = restyleLayer(text, next)
     expect(restyled.kind === 'text' && restyled.style.size).toBe(textSizeFor(10))
     expect(restyled.kind === 'text' && restyled.style.family).toBe('Inter')
-    expect(restyled.kind === 'text' && restyled.rect).toEqual(text.rect)
+    expect(restyled.kind === 'text' && restyled.rect.x).toBe(text.rect.x)
+    expect(restyled.kind === 'text' && restyled.rect.y).toBe(text.rect.y)
   })
 
   it('never touches geometry', () => {

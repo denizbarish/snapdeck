@@ -148,6 +148,27 @@ type GestureState =
 /** An open text box: where it was placed, and what has been typed into it. */
 type TextSession = { origin: Point; content: string }
 
+/**
+ * A width-slider gesture in progress.
+ *
+ * `origin` is the selected layer as it stood when the slider was grabbed, and
+ * every intermediate value is previewed against it rather than against the
+ * layer as it now stands. A range input fires on every value it passes through,
+ * so restyling the stored layer on each one would put a command on the undo
+ * stack per pixel of travel and take twenty presses of Cmd+Z to reverse one
+ * gesture. It is the same arrangement `GestureState` uses on the canvas, for
+ * the same reason: one gesture, one command.
+ *
+ * `origin` is null when nothing was selected. The gesture is still tracked,
+ * because the settings themselves move either way and only the commit is
+ * conditional on there having been something to restyle.
+ */
+type StrokeGesture = { origin: Layer | null }
+
+/** Which of the two things that can fail put a message in the status bar. */
+type NoticeSource = 'paint' | 'deliver'
+type Notice = { source: NoticeSource; message: string }
+
 export function Editor({ image, width, height, onExport, onCopy, onClose }: EditorProps): JSX.Element {
   const historyRef = useRef<History | null>(null)
   if (historyRef.current === null) historyRef.current = new History(createDocument(width, height))
@@ -175,8 +196,21 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
    * a tainted canvas, which is exactly the case where refusing is correct and
    * silence is not. A save that produced no file and no message would look
    * like a save.
+   *
+   * A message is worth clearing once the thing it warns about has stopped
+   * being true, or one transient failure sits in the status bar for the rest
+   * of the session, including behind later successful saves. It carries where
+   * it came from because the two sources stop being true on different events
+   * and share one line: painting succeeds on the very next render after a
+   * failed save, so an untagged notice would clear the message about the file
+   * that was never written before anybody could read it.
    */
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
+
+  /** Drops the notice if it came from `source`, and leaves any other alone. */
+  const clearNotice = (source: NoticeSource): void => {
+    setNotice((current) => (current?.source === source ? null : current))
+  }
 
   const stageRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -191,6 +225,14 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
    */
   const textSession = useRef<TextSession | null>(null)
   const gesture = useRef<GestureState | null>(null)
+  /**
+   * The width slider's gesture, in a ref for the same reason as the canvas's.
+   *
+   * It is written on the press and read on every intermediate value, and
+   * nothing renders from it: what the user sees is the `draft` layer it
+   * produces, exactly as during a drag on the picture.
+   */
+  const strokeGesture = useRef<StrokeGesture | null>(null)
   /**
    * Source of layer ids, unique within this document.
    *
@@ -219,6 +261,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     // new one, at coordinates that mean nothing in it.
     textSession.current = null
     gesture.current = null
+    strokeGesture.current = null
   }
 
   const view = viewOf(doc)
@@ -260,7 +303,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     if (!canvas || box.width <= 0 || box.height <= 0) return
     const ctx = canvas.getContext('2d')
     if (!ctx) {
-      setNotice('This browser would not give the editor a 2D canvas.')
+      setNotice({ source: 'paint', message: 'This browser would not give the editor a 2D canvas.' })
       return
     }
     // The backing store is in device pixels and the element is in CSS pixels,
@@ -317,13 +360,20 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
         ctx.setTransform(scale, 0, 0, scale, 0, 0)
         renderDocument(ctx, image, preview)
       }
+      // The warning below is about what is on screen now, so a paint that got
+      // all the way here has made it untrue. Only the paint's own message is
+      // dropped: a failed save is still a failed save.
+      clearNotice('paint')
     } catch (error: unknown) {
       // A cross-origin image taints the canvas and `getImageData` throws from
       // inside an obscure layer. Reported rather than swallowed: the redaction
       // the user drew is not on screen, and they have to know that before they
       // send the file anywhere.
       console.error('editor: could not draw the document', error)
-      setNotice('Some layers could not be drawn. Do not treat this preview as redacted.')
+      setNotice({
+        source: 'paint',
+        message: 'Some layers could not be drawn. Do not treat this preview as redacted.',
+      })
     }
   })
 
@@ -345,6 +395,10 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     // overlay learned the expensive way.
     event.preventDefault()
     if (event.button !== PRIMARY_BUTTON) return
+    // A second pointer while one is already drawing would overwrite the first
+    // gesture's ref: the first draft is orphaned, and the first release commits
+    // whatever the second gesture was building. One pointer draws at a time.
+    if (gesture.current) return
     // An open text box commits on the press that leaves it, before that press
     // is allowed to start anything else, so a click away finishes the sentence
     // rather than throwing it out.
@@ -505,6 +559,32 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
   }
 
   /**
+   * A layer restyled, with a text layer's box brought back around its ink.
+   *
+   * `restyleLayer` is pure and has no rasteriser, so it can move a text
+   * layer's point size but not re-measure the box that size is painted in. Left
+   * at the old measurement the two describe different things: `drawText` paints
+   * from the rect's origin at the new size while `boundsOf` still reports the
+   * old rect, so the selection outline covers a fraction of a caption the width
+   * knob has just enlarged and `layerAtPoint` misses most of it. `render.ts`
+   * puts the invariant as "the box follows the text, not the other way round",
+   * and this is where it is kept: the measurer lives here, and the new rect
+   * rides in the same command as the new size so one undo reverses both.
+   */
+  const restyled = (layer: Layer, next: ToolSettings): Layer => {
+    const styled = restyleLayer(layer, next)
+    if (styled.kind !== 'text') return styled
+    const size = styled.style.size
+    // The origin, not the whole rect: a restyle may resize the box but must
+    // never move it, or the colour swatches become a second way to nudge things.
+    const origin = { x: styled.rect.x, y: styled.rect.y }
+    return {
+      ...styled,
+      rect: measureTextRect(origin, styled.content, size, (line) => measureLine(line, size)),
+    }
+  }
+
+  /**
    * Applies the toolbar to the selection, as one reversible command.
    *
    * The settings move whether or not anything is selected, because they are
@@ -513,7 +593,52 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
    */
   const changeSettings = (next: ToolSettings): void => {
     setSettings(next)
-    if (selected) run(updateLayer(selected.id, restyleLayer(selected, next)))
+    if (selected) run(updateLayer(selected.id, restyled(selected, next)))
+  }
+
+  /**
+   * Notes what the width slider was grabbed on, so the drag can be one command.
+   *
+   * Called from both the press and the key, because a range input is worked
+   * with either and both stream intermediate values. Idempotent: the arrow keys
+   * fire a `keydown` per press and only the first opens the gesture.
+   */
+  const beginStrokeChange = (): void => {
+    if (strokeGesture.current === null) strokeGesture.current = { origin: selected }
+  }
+
+  /**
+   * One intermediate value of the width slider.
+   *
+   * Inside a gesture this only moves the preview, exactly as a drag on the
+   * canvas does; the command is written once, on the release. Outside one, the
+   * value arrived without a press or a key behind it, so there is no gesture to
+   * wait for and it commits immediately.
+   */
+  const changeStrokeWidth = (strokeWidth: number): void => {
+    const next = { ...settings, strokeWidth }
+    const active = strokeGesture.current
+    if (!active) {
+      changeSettings(next)
+      return
+    }
+    setSettings(next)
+    if (active.origin) setDraft(restyled(active.origin, next))
+  }
+
+  /**
+   * Ends the width slider's gesture and commits it, once.
+   *
+   * Both the release and the blur come here, so a pointer that came up off the
+   * control and a Tab out of it leave the same single entry on the undo stack.
+   * A gesture that passed through no value has no draft and writes nothing.
+   */
+  const endStrokeChange = (): void => {
+    const active = strokeGesture.current
+    strokeGesture.current = null
+    if (!active?.origin) return
+    setDraft(null)
+    if (draft && draft.id === active.origin.id) run(updateLayer(active.origin.id, draft))
   }
 
   const deliver = (send: (blob: Blob) => void | Promise<void>, what: string): void => {
@@ -521,10 +646,19 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     // has not been committed, and exporting it would ship a shape the user has
     // not let go of yet.
     toBlob(image, history.document, EXPORT_TYPE)
-      .then((blob) => send(blob))
+      .then((blob) => {
+        // Cleared only once the handover has happened, and only the delivery's
+        // own message: a warning about a file that was never written has no
+        // business sitting behind the save that finally worked.
+        clearNotice('deliver')
+        return send(blob)
+      })
       .catch((error: unknown) => {
         console.error(`editor: could not ${what} the picture`, error)
-        setNotice(`The picture could not be ${what === 'copy' ? 'copied' : 'saved'}.`)
+        setNotice({
+          source: 'deliver',
+          message: `The picture could not be ${what === 'copy' ? 'copied' : 'saved'}.`,
+        })
       })
   }
 
@@ -542,9 +676,21 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
       const key = event.key.toLowerCase()
 
       // The text box owns the keyboard while it is open, or every letter typed
-      // into it would also be a shortcut. Two keys still get through: Escape
-      // throws the box away, and Cmd+Enter finishes it, because Enter itself
-      // has to stay available for a second line.
+      // into it would also be a shortcut. Three keys still get through: Escape
+      // throws the box away, Cmd+Enter finishes it, because Enter itself has to
+      // stay available for a second line, and Cmd+S saves.
+      //
+      // Cmd+S is here because of what swallowing it would mean rather than
+      // because a caption needs a save shortcut. This component is built to run
+      // in a browser extension's host page, and every browser binds Cmd+S to
+      // its own save-page dialog; returning early without calling
+      // `preventDefault` opens that dialog over the editor, which is exactly
+      // what the branch below exists to stop. Committing the box first rather
+      // than dropping the key, so the file carries the sentence the user was in
+      // the middle of instead of losing it to a save.
+      //
+      // Cmd+C is deliberately not in this list: the textarea's own copy is what
+      // somebody selecting a word inside the box means by it.
       if (text) {
         if (event.key === 'Escape') {
           event.preventDefault()
@@ -552,6 +698,12 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
         } else if (meta && event.key === 'Enter') {
           event.preventDefault()
           commitText()
+        } else if (meta && key === 's') {
+          event.preventDefault()
+          // `History.run` is synchronous, so the layer this adds is already in
+          // `history.document` by the time `deliver` reads it.
+          commitText()
+          deliver((blob) => onExport(blob, EXPORT_TYPE), 'save')
         }
         return
       }
@@ -703,8 +855,17 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
             step={1}
             value={settings.strokeWidth}
             aria-label="Stroke width"
+            // A drag across this control is one edit and belongs on the undo
+            // stack once, so the press and the key open a gesture, every value
+            // in between only moves the preview, and the release and the blur
+            // commit it. The swatches beside it need none of this: a colour is
+            // picked in one click and fires once.
+            onPointerDown={beginStrokeChange}
+            onKeyDown={beginStrokeChange}
+            onPointerUp={endStrokeChange}
+            onBlur={endStrokeChange}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              changeSettings({ ...settings, strokeWidth: Number(event.target.value) })
+              changeStrokeWidth(Number(event.target.value))
             }
           />
           <span data-testid="stroke-width-value" style={{ width: 20, textAlign: 'right' }}>
@@ -936,7 +1097,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
         <span style={{ marginLeft: 'auto' }}>⌘Z undo · ⌘C copy · ⌘S save · Esc close</span>
         {notice && (
           <span data-testid="notice" role="status" style={{ color: '#ff9f0a' }}>
-            {notice}
+            {notice.message}
           </span>
         )}
       </div>
