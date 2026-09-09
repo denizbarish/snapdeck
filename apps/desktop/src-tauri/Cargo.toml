@@ -11,6 +11,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# `build.rs` reads the editor package's `chrome.json`, which is the single
+# source of the toolbar's minimum width. Already in the tree as a transitive
+# dependency of `tauri-build`.
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }

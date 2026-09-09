@@ -53,14 +53,20 @@ const CLOSE_DRAIN_POLL: Duration = Duration::from_millis(4);
 
 /// How long an overlay may stay hidden after it has been built.
 ///
-/// Generous on purpose. This is the last line of defence, not the fast path:
-/// the overlay shows itself the moment its backdrop has painted, so a deadline
-/// that expires is always either a broken window nobody can see or a load that
-/// was going to succeed and would be killed for no reason. The first costs the
-/// user nothing extra by lingering another second; the second is a capture
-/// thrown away. The budget covers page load, a multi-megabyte asset read and
-/// the decode, on every display at once.
-const REVEAL_DEADLINE: Duration = Duration::from_millis(2000);
+/// A safety net against a window that never paints, and nothing else. It is not
+/// a performance budget: the overlay shows itself the moment its backdrop has
+/// painted, so a deadline that expires is always either a broken window nobody
+/// can see or a load that was going to succeed and is killed for no reason. The
+/// first costs the user nothing extra by lingering a few more seconds; the
+/// second is a capture silently thrown away, which is the worse failure by far
+/// and the one the deadline must be sized against.
+///
+/// Five seconds because two was not enough. The very first capture after a
+/// launch pays for a cold WebKit cache on top of page load, a multi-megabyte
+/// asset read and the decode, on every display at once, and it was measured
+/// overrunning two seconds routinely: the overlay closed itself and the
+/// shortcut appeared to do nothing at all.
+const REVEAL_DEADLINE: Duration = Duration::from_millis(5000);
 
 /// Whether the screen recording pane has already been opened since the last
 /// time the preflight was happy.

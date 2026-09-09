@@ -68,6 +68,16 @@ export function savePathFor(path: string, type: string): string {
   return path.replace(/(\.[^./]*)?$/, `.${extension}`)
 }
 
+/**
+ * How long the page waits for the capture to decode before it says so, in ms.
+ *
+ * An image that neither loads nor fails fires neither handler, and the page
+ * would then say "Opening the capture…" for as long as the window is open. Long
+ * enough that a slow disk is never mistaken for a broken load; short enough
+ * that the user is told rather than left watching.
+ */
+const LOAD_DEADLINE_MS = 10_000
+
 export function EditorWindow({ path, width, height }: EditorWindowProps): JSX.Element {
   const [image, setImage] = useState<HTMLImageElement | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
@@ -117,9 +127,20 @@ export function EditorWindow({ path, width, height }: EditorWindowProps): JSX.El
       // which file that was.
       setFailure(`Snapdeck could not open ${path}. The capture is still on disk and on the clipboard.`)
     }
+    // The load is not abandoned here, only reported: nothing can cancel an
+    // image load, so a decode that finally arrives should still replace the
+    // message rather than be thrown away on top of it.
+    const deadline = window.setTimeout(() => {
+      if (!abandoned) {
+        setFailure(
+          `Snapdeck is still waiting for ${path}. The capture is on disk and on the clipboard.`,
+        )
+      }
+    }, LOAD_DEADLINE_MS)
     decoded.src = convertFileSrc(path)
     return () => {
       abandoned = true
+      window.clearTimeout(deadline)
       decoded.onload = null
       decoded.onerror = null
     }

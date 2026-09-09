@@ -46,6 +46,15 @@ const EDITOR_LABEL_PREFIX: &str = "editor-";
 /// a few percent below 1:1, never a broken window.
 const TOOLBAR_ALLOWANCE: f64 = 56.0;
 
+// Brings in `TOOLBAR_MIN_WIDTH`, generated from `packages/editor/chrome.json`
+// by `build.rs`. That is the number the editor's own toolbar is laid out
+// against: it is stated once, in that file, read by `packages/editor`'s
+// `chrome.ts` for the toolbar's CSS `min-width`, and read here for the window
+// floor. The three cannot disagree, which is the whole point; changing the
+// toolbar means changing the JSON, and both halves follow. A doc comment would
+// be rejected here: rustdoc does not document a macro invocation.
+include!(concat!(env!("OUT_DIR"), "/chrome.rs"));
+
 /// The narrowest and shortest an editor window may open.
 ///
 /// A window may be as large as the picture plus the chrome the toolbar needs,
@@ -54,19 +63,7 @@ const TOOLBAR_ALLOWANCE: f64 = 56.0;
 /// and leaves less room for the picture than the floor does. The picture is
 /// still never enlarged past 1:1, because the editor's own viewport caps it
 /// there.
-///
-/// MIRRORS THE TOOLBAR'S LAYOUT AND MUST BE CHANGED WITH IT. Measured against
-/// the packaged editor at this width, the toolbar in
-/// `packages/editor/src/Editor.tsx` fills two rows and its right-hand button
-/// group ends about thirteen points from the edge; a narrower window wraps it
-/// onto a third. That makes 720 a property of the toolbar and not of Rust, and
-/// it is written down twice today: here, and implicitly in that component's
-/// layout, where nothing fails if it changes. The number belongs in one place,
-/// exported by `packages/editor` and read by both the toolbar's own `min-width`
-/// and this constant. That package is owned by another change in this pass, so
-/// the Rust half is this comment; the export the other side has to add is
-/// recorded in the task report.
-const MIN_EDITOR_WIDTH: f64 = 720.0;
+const MIN_EDITOR_WIDTH: f64 = TOOLBAR_MIN_WIDTH;
 const MIN_EDITOR_HEIGHT: f64 = 260.0;
 
 /// How much of the monitor's work area a new editor window may take.

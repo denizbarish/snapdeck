@@ -82,7 +82,12 @@ const BLUR_REGION_DIVISOR = 6
  * The context's own transform is left as it was found. Inside, the origin is
  * moved to the crop, which is what makes a crop cost one `translate` rather
  * than an offset threaded through every layer: layers keep their source-image
- * coordinates, and anything outside the crop simply falls off the canvas.
+ * coordinates, and anything outside the crop falls off the canvas. That last
+ * part is a requirement on the caller, not a property of this function: the
+ * target has to be the size of the view (`viewOf(doc)`), because the only thing
+ * discarding the cropped-away pixels is the edge of the canvas. Draw a cropped
+ * document into a larger target and the region outside the crop is drawn, not
+ * dropped.
  *
  * The target is NOT cleared: the document's own image covers it, and a caller
  * that wants the canvas emptied first (a preview surface drawing a document

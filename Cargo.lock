@@ -3118,6 +3118,7 @@ dependencies = [
  "objc2-app-kit",
  "percent-encoding",
  "serde",
+ "serde_json",
  "snapdeck-capture",
  "tauri",
  "tauri-build",

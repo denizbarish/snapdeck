@@ -28,6 +28,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ChangeEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
+import { TOOLBAR_MIN_WIDTH } from './chrome'
 import { addLayer, History, removeLayer, setCrop, updateLayer, type Command } from './commands'
 import { exportCanvas, toBlob } from './export'
 import { handleAtPoint, layerAtPoint, moveLayer, resizeLayer, type Handle } from './hit'
@@ -788,6 +789,11 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
           flexWrap: 'wrap',
           padding: '8px 12px',
           borderBottom: '1px solid #3a3a3c',
+          // The one number the host also needs, so it is stated here, in the
+          // component that owns the layout, and read from there by everything
+          // else. Below this the right-hand group wraps onto a third row and
+          // takes the room away from the picture.
+          minWidth: TOOLBAR_MIN_WIDTH,
         }}
       >
         <div style={{ display: 'flex', gap: 2 }}>

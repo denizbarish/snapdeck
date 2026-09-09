@@ -13,6 +13,12 @@
  * extension on the same component.
  */
 
+/**
+ * The toolbar's minimum width, so a host that decides how large a window may be
+ * reads the toolbar's own number rather than keeping a copy of it.
+ */
+export { TOOLBAR_MIN_WIDTH } from './chrome'
+
 export type {
   BadgeStyle,
   Color,
