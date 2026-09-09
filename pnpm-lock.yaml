@@ -10,6 +10,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@snapdeck/editor':
+        specifier: workspace:*
+        version: link:../../packages/editor
       '@tauri-apps/api':
         specifier: ^2.9.0
         version: 2.11.1

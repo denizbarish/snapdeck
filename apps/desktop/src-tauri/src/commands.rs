@@ -8,6 +8,14 @@
 //! the capture: `capture_region` turns a confirmed selection into a file and a
 //! clipboard image, and the two permission commands report what the preflight
 //! knows for a settings surface to show.
+//!
+//! The last three belong to the editor, which opens on top of a capture that is
+//! already complete. They are what an annotated picture leaves through: back
+//! onto the file it came from, onto the clipboard, or nowhere at all when the
+//! user closes the window. `save_edited` is the only command in this file that
+//! takes a path from the webview, and it is checked accordingly.
+
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use snapdeck_capture::{
@@ -21,6 +29,7 @@ use tauri::{image::Image, AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::{
+    editor,
     output::{render_filename, save_png_without_overwriting, OffsetDateTimeParts, PngCompression},
     overlay,
     report::report_failure,
@@ -285,6 +294,23 @@ fn capture_selection(
     // Still inside the guard, so no capture started in the meantime can be
     // writing the frames this deletes.
     overlay::discard_cached_frozen_frames(app);
+    // The editor opens on top of a capture that is already finished, and it is
+    // the last thing that happens rather than a step in the middle: the file is
+    // written and the clipboard holds the image before this line runs, so
+    // nothing the editor does or fails to do can cost the user a capture.
+    //
+    // Only when there is a file. The page reads the picture over the asset
+    // protocol, so a capture that reached the clipboard and not the disk has
+    // nothing for the editor to open, and the notification that half of it
+    // failed has already been sent.
+    if let Ok(CaptureResult {
+        path: Some(path),
+        width,
+        height,
+    }) = &result
+    {
+        editor::open_editor(app, Path::new(path), *width, *height);
+    }
     result
 }
 
@@ -418,6 +444,164 @@ fn dismiss_overlays_and_wait(app: &AppHandle) -> Result<(), String> {
     Err("the overlays did not leave the screen in time, so nothing was captured".to_string())
 }
 
+/// The file extensions the editor can produce, and the only ones this command
+/// will write.
+///
+/// Not a formality. `path` is chosen by the webview, and while the editor only
+/// ever asks for the extension matching the blob it encoded, this command is
+/// the boundary: nothing that arrives here is trusted to be one of those asks.
+/// Confining the writes to image files keeps a compromised page from dropping a
+/// shell script or a `.command` into a directory the user opens in the Finder.
+const EDITABLE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// Writes an edited capture back to the pictures directory, and returns the
+/// path it used.
+///
+/// The same file as the capture when the format is unchanged, which is the
+/// common case: the page is handed the capture's own path in its URL and gives
+/// it straight back, so saving updates the picture the user already has rather
+/// than growing a second copy per edit. A different format changes the
+/// extension, and therefore the path, so the new file lands beside the original
+/// instead of replacing it.
+///
+/// `async` plus `spawn_blocking` for the reason `capture_region` gives: a
+/// synchronous command runs on the main thread, and this one writes a
+/// multi-megabyte file.
+#[tauri::command]
+pub async fn save_edited(app: AppHandle, path: String, bytes: Vec<u8>) -> Result<String, String> {
+    let directory = app
+        .path()
+        .picture_dir()
+        .map_err(|err| format!("no pictures directory: {err}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        write_edited(&directory, &path, &bytes)
+            .map(|written| written.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|err| format!("the save task did not finish: {err}"))?
+}
+
+/// Blocking worker only; see `save_edited`.
+///
+/// Takes the directory rather than an `AppHandle` so that the part worth
+/// testing, which paths it is willing to write to, can be tested against a
+/// temporary directory.
+fn write_edited(directory: &Path, requested: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let target = resolve_save_target(directory, requested)?;
+    std::fs::write(&target, bytes)
+        .map_err(|err| format!("failed to write {}: {err}", target.display()))?;
+    Ok(target)
+}
+
+/// Where `requested` may be written, or why it may not be.
+///
+/// This is a security boundary and not a convenience check. The path comes from
+/// the webview, so it is a string a compromised page chooses, and the command
+/// behind it writes arbitrary bytes: without this, `../../.zshrc` is a valid
+/// save target. Four things have to hold, and all four are enforced here rather
+/// than left to the caller:
+///
+/// - the path is absolute, because the only paths the editor is ever given are;
+/// - it names a file whose extension is one the editor can produce;
+/// - its directory, once symlinks are resolved, is exactly the pictures
+///   directory, so neither `..` nor a symlinked parent walks out of it;
+/// - nothing already at that name is a symlink, because `fs::write` follows one
+///   and a link planted there would write outside the directory that was just
+///   checked.
+///
+/// Subdirectories are refused along with everything else. Captures are written
+/// flat into the pictures directory, so a target one level down is not a case
+/// that exists, and the strictest rule that still admits every real save is the
+/// one worth having.
+fn resolve_save_target(directory: &Path, requested: &str) -> Result<PathBuf, String> {
+    let requested = Path::new(requested);
+    if !requested.is_absolute() {
+        return Err(format!("{} is not an absolute path", requested.display()));
+    }
+    let name = requested
+        .file_name()
+        .ok_or_else(|| format!("{} does not name a file", requested.display()))?;
+    let extension = requested
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if !extension.is_some_and(|extension| EDITABLE_EXTENSIONS.contains(&extension.as_str())) {
+        return Err(format!(
+            "{} is not one of the image formats the editor writes",
+            requested.display()
+        ));
+    }
+
+    // Both sides canonicalised, because either can contain a symlink that is
+    // not the caller's doing: `/tmp` is one on macOS, and a user may well have
+    // moved their pictures folder onto another volume.
+    let root = directory
+        .canonicalize()
+        .map_err(|err| format!("cannot resolve {}: {err}", directory.display()))?;
+    let parent = requested
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", requested.display()))?
+        .canonicalize()
+        .map_err(|err| {
+            format!(
+                "cannot resolve the directory of {}: {err}",
+                requested.display()
+            )
+        })?;
+    if parent != root {
+        return Err(format!(
+            "{} is outside {}",
+            requested.display(),
+            root.display()
+        ));
+    }
+
+    let target = root.join(name);
+    // `symlink_metadata` rather than `exists`, which follows the link and would
+    // answer for whatever is on the far end of it. A dangling link is refused
+    // too: the write would create the file it points at.
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{} is a symbolic link", target.display()));
+        }
+    }
+    Ok(target)
+}
+
+/// Puts an edited picture on the clipboard, replacing the capture that the
+/// original put there.
+///
+/// The bytes arrive encoded, because that is what the editor's canvas produces
+/// and what its other exit, the file, needs; the clipboard needs raw pixels, so
+/// they are decoded here rather than sent twice from the page.
+#[tauri::command]
+pub async fn copy_edited(app: AppHandle, bytes: Vec<u8>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || copy_encoded_to_clipboard(&app, &bytes))
+        .await
+        .map_err(|err| format!("the clipboard task did not finish: {err}"))?
+}
+
+/// Blocking worker only; see `copy_edited`.
+fn copy_encoded_to_clipboard(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
+    let rgba = image::load_from_memory(bytes)
+        .map_err(|err| format!("failed to decode the edited picture: {err}"))?
+        .to_rgba8();
+    let (width, height) = rgba.dimensions();
+    app.clipboard()
+        .write_image(&Image::new(rgba.as_raw(), width, height))
+        .map_err(|err| format!("failed to copy the edited picture to the clipboard: {err}"))
+}
+
+/// Closes the editor window.
+///
+/// Synchronous on purpose, for the reason `close_overlays` next door gives:
+/// `WebviewWindow::close` has to run on the main thread on macOS, and a
+/// synchronous Tauri command is the one kind that already does.
+#[tauri::command]
+pub fn close_editor(app: AppHandle) {
+    editor::close_editor(&app);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +650,132 @@ mod tests {
     fn the_surviving_windows_keep_their_front_to_back_order() {
         let windows = vec![window(5), window(9), window(1), window(7)];
         assert_eq!(ids(&without_windows(windows, &[9])), vec![5, 1, 7]);
+    }
+
+    /// A temporary directory of this test's own, canonicalised because
+    /// `/var/folders` and `/tmp` are both symlinks on macOS and
+    /// `resolve_save_target` compares resolved paths.
+    fn save_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("snapdeck-{}-{unique}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the temporary pictures directory");
+        dir.canonicalize().expect("resolve the temporary directory")
+    }
+
+    /// The common case, and the whole point of handing the page the capture's
+    /// own path: saving updates the picture the user already has instead of
+    /// leaving a second copy behind on every edit.
+    #[test]
+    fn saving_the_same_name_overwrites_the_capture() {
+        let dir = save_dir("overwrite");
+        let capture = dir.join("Snapdeck 2026-09-09 at 12.00.00.png");
+        std::fs::write(&capture, b"the original capture").expect("write the fixture");
+
+        let written = write_edited(&dir, &capture.to_string_lossy(), b"the annotated capture")
+            .expect("the save should be accepted");
+
+        assert_eq!(written, capture);
+        assert_eq!(
+            std::fs::read(&capture).expect("read the capture"),
+            b"the annotated capture"
+        );
+        let mut entries: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read the directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(entries, vec!["Snapdeck 2026-09-09 at 12.00.00.png"]);
+    }
+
+    /// A different format is a different extension, so it is a different path,
+    /// so the original survives untouched beside the new file.
+    #[test]
+    fn saving_a_different_extension_writes_a_new_file_beside_the_original() {
+        let dir = save_dir("extension");
+        let capture = dir.join("Snapdeck.png");
+        std::fs::write(&capture, b"the original capture").expect("write the fixture");
+        let as_jpeg = dir.join("Snapdeck.jpg");
+
+        let written = write_edited(&dir, &as_jpeg.to_string_lossy(), b"the annotated capture")
+            .expect("the save should be accepted");
+
+        assert_eq!(written, as_jpeg);
+        let original = std::fs::read(&capture).expect("read the original");
+        let new_file = std::fs::read(&as_jpeg).expect("read the new file");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(original, b"the original capture");
+        assert_eq!(new_file, b"the annotated capture");
+    }
+
+    /// The security boundary. `path` is a string the webview chooses, so every
+    /// one of these is a write this command must refuse, and refusing has to
+    /// mean nothing was written rather than written somewhere else.
+    #[test]
+    fn a_path_outside_the_pictures_directory_is_rejected() {
+        let dir = save_dir("escape");
+        let outside = dir.parent().expect("a parent").join("outside.png");
+        let cases = [
+            // The classic traversal, in the form a webview would send it.
+            dir.join("../outside.png").to_string_lossy().into_owned(),
+            // An unrelated absolute path.
+            "/tmp/outside.png".to_string(),
+            // Somewhere no capture could ever be.
+            format!("{}/.zshrc.png", std::env::var("HOME").unwrap_or_default()),
+            // A subdirectory of the pictures directory: captures are written
+            // flat, so this is refused with the rest.
+            dir.join("nested/outside.png")
+                .to_string_lossy()
+                .into_owned(),
+            // Not an image the editor can produce, inside the directory.
+            dir.join("payload.command").to_string_lossy().into_owned(),
+            // Relative, which no editor URL ever carries.
+            "outside.png".to_string(),
+        ];
+
+        let mut refusals = Vec::new();
+        for case in &cases {
+            refusals.push(write_edited(&dir, case, b"escaped").is_err());
+        }
+
+        let escaped = outside.exists();
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read the directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(refusals, vec![true; cases.len()], "cases: {cases:?}");
+        assert!(!escaped, "a refused save still wrote {}", outside.display());
+        assert!(leftovers.is_empty(), "a refused save wrote {leftovers:?}");
+    }
+
+    /// A symlink already sitting at the target name would carry the write out
+    /// of a directory that has just been checked, because `fs::write` follows
+    /// it. Only reachable if something else planted the link, which is exactly
+    /// the case worth refusing.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_target_name_is_rejected() {
+        let dir = save_dir("symlink");
+        let outside = dir.parent().expect("a parent").join("linked.png");
+        std::fs::write(&outside, b"somebody else's file").expect("write the fixture");
+        let link = dir.join("Snapdeck.png");
+        std::os::unix::fs::symlink(&outside, &link).expect("plant the symlink");
+
+        let refused = write_edited(&dir, &link.to_string_lossy(), b"escaped").is_err();
+
+        let target = std::fs::read(&outside).expect("read the linked file");
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(refused);
+        assert_eq!(target, b"somebody else's file");
     }
 }

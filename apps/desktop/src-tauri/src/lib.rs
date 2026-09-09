@@ -1,4 +1,5 @@
 mod commands;
+mod editor;
 mod output;
 mod overlay;
 mod report;
@@ -32,7 +33,10 @@ pub fn run() {
             commands::request_permission,
             commands::close_overlays,
             commands::list_windows,
-            commands::capture_region
+            commands::capture_region,
+            commands::save_edited,
+            commands::copy_edited,
+            commands::close_editor
         ])
         .setup(|app| {
             let handle = app.handle().clone();

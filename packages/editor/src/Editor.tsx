@@ -11,13 +11,14 @@
  *
  * Two rules shape everything below.
  *
- * The canvas is painted by `renderDocument` and by nothing else. There is no
- * second painter for the preview, so what the user approves and what
- * `exportCanvas` encodes cannot drift apart; that is the property the whole
- * package is arranged around. Selection outlines, resize handles and the crop
- * preview are therefore DOM elements laid over the canvas rather than extra
- * strokes on it: chrome is not part of the picture and must never be able to
- * reach the exported file.
+ * The canvas is painted by `renderDocument` and by nothing else, whether
+ * directly or through `exportCanvas`, which is the same call at source
+ * resolution. There is no second painter for the preview, so what the user
+ * approves and what `exportCanvas` encodes cannot drift apart; that is the
+ * property the whole package is arranged around. Selection outlines, resize
+ * handles and the crop preview are therefore DOM elements laid over the canvas
+ * rather than extra strokes on it: chrome is not part of the picture and must
+ * never be able to reach the exported file.
  *
  * Zoom is a transform on the context, never a clip. `render.ts` redacts through
  * `getImageData`/`putImageData`, which address raw device pixels and ignore the
@@ -28,7 +29,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ChangeEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
 import { addLayer, History, removeLayer, setCrop, updateLayer, type Command } from './commands'
-import { toBlob } from './export'
+import { exportCanvas, toBlob } from './export'
 import { handleAtPoint, layerAtPoint, moveLayer, resizeLayer, type Handle } from './hit'
 import {
   boundsOf,
@@ -284,9 +285,38 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     // Source-image pixels in, device pixels out. `renderDocument` adds the
     // translation for the crop itself, so this is only the zoom.
     const scale = viewport.scale * ratio
-    ctx.setTransform(scale, 0, 0, scale, 0, 0)
     try {
-      renderDocument(ctx, image, preview)
+      // Below one device pixel per source pixel a redaction cannot be drawn
+      // faithfully in place. `render.ts` measures a mosaic block and a blur
+      // radius in the device pixels of the target and rounds down, so at a
+      // fitted zoom of, say, 0.4 a six-pixel block becomes two and a
+      // three-pixel one becomes the identity: the file is redacted exactly as
+      // asked and the preview shows the region very nearly as it was. That is
+      // the safe direction, and it is still the wrong thing to put in front of
+      // somebody who is about to send the file: they see an apparently
+      // unredacted secret and read the tool as broken.
+      //
+      // So at that zoom the picture is rendered at source resolution and drawn
+      // down, which is the only arrangement where what is on screen is what is
+      // in the file. `exportCanvas` is the function that already does exactly
+      // that, and using it rather than a second offscreen render is what keeps
+      // the two from ever disagreeing.
+      //
+      // Only when a redaction is actually on the canvas. Every other layer is
+      // vector work that the transform scales correctly, and a source-resolution
+      // render costs a full-size canvas on every frame of a drag, which on a
+      // retina capture in a small window is the difference between a smooth
+      // gesture and a stuttering one. Redaction is the case where correctness
+      // is worth those frames; nothing else is.
+      if (scale < 1 && preview.layers.some((layer) => layer.kind === 'obscure')) {
+        // `drawImage` downsamples with the browser's own filtering, so the
+        // mosaic blocks arrive on screen as the average of themselves rather
+        // than as one sampled pixel out of each.
+        ctx.drawImage(exportCanvas(image, preview), 0, 0, canvas.width, canvas.height)
+      } else {
+        ctx.setTransform(scale, 0, 0, scale, 0, 0)
+        renderDocument(ctx, image, preview)
+      }
     } catch (error: unknown) {
       // A cross-origin image taints the canvas and `getImageData` throws from
       // inside an obscure layer. Reported rather than swallowed: the redaction

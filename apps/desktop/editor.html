@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck Editor</title>
+    <style>
+      html, body, #editor-root { margin: 0; height: 100%; width: 100%; overflow: hidden; }
+      /*
+        The editor's own background, written here as well as in the component.
+        This window is built visible, so the first frame is painted before React
+        has mounted and before the capture has been decoded; without this the
+        user sees a white rectangle flash where a dark editor is about to be.
+      */
+      body { background: #1c1c1e; color: #f5f5f7; }
+    </style>
+  </head>
+  <body>
+    <div id="editor-root"></div>
+    <script type="module" src="/src/editor/main.tsx"></script>
+  </body>
+</html>

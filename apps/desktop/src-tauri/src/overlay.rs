@@ -29,7 +29,10 @@ const FROZEN_FRAME_EXTENSION: &str = ".png";
 
 /// Characters that would end the query value or the URL itself. Everything
 /// else in a POSIX path, `/` and `.` included, stays readable.
-const PATH_QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+///
+/// Shared with `editor`, which puts a path in a query string for the same
+/// reason and must escape it the same way.
+pub(crate) const PATH_QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'#')
