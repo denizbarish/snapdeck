@@ -613,8 +613,10 @@ fn raise_above_menu_bar(_window: &WebviewWindow) {}
 /// Main thread only, for the same reason as `raise_above_menu_bar`. Returns
 /// nothing rather than panicking when called from anywhere else, because there
 /// is no answer to give and this runs inside an AppKit callback.
+/// `pub(crate)` because the editor window needs the same answer for the same
+/// reason: window mode must not offer a window of Snapdeck's own as a target.
 #[cfg(target_os = "macos")]
-fn overlay_window_id(window: &WebviewWindow) -> Option<u32> {
+pub(crate) fn overlay_window_id(window: &WebviewWindow) -> Option<u32> {
     let Some(_mtm) = MainThreadMarker::new() else {
         eprintln!(
             "snapdeck: the window id for {} was requested off the main thread",
@@ -636,7 +638,7 @@ fn overlay_window_id(window: &WebviewWindow) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn overlay_window_id(_window: &WebviewWindow) -> Option<u32> {
+pub(crate) fn overlay_window_id(_window: &WebviewWindow) -> Option<u32> {
     None
 }
 
