@@ -1,0 +1,145 @@
+/**
+ * Export tests.
+ *
+ * Two things are worth proving here and neither is "the function returns a
+ * canvas". First, that export and preview cannot drift, because export goes
+ * through the same `renderDocument` and the test compares the two outputs byte
+ * for byte. Second, that the file a user hands to a stranger has nothing of the
+ * redacted region left in it: not in the decoded pixels, not in a metadata
+ * chunk, not in a stray copy of the layer that redacted it.
+ */
+
+import { describe, expect, it } from 'vitest'
+import type { EditorDocument, Layer, Rect } from './model'
+import { exportCanvas, toBlob } from './export'
+import { renderDocument } from './render'
+import {
+  blankCanvas,
+  context2d,
+  differingBytes,
+  identicalFraction,
+  neighbourDelta,
+  noiseImage,
+  readPixels,
+} from './__fixtures__/canvas'
+
+function documentOf(width: number, height: number, layers: Layer[], crop: Rect | null = null): EditorDocument {
+  return { width, height, crop, layers }
+}
+
+/** Decode an encoded blob back to pixels, the way a recipient's viewer would. */
+async function decode(blob: Blob): Promise<ImageData> {
+  const bitmap = await createImageBitmap(blob)
+  const canvas = blankCanvas(bitmap.width, bitmap.height)
+  context2d(canvas).drawImage(bitmap, 0, 0)
+  bitmap.close()
+  return readPixels(canvas)
+}
+
+/** The four-character type of every chunk in a PNG file, in order. */
+function pngChunkTypes(bytes: Uint8Array): string[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const types: string[] = []
+  let offset = 8
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset)
+    types.push(String.fromCharCode(...bytes.subarray(offset + 4, offset + 8)))
+    offset += 12 + length
+  }
+  return types
+}
+
+function containsAscii(bytes: Uint8Array, text: string): boolean {
+  const needle = [...text].map((character) => character.charCodeAt(0))
+  outer: for (let start = 0; start + needle.length <= bytes.length; start += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (bytes[start + index] !== needle[index]) continue outer
+    }
+    return true
+  }
+  return false
+}
+
+describe('exportCanvas', () => {
+  it('is the size of the document when there is no crop, and of the crop when there is', () => {
+    const image = noiseImage(64, 48)
+
+    const full = exportCanvas(image, documentOf(64, 48, []))
+    expect([full.width, full.height]).toEqual([64, 48])
+
+    const cropped = exportCanvas(image, documentOf(64, 48, [], { x: 5, y: 7, width: 31, height: 23 }))
+    expect([cropped.width, cropped.height]).toEqual([31, 23])
+  })
+
+  it('produces exactly what the preview draws, because it is the same code', () => {
+    const image = noiseImage(64, 48)
+    const crop = { x: 8, y: 6, width: 40, height: 30 }
+    const doc = documentOf(
+      64,
+      48,
+      [
+        { id: 'a', kind: 'obscure', rect: { x: 12, y: 10, width: 16, height: 12 }, mode: 'pixelate', intensity: 4 },
+        { id: 'b', kind: 'arrow', from: { x: 10, y: 8 }, to: { x: 40, y: 30 }, style: { color: '#ff3b30', width: 3 } },
+        { id: 'c', kind: 'step', center: { x: 30, y: 20 }, index: 1, style: { fill: '#ff3b30', color: '#ffffff', size: 14 } },
+      ],
+      crop,
+    )
+
+    const preview = blankCanvas(crop.width, crop.height)
+    renderDocument(context2d(preview), image, doc)
+
+    expect(differingBytes(readPixels(exportCanvas(image, doc)), readPixels(preview))).toBe(0)
+  })
+})
+
+describe('toBlob', () => {
+  it('encodes losslessly to PNG, so the decoded file is the exported canvas', async () => {
+    const image = noiseImage(48, 32)
+    const doc = documentOf(48, 32, [
+      { id: 'a', kind: 'obscure', rect: { x: 8, y: 8, width: 16, height: 16 }, mode: 'blur', intensity: 3 },
+    ])
+
+    const blob = await toBlob(image, doc, 'image/png')
+
+    expect(blob.type).toBe('image/png')
+    expect(blob.size).toBeGreaterThan(0)
+    expect(differingBytes(await decode(blob), readPixels(exportCanvas(image, doc)))).toBe(0)
+  })
+
+  it('passes the quality through to the lossy encoders', async () => {
+    const image = noiseImage(96, 96)
+    const doc = documentOf(96, 96, [])
+
+    const coarse = await toBlob(image, doc, 'image/jpeg', 0.1)
+    const fine = await toBlob(image, doc, 'image/jpeg', 0.95)
+
+    expect(coarse.type).toBe('image/jpeg')
+    expect(fine.type).toBe('image/jpeg')
+    expect(coarse.size).toBeLessThan(fine.size)
+  })
+
+  it('leaves nothing of an obscured region in the exported file', async () => {
+    const image = noiseImage(64, 64)
+    const region = { x: 16, y: 16, width: 32, height: 32 }
+    const doc = documentOf(64, 64, [
+      { id: 'password-field-redaction', kind: 'obscure', rect: region, mode: 'pixelate', intensity: 8 },
+    ])
+
+    const blob = await toBlob(image, doc, 'image/png')
+    const decoded = await decode(blob)
+    const source = readPixels(image)
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+
+    // Not in the image data.
+    expect(identicalFraction(decoded, source, region)).toBe(0)
+    expect(neighbourDelta(decoded, region)).toBeLessThan(neighbourDelta(source, region) * 0.2)
+    // Not in metadata: a canvas-encoded PNG carries pixels and nothing else.
+    expect(pngChunkTypes(bytes)).not.toContain('tEXt')
+    expect(pngChunkTypes(bytes)).not.toContain('iTXt')
+    expect(pngChunkTypes(bytes)).not.toContain('zTXt')
+    expect(pngChunkTypes(bytes)).not.toContain('eXIf')
+    // Not in layer data: the document never reaches the file.
+    expect(containsAscii(bytes, 'password-field-redaction')).toBe(false)
+    expect(containsAscii(bytes, 'obscure')).toBe(false)
+  })
+})

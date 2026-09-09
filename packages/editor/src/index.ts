@@ -23,3 +23,8 @@ export { addLayer, History, removeLayer, setCrop, updateLayer } from './commands
 
 export type { Handle } from './hit'
 export { handleAtPoint, layerAtPoint, moveLayer, resizeLayer } from './hit'
+
+export type { RenderTarget } from './render'
+export { renderDocument } from './render'
+
+export { exportCanvas, toBlob } from './export'
