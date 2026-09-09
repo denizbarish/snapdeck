@@ -51,6 +51,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+      # The editor's renderer tests run in a real browser engine: the code
+      # draws on a canvas and the assertions measure the pixels it produced,
+      # which a Node canvas shim cannot answer for. Vitest browser mode needs
+      # the Chromium it drives to be present.
+      - run: pnpm --filter @snapdeck/editor exec playwright install --with-deps chromium
       - run: pnpm test
       # The bundle the app actually loads. Without it the Vite build, the two
       # HTML entry points and the TypeScript in them are unexercised on every
