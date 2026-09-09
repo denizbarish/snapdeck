@@ -456,6 +456,14 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
   }
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // The backdrop is one <img>, so to WebKit a press-and-drag on it is both
+    // this app's marquee gesture and the platform's gesture for selecting the
+    // document. Without this the drag leaves a document selection containing
+    // the frozen frame, and WebKit paints the system selection colour over the
+    // whole image: #010000 renders as #324A63, #FF0000 as #BA82A5, inside the
+    // marquee as well as outside it. The `user-select: none` in overlay.html
+    // does not keep an image out of a selection.
+    event.preventDefault()
     // A press starts nothing in window mode. The selection is whatever the
     // pointer is over, so opening a drag here would replace a highlighted
     // window with a zero-size rect at the press and then follow the pointer
@@ -611,6 +619,10 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
                   // resized.
                   onPointerDown={(event) => {
                     event.stopPropagation()
+                    // stopPropagation means this press never reaches the
+                    // backdrop's handler, so it needs its own guard against
+                    // WebKit selecting the frozen frame. Same tint otherwise.
+                    event.preventDefault()
                     if (event.button !== PRIMARY_BUTTON) return
                     activeHandle.current = handle
                     // The anchor for this entire resize, frozen at the press.
