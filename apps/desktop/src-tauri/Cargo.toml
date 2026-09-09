@@ -16,9 +16,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-clipboard-manager = "2.3.3"
-# The only user-visible failure surface this menu bar app has, next to the log
-# file: it declares no windows, so a failed capture has nowhere else to be seen.
-tauri-plugin-notification = "2.4.0"
 snapdeck-capture = { path = "../../../crates/capture" }
 serde.workspace = true
 image.workspace = true

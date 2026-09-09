@@ -14,9 +14,6 @@ use tauri_plugin_global_shortcut::ShortcutState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        // The failure surface for a menu bar app with no window of its own; see
-        // `report::report_failure`.
-        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
