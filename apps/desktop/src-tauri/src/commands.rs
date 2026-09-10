@@ -33,22 +33,16 @@ use snapdeck_capture::{
 };
 use tauri::{image::Image, AppHandle, Manager, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     editor,
-    output::{render_filename, save_png_without_overwriting, OffsetDateTimeParts, PngCompression},
+    output::{render_filename, save_capture_without_overwriting, OffsetDateTimeParts},
     overlay,
     report::report_failure,
+    settings::{self, Settings},
     state::AppState,
 };
-
-/// The name every capture is saved under, before the `.png` extension.
-///
-/// `{date}` and `{time}` are the tokens `render_filename` expands; `{width}`
-/// and `{height}` exist too and are simply not in the default. Written once
-/// here so the settings surface that will let the user change it in Plan 4 has
-/// one place to override rather than a literal buried in the capture path.
-const DEFAULT_FILENAME_TEMPLATE: &str = "Snapdeck {date} at {time}";
 
 /// A point in the global point space shared by every display.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -315,6 +309,13 @@ fn capture_selection(
     // protocol, so a capture that reached the clipboard and not the disk has
     // nothing for the editor to open, and the notification that half of it
     // failed has already been sent.
+    //
+    // And only when the user wants one. `open_editor_after_capture` is the
+    // setting for people who take a screenshot to paste it, for whom a window
+    // opening on every capture is something to close every time.
+    if !state.settings().open_editor_after_capture {
+        return captured.map(|captured| captured.result);
+    }
     if let Ok(Captured {
         result:
             CaptureResult {
@@ -377,18 +378,21 @@ fn capture_and_write(
         .capture(CaptureTarget::Region(global))
         .map_err(|err| err.to_string())?;
 
-    let directory = app
-        .path()
-        .picture_dir()
-        .map_err(|err| format!("no pictures directory: {err}"))?;
-    std::fs::create_dir_all(&directory)
-        .map_err(|err| format!("failed to create {}: {err}", directory.display()))?;
-    let name = render_filename(
-        DEFAULT_FILENAME_TEMPLATE,
-        OffsetDateTimeParts::now(),
-        frame.width,
-        frame.height,
-    );
+    // The settings in force, read once, so a save that lands in the settings
+    // window halfway through this capture cannot split it between two folders.
+    let settings = state.settings();
+    // Never a reason to lose the picture. A folder that has gone away, an
+    // unplugged volume or a permission change puts the capture in the pictures
+    // directory instead and says so, rather than failing over a setting.
+    let (directory, complaint) = settings::resolve_save_directory(app, &settings);
+    if let Some(complaint) = complaint {
+        report_failure(app, &complaint);
+    }
+    // Best effort, and deliberately not a `?`. This used to return early, which
+    // meant a pictures directory that could not be created threw away a capture
+    // the user had already framed and confirmed, clipboard and all. A failure
+    // here now shows up as a failed save below, which keeps the clipboard.
+    let _ = std::fs::create_dir_all(&directory);
     // The clipboard first, and both outcomes collected rather than the first
     // failure returned. A full disk, a read-only pictures directory or a
     // permission problem takes the file away, and a `?` here used to take the
@@ -396,15 +400,7 @@ fn capture_and_write(
     // was thrown away over a directory, when the image was in hand and one
     // paste away from being useful. Only losing both is a failed capture.
     let clipboard = copy_to_clipboard(app, &frame);
-    // `Default`, not the `Fast` the backdrop uses. The backdrop is a throwaway
-    // the user is blocked on; this is a file they keep, where Task 6 measured
-    // `Fast` + `NoFilter` at 29.9 MB against 2.3 MB here, and nobody is
-    // waiting on the write.
-    //
-    // The saved path comes back from the write rather than being built here,
-    // because a name already taken gets a suffix instead of the previous
-    // capture's contents.
-    let saved = save_png_without_overwriting(&frame, &directory, &name, PngCompression::Default);
+    let saved = write_capture(&frame, &directory, &settings);
 
     let result = |path: Option<String>| Captured {
         result: CaptureResult {
@@ -441,6 +437,28 @@ fn capture_and_write(
         }
         (Err(save_err), Err(clipboard_err)) => Err(format!("{save_err}, and {clipboard_err}")),
     }
+}
+
+/// Writes a finished capture where the settings say, under the name they say,
+/// in the format they say, and answers with the path used.
+///
+/// Split out from `capture_and_write` so that the one claim the settings make
+/// about a capture, that the template and the format the user saved are the
+/// ones their next file is written with, can be checked against a real file
+/// rather than trusted: everything around it needs a display, a screen
+/// recording grant and a clipboard.
+///
+/// The saved path comes back from the write rather than being built here,
+/// because a name already taken gets a suffix instead of the previous capture's
+/// contents, and because the format decides the extension.
+fn write_capture(frame: &Frame, directory: &Path, settings: &Settings) -> Result<PathBuf, String> {
+    let name = render_filename(
+        &settings.filename_template,
+        OffsetDateTimeParts::now(),
+        frame.width,
+        frame.height,
+    );
+    save_capture_without_overwriting(frame, directory, &name, settings.default_format)
 }
 
 /// Puts the captured pixels on the clipboard.
@@ -497,8 +515,8 @@ fn dismiss_overlays_and_wait(app: &AppHandle) -> Result<(), String> {
 /// allowance, it is the hole.
 const EDITABLE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
 
-/// Writes an edited capture back to the pictures directory, and returns the
-/// path it used.
+/// Writes an edited capture back beside the capture it was opened on, and
+/// returns the path it used.
 ///
 /// The same file as the capture when the format is unchanged, which is the
 /// common case: the page is handed the capture's own path in its URL and gives
@@ -517,10 +535,6 @@ pub async fn save_edited(
     path: String,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
-    let directory = app
-        .path()
-        .picture_dir()
-        .map_err(|err| format!("no pictures directory: {err}"))?;
     // Which capture this window was opened on, taken from the window that
     // invoked the command rather than from the request. Rust chose that path
     // and put it in the window's URL, so it already knows the only files this
@@ -530,6 +544,17 @@ pub async fn save_edited(
         .state::<AppState>()
         .editor_capture(window.label())
         .ok_or_else(|| format!("{} is not an editor window", window.label()))?;
+    // The capture's own directory, not the pictures directory. They are the
+    // same folder until the user chooses another one, and once they have, the
+    // pictures directory is a boundary that would refuse every save of every
+    // capture they took. Derived from the capture rather than from the settings
+    // for the same reason the capture is: this is a path Rust chose and
+    // recorded, so it cannot be changed by a page, and it stays right for an
+    // editor that is still open on a capture taken before the folder moved.
+    let directory = capture
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", capture.display()))?
+        .to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         write_edited(&directory, &capture, &path, &bytes)
             .map(|written| written.to_string_lossy().into_owned())
@@ -644,8 +669,8 @@ fn temporary_name(target: &Path) -> String {
 ///
 /// - the path is absolute, because the only paths the editor is ever given are;
 /// - it names a file whose extension is one the editor can produce;
-/// - its directory, once symlinks are resolved, is exactly the pictures
-///   directory, so neither `..` nor a symlinked parent walks out of it;
+/// - its directory, once symlinks are resolved, is exactly the directory the
+///   capture is in, so neither `..` nor a symlinked parent walks out of it;
 /// - it names `capture`, or `capture` in another of those formats, because
 ///   those are the only files this editor was opened to write;
 /// - nothing already at that name is a symlink. The write itself no longer
@@ -653,17 +678,18 @@ fn temporary_name(target: &Path) -> String {
 ///   opening it, so this is a refusal to replace a link the user put there
 ///   rather than the thing that stops an escape.
 ///
-/// The fourth is what the directory check alone cannot do. "Inside the pictures
-/// directory with an image extension" admits `wedding.jpg`, so without it a
-/// compromised page can overwrite any picture the user owns with the current
-/// canvas. Rust chose the capture's path and put it in this window's URL, so it
-/// already knows the only legitimate answers, and the different-format save
-/// still works because only the extension is allowed to differ.
+/// The fourth is what the directory check alone cannot do. "Beside the capture
+/// with an image extension" admits `wedding.jpg`, so without it a compromised
+/// page can overwrite any picture the user keeps in their save folder with the
+/// current canvas. Rust chose the capture's path and put it in this window's
+/// URL, so it already knows the only legitimate answers, and the
+/// different-format save still works because only the extension is allowed to
+/// differ.
 ///
 /// Subdirectories are refused along with everything else. Captures are written
-/// flat into the pictures directory, so a target one level down is not a case
-/// that exists, and the strictest rule that still admits every real save is the
-/// one worth having.
+/// flat into the save folder, so a target one level down is not a case that
+/// exists, and the strictest rule that still admits every real save is the one
+/// worth having.
 fn resolve_save_target(
     directory: &Path,
     capture: &Path,
@@ -794,6 +820,94 @@ pub fn close_editor(app: AppHandle) {
     editor::close_focused_editor(&app);
 }
 
+/// The settings in force, which is what the settings window renders.
+///
+/// Read from the running application rather than from the file, because the two
+/// can differ and the running one is the truthful answer: a stored binding that
+/// could not be registered was replaced at launch, and the login item is
+/// whatever the system says it is.
+#[tauri::command]
+pub fn get_settings(app: AppHandle) -> Settings {
+    app.state::<AppState>().settings()
+}
+
+/// Puts new settings into force and writes them down, or changes nothing at
+/// all.
+///
+/// All three steps or none, in the order that makes that possible: the refusals
+/// that cost nothing come first, then the change that has to be undone if a
+/// later one fails, and the file last. What comes back is the settings that are
+/// now in force, so the window renders the truth rather than what it asked for.
+///
+/// Synchronous on purpose. It runs on the main thread, which is where the
+/// shortcut manager wants to be reached from anyway, and the only file it
+/// writes is a few hundred bytes.
+#[tauri::command]
+pub fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+    let state = app.state::<AppState>();
+    let previous = state.settings();
+    // First, because it is the cheapest refusal and the one that must not have
+    // rebound a shortcut before it happens.
+    if let Some(directory) = &settings.save_directory {
+        settings::ensure_writable(directory)?;
+    }
+    // Registers the new shortcuts, or leaves the previous ones in force and
+    // says why; the login item goes with them.
+    settings::apply(&app, &previous, &settings)?;
+    if let Err(err) = settings::save(&app, &settings) {
+        // Nothing was written, so nothing may be left in force: an application
+        // whose shortcuts disagree with its own settings file is a state the
+        // user cannot explain and the next launch would undo behind their back.
+        if let Err(revert_err) = settings::apply(&app, &settings, &previous) {
+            return Err(format!(
+                "{err}. Your previous settings could not be put back either ({revert_err}); restart Snapdeck."
+            ));
+        }
+        return Err(err);
+    }
+    state.set_settings(settings.clone());
+    Ok(settings)
+}
+
+/// Asks the user for a save folder and proves it can be written to.
+///
+/// `Ok(None)` is a cancelled picker, which is not a failure and must not be
+/// rendered as one. A folder that cannot be written to is refused here rather
+/// than accepted and discovered at the next capture, which is the whole point
+/// of proving it: a setting the user has been shown as accepted has to work.
+///
+/// `async` plus `spawn_blocking` because `blocking_pick_folder` waits on the
+/// main thread to answer, so calling it *from* the main thread, which is where
+/// a synchronous command runs, would wait for a reply that cannot be sent.
+#[tauri::command]
+pub async fn choose_save_directory(app: AppHandle) -> Result<Option<String>, String> {
+    // Opens where the captures go now, so the picker starts from the folder the
+    // user is about to replace rather than from wherever macOS last was.
+    let (start, _) = settings::resolve_save_directory(&app, &app.state::<AppState>().settings());
+    tauri::async_runtime::spawn_blocking(move || pick_writable_directory(&app, &start))
+        .await
+        .map_err(|err| format!("the folder picker did not finish: {err}"))?
+}
+
+/// Blocking worker only; see `choose_save_directory`.
+fn pick_writable_directory(app: &AppHandle, start: &Path) -> Result<Option<String>, String> {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title("Choose where Snapdeck saves captures")
+        .set_directory(start)
+        .set_can_create_directories(true)
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let picked = picked
+        .into_path()
+        .map_err(|err| format!("that folder has no path Snapdeck can use: {err}"))?;
+    settings::ensure_writable(&picked)?;
+    Ok(Some(picked.to_string_lossy().into_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,6 +956,76 @@ mod tests {
     fn the_surviving_windows_keep_their_front_to_back_order() {
         let windows = vec![window(5), window(9), window(1), window(7)];
         assert_eq!(ids(&without_windows(windows, &[9])), vec![5, 1, 7]);
+    }
+
+    /// A 2x2 BGRA frame with two padding bytes per row, so a capture written
+    /// through the settings still goes through the same stride and channel
+    /// handling a real one does.
+    fn sample_frame() -> Frame {
+        #[rustfmt::skip]
+        let data = vec![
+            0, 0, 255, 255, /**/ 0, 255, 0, 255, /**/ 0, 0,
+            255, 0, 0, 255, /**/ 255, 255, 255, 255, /**/ 0, 0,
+        ];
+        Frame {
+            data,
+            width: 2,
+            height: 2,
+            stride: 10,
+            pixel_format: snapdeck_capture::PixelFormat::Bgra8,
+            scale_factor: 2.0,
+            captured_at: std::time::SystemTime::now(),
+        }
+    }
+
+    /// The claim the settings window makes to the user: the template they saved
+    /// is the name their next capture gets.
+    ///
+    /// A real file, because the interesting failure is a capture path that
+    /// still holds a template of its own; the assertion is against the name a
+    /// human would predict from the template, not against a second call to the
+    /// same renderer.
+    #[test]
+    fn a_saved_template_is_the_name_the_next_capture_is_written_under() {
+        let dir = save_dir("template");
+        let settings = Settings {
+            filename_template: "shot-{width}x{height}".to_string(),
+            ..Settings::default()
+        };
+
+        let written = write_capture(&sample_frame(), &dir, &settings).expect("write the capture");
+
+        let name = written
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(name.as_deref(), Some("shot-2x2.png"));
+    }
+
+    /// And the format they saved is the format it is written in, extension and
+    /// bytes together.
+    #[test]
+    fn a_saved_format_is_the_format_the_next_capture_is_written_in() {
+        let dir = save_dir("capture-format");
+        let settings = Settings {
+            filename_template: "shot".to_string(),
+            default_format: crate::settings::SaveFormat::Jpeg,
+            ..Settings::default()
+        };
+
+        let written = write_capture(&sample_frame(), &dir, &settings).expect("write the capture");
+
+        let format = image::ImageReader::open(&written)
+            .expect("open the capture")
+            .format();
+        let name = written
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(name.as_deref(), Some("shot.jpg"));
+        assert_eq!(format, Some(image::ImageFormat::Jpeg));
     }
 
     /// A temporary directory of this test's own, canonicalised because

@@ -20,9 +20,23 @@ serde_json = "1"
 tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-clipboard-manager = "2.3.3"
+# The save folder is chosen in a real macOS folder picker rather than typed, and
+# the picker is driven from Rust so the settings webview needs no dialog
+# permission of its own.
+tauri-plugin-dialog = "2.7.3"
+# `launch_at_login` is applied rather than stored. The macOS default here is the
+# launch agent, not the AppleScript login item: the AppleScript path drives
+# System Events, which costs the user an Automation prompt for a checkbox.
+tauri-plugin-autostart = "2.5.1"
 snapdeck-capture = { path = "../../../crates/capture" }
 serde.workspace = true
-image.workspace = true
+# The settings file. Already in the tree as a build dependency, which reads the
+# editor's `chrome.json`, and as a transitive dependency of `tauri`.
+serde_json = "1"
+# `jpeg` on top of the workspace's `png`, because the capture's format is now a
+# setting. Added here rather than in the workspace, so the capture crate is not
+# made to carry an encoder it never calls.
+image = { workspace = true, features = ["jpeg"] }
 # Filenames carry the local wall clock, and the time zone database behind it is
 # the one thing `std` has no answer for. Only `clock` is enabled: no parsing, no
 # formatting, no serde, no `oldtime`.

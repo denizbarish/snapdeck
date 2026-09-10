@@ -1,10 +1,32 @@
+//! The global capture shortcuts.
+//!
+//! Two properties are worth more here than anywhere else in the application,
+//! because this is the only surface a menu bar agent has before a capture
+//! exists, and a broken one is indistinguishable from an app that is not
+//! running.
+//!
+//! A set of shortcuts is registered whole or not at all. The loop used to
+//! register them one at a time and return on the first failure, which left the
+//! user with two working keys, one dead one, and nothing at all to tell them
+//! which was which.
+//!
+//! A rebind that cannot be registered puts the previous bindings back. Refusing
+//! and leaving nothing bound would be the same silence with an extra step: the
+//! user asked for a different key, was told no, and would then find the old key
+//! had stopped working too.
+//!
+//! The defaults are not here. They are in `settings::Settings::default`, which
+//! is the only place in this crate that states one; `Shortcuts` deliberately
+//! has no `Default` impl, so there is nowhere for a second copy to hide.
+
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shortcuts {
     pub capture_region: String,
@@ -12,30 +34,54 @@ pub struct Shortcuts {
     pub capture_display: String,
 }
 
-impl Default for Shortcuts {
-    fn default() -> Self {
-        // Avoids the macOS system screenshot bindings (Cmd+Shift+3/4/5).
-        Self {
-            capture_region: "CmdOrCtrl+Shift+7".to_string(),
-            capture_window: "CmdOrCtrl+Shift+8".to_string(),
-            capture_display: "CmdOrCtrl+Shift+9".to_string(),
-        }
-    }
-}
-
 impl Shortcuts {
-    /// Capture modes, in the same order as `parse_all` returns shortcuts.
+    /// Capture modes, in the same order as `bindings` and `parse_all`.
     pub const MODES: [&'static str; 3] = ["region", "window", "display"];
 
-    pub fn parse_all(&self) -> Result<Vec<Shortcut>, String> {
+    /// The three bindings in the order `MODES` names them.
+    ///
+    /// The one place the field order is written down, so a mode and the binding
+    /// it stands for cannot drift apart.
+    pub fn bindings(&self) -> [&str; 3] {
         [
             &self.capture_region,
             &self.capture_window,
             &self.capture_display,
         ]
-        .into_iter()
-        .map(|raw| Shortcut::from_str(raw).map_err(|e| format!("invalid shortcut '{raw}': {e}")))
-        .collect()
+    }
+
+    pub fn parse_all(&self) -> Result<Vec<Shortcut>, String> {
+        self.bindings()
+            .into_iter()
+            .map(|raw| {
+                Shortcut::from_str(raw).map_err(|e| format!("invalid shortcut '{raw}': {e}"))
+            })
+            .collect()
+    }
+
+    /// The parsed bindings, once they are known to be registerable as a set.
+    ///
+    /// The extra thing this does over `parse_all` is refuse a set that collides
+    /// with itself. Two modes on one combination cannot both be registered, and
+    /// the platform's own answer to the second registration is not something a
+    /// user can read; naming the two modes here is.
+    ///
+    /// Compared as parsed values rather than as strings, because
+    /// "CmdOrCtrl+Alt+Digit4" and "Cmd+Alt+4" are different strings that are
+    /// the same key.
+    pub fn validate(&self) -> Result<Vec<Shortcut>, String> {
+        let parsed = self.parse_all()?;
+        let mut seen: HashMap<Shortcut, &'static str> = HashMap::new();
+        for (index, shortcut) in parsed.iter().enumerate() {
+            let mode = Self::MODES[index];
+            if let Some(other) = seen.insert(*shortcut, mode) {
+                return Err(format!(
+                    "the {mode} and {other} shortcuts are both {}, and one combination cannot do two things",
+                    self.bindings()[index]
+                ));
+            }
+        }
+        Ok(parsed)
     }
 
     /// Capture mode for an already parsed shortcut, or `None` when it is not
@@ -48,24 +94,83 @@ impl Shortcuts {
     }
 }
 
+/// Registers `shortcuts`, and leaves nothing registered if it cannot.
+///
+/// The rollback is the point. `register` can fail on any iteration, most often
+/// because the combination is already held by macOS or by another application,
+/// and a set that is half in force is worse than one that is not in force at
+/// all: some of the user's keys work, none of them say so, and the application
+/// has no way to describe the state it is in. Every caller can therefore treat
+/// an error as "nothing changed".
 pub fn register_shortcuts(app: &AppHandle, shortcuts: &Shortcuts) -> Result<(), String> {
-    let parsed = shortcuts.parse_all()?;
+    let parsed = shortcuts.validate()?;
     let manager = app.global_shortcut();
     manager.unregister_all().map_err(|e| e.to_string())?;
-    for shortcut in parsed {
-        manager.register(shortcut).map_err(|e| e.to_string())?;
+    for (index, shortcut) in parsed.iter().enumerate() {
+        if let Err(err) = manager.register(*shortcut) {
+            let _ = manager.unregister_all();
+            return Err(format!(
+                "the {} shortcut ({}) could not be registered: {err}",
+                Shortcuts::MODES[index],
+                shortcuts.bindings()[index]
+            ));
+        }
     }
     Ok(())
+}
+
+/// Moves from `previous` to `next`, or stays on `previous` and says why.
+///
+/// The user is never left with a keyboard they cannot explain: either the new
+/// bindings are in force, or the old ones still are, and the error names which.
+pub fn rebind(app: &AppHandle, previous: &Shortcuts, next: &Shortcuts) -> Result<(), String> {
+    rebind_with(
+        |shortcuts| register_shortcuts(app, shortcuts),
+        previous,
+        next,
+    )
+}
+
+/// The decision inside `rebind`, with the registration injected.
+///
+/// Split out because the property worth testing, that a refused rebind leaves
+/// the previous bindings in force, cannot be observed through a live
+/// `GlobalShortcut`: registering a combination the platform will refuse is not
+/// something a test can arrange, and reading back what is registered is not
+/// something the plugin offers.
+fn rebind_with<F>(mut register: F, previous: &Shortcuts, next: &Shortcuts) -> Result<(), String>
+where
+    F: FnMut(&Shortcuts) -> Result<(), String>,
+{
+    // Nothing to do, and nothing to risk: re-registering an unchanged set would
+    // unregister the working bindings first, for no gain.
+    if next == previous {
+        return Ok(());
+    }
+    let Err(err) = register(next) else {
+        return Ok(());
+    };
+    match register(previous) {
+        Ok(()) => Err(format!("{err}. Your previous shortcuts are still in force.")),
+        Err(restore_err) => Err(format!(
+            "{err}. The previous shortcuts could not be put back either ({restore_err}), so no capture shortcut is bound; use the menu bar item until this is fixed."
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::settings::Settings;
+
+    fn defaults() -> Shortcuts {
+        Settings::default().shortcuts
+    }
+
     #[test]
     fn defaults_are_parseable_shortcuts() {
-        let shortcuts = Shortcuts::default();
-        let parsed = shortcuts.parse_all().expect("defaults must parse");
+        let parsed = defaults().parse_all().expect("defaults must parse");
         assert_eq!(parsed.len(), 3);
     }
 
@@ -73,7 +178,7 @@ mod tests {
     fn invalid_shortcut_is_reported_with_its_value() {
         let shortcuts = Shortcuts {
             capture_region: "NotAKey+++".to_string(),
-            ..Shortcuts::default()
+            ..defaults()
         };
         let err = shortcuts.parse_all().unwrap_err();
         assert!(
@@ -84,14 +189,14 @@ mod tests {
 
     #[test]
     fn modes_line_up_with_parsed_shortcuts() {
-        let shortcuts = Shortcuts::default();
+        let shortcuts = defaults();
         let parsed = shortcuts.parse_all().expect("defaults must parse");
         assert_eq!(parsed.len(), Shortcuts::MODES.len());
         // Every position, not just one, and against literals rather than
         // `MODES`: `mode_for_parsed` reads the mode out of `MODES`, so asserting
         // one against the other holds for any ordering. Without an independent
         // oracle, swapping MODES 0 and 2 passes here and silently makes the
-        // region shortcut capture the whole screen once Task 6 acts on the mode.
+        // region shortcut capture the whole screen.
         for (index, expected) in ["region", "window", "display"].iter().enumerate() {
             assert_eq!(shortcuts.mode_for_parsed(&parsed[index]), Some(*expected));
         }
@@ -99,22 +204,139 @@ mod tests {
 
     #[test]
     fn mode_for_parsed_ignores_foreign_shortcuts() {
-        let shortcuts = Shortcuts::default();
         let foreign = Shortcut::from_str("CmdOrCtrl+Alt+K").expect("valid");
-        assert_eq!(shortcuts.mode_for_parsed(&foreign), None);
+        assert_eq!(defaults().mode_for_parsed(&foreign), None);
     }
 
     #[test]
     fn defaults_do_not_collide_with_each_other() {
-        // Compare parsed values, not strings: "Cmd+Shift+7" and
-        // "CmdOrCtrl+Shift+7" are different strings that collide at
-        // registration, which is the whole reason mode_for_parsed exists.
-        // A set, not dedup(): dedup only collapses adjacent duplicates, so a
-        // collision between the first and third binding would slip through.
-        let parsed = Shortcuts::default()
-            .parse_all()
-            .expect("defaults must parse");
-        let unique: std::collections::HashSet<_> = parsed.iter().collect();
-        assert_eq!(unique.len(), 3);
+        defaults()
+            .validate()
+            .expect("the built-in bindings must be registerable as a set");
+    }
+
+    /// Two modes on one combination is a conflict the platform answers for with
+    /// an error nobody can read, so it is caught before anything is registered.
+    /// The two spellings are deliberately different strings for the same key:
+    /// a string comparison would miss this.
+    #[test]
+    fn a_set_that_collides_with_itself_is_refused_by_name() {
+        let shortcuts = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+Digit7".to_string(),
+            capture_window: "Cmd+Alt+7".to_string(),
+            capture_display: "CmdOrCtrl+Alt+Digit9".to_string(),
+        };
+        let err = shortcuts
+            .validate()
+            .expect_err("one combination cannot drive two modes");
+        assert!(err.contains("window"), "{err}");
+        assert!(err.contains("region"), "{err}");
+    }
+
+    /// A recorder of what a fake registration left in force, so a test can ask
+    /// the question the user would: which shortcuts does the application
+    /// actually have now?
+    struct Registrar {
+        /// The set the platform refuses, by its region binding.
+        refuse: String,
+        in_force: Option<Shortcuts>,
+    }
+
+    impl Registrar {
+        fn register(&mut self, shortcuts: &Shortcuts) -> Result<(), String> {
+            // The real one unregisters everything before it registers anything,
+            // so a refusal leaves nothing bound. The fake has to model that, or
+            // the restore would look like it worked when it never ran.
+            self.in_force = None;
+            if shortcuts.capture_region == self.refuse {
+                return Err("the region shortcut is already taken".to_string());
+            }
+            self.in_force = Some(shortcuts.clone());
+            Ok(())
+        }
+    }
+
+    /// The rule this module exists for. A rebind that cannot be registered is
+    /// refused *and* the previous bindings come back; leaving nothing bound
+    /// would be the silent dead keys with an extra step.
+    #[test]
+    fn a_refused_rebind_puts_the_previous_bindings_back() {
+        let previous = defaults();
+        let taken = Shortcuts {
+            capture_region: "CmdOrCtrl+Shift+Digit3".to_string(),
+            ..previous.clone()
+        };
+        let mut registrar = Registrar {
+            refuse: taken.capture_region.clone(),
+            in_force: Some(previous.clone()),
+        };
+
+        let err = rebind_with(|shortcuts| registrar.register(shortcuts), &previous, &taken)
+            .expect_err("a combination the platform refuses must be refused here");
+
+        assert!(
+            err.contains("already taken"),
+            "the reason is the user's: {err}"
+        );
+        assert_eq!(
+            registrar.in_force,
+            Some(previous),
+            "the previous bindings must be in force again, not nothing"
+        );
+    }
+
+    #[test]
+    fn an_accepted_rebind_leaves_the_new_bindings_in_force() {
+        let previous = defaults();
+        let next = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+            ..previous.clone()
+        };
+        let mut registrar = Registrar {
+            refuse: "nothing is refused".to_string(),
+            in_force: Some(previous.clone()),
+        };
+
+        rebind_with(|shortcuts| registrar.register(shortcuts), &previous, &next)
+            .expect("a free combination must be accepted");
+
+        assert_eq!(registrar.in_force, Some(next));
+    }
+
+    /// Saving the settings window without touching the shortcuts must not take
+    /// the working bindings down and put them back up, which is a window in
+    /// which the user's key does nothing.
+    #[test]
+    fn an_unchanged_set_is_not_re_registered() {
+        let shortcuts = defaults();
+        let mut calls = 0;
+        rebind_with(
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+            &shortcuts,
+            &shortcuts.clone(),
+        )
+        .expect("nothing changed");
+        assert_eq!(calls, 0);
+    }
+
+    /// The worst case, and the one the message has to be honest about: the new
+    /// set fails and the old set cannot be put back either.
+    #[test]
+    fn a_failed_restore_says_that_nothing_is_bound() {
+        let previous = defaults();
+        let next = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+            ..previous.clone()
+        };
+        let err = rebind_with(|_| Err("the manager is gone".to_string()), &previous, &next)
+            .expect_err("both registrations failed");
+        assert!(
+            err.contains("no capture shortcut is bound"),
+            "the user has to be told the keyboard is empty: {err}"
+        );
+        assert!(err.contains("menu bar"), "and where to go instead: {err}");
     }
 }

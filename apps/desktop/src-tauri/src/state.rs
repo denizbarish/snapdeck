@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use snapdeck_capture::macos::MacCapturer;
 
+use crate::settings::Settings;
+
 /// One open editor window, keyed by its label.
 ///
 /// Both fields answer a question that only Rust can answer, and neither can be
@@ -54,6 +56,20 @@ pub struct AppState {
     /// get back. Keyed by label because that is what a command knows about the
     /// window that invoked it.
     editors: Mutex<HashMap<String, EditorSession>>,
+    /// The settings currently in force.
+    ///
+    /// Held here rather than read from disk on demand, because the two hottest
+    /// readers cannot afford a file read: the global shortcut handler runs on
+    /// the main thread on every press, and the capture path runs while the
+    /// user is waiting. It is also what makes a change take effect without a
+    /// relaunch, since `commands::save_settings` replaces this the moment the
+    /// file is written.
+    ///
+    /// Starts at the defaults rather than at the stored settings: this is
+    /// built before there is an `AppHandle` to find the file with, and
+    /// `lib::run`'s setup replaces it with what was on disk before the tray or
+    /// any shortcut can read it.
+    settings: Mutex<Settings>,
 }
 
 impl AppState {
@@ -63,7 +79,30 @@ impl AppState {
             capture_in_flight: Arc::new(AtomicBool::new(false)),
             overlay_window_ids: Mutex::new(Vec::new()),
             editors: Mutex::new(HashMap::new()),
+            settings: Mutex::new(Settings::default()),
         }
+    }
+
+    /// The settings in force, cloned so no caller holds the lock across a
+    /// capture.
+    pub fn settings(&self) -> Settings {
+        self.settings_lock().clone()
+    }
+
+    /// Puts new settings into force. The next capture and the next shortcut
+    /// press read these; nothing is relaunched.
+    pub fn set_settings(&self, settings: Settings) {
+        *self.settings_lock() = settings;
+    }
+
+    /// The settings lock, with poisoning treated as recoverable for the reason
+    /// `overlay_ids` gives: every user of it replaces or reads the whole value,
+    /// and propagating an unrelated panic would leave the application unable to
+    /// answer what its own save folder is.
+    fn settings_lock(&self) -> std::sync::MutexGuard<'_, Settings> {
+        self.settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Records the overlays a capture just built. Replaces the previous set,
@@ -254,6 +293,24 @@ mod tests {
         let mut ids = state.editor_window_ids();
         ids.sort_unstable();
         assert_eq!(ids, vec![11, 22]);
+    }
+
+    /// A saved change has to be the thing the next capture and the next
+    /// shortcut press read, which is what "no relaunch" means here.
+    #[test]
+    fn the_settings_in_force_are_replaced_by_a_save() {
+        let state = AppState::new();
+        assert_eq!(
+            state.settings(),
+            Settings::default(),
+            "nothing has been loaded yet, so the built-in defaults are in force"
+        );
+        let changed = Settings {
+            filename_template: "shot-{time}".to_string(),
+            ..Settings::default()
+        };
+        state.set_settings(changed.clone());
+        assert_eq!(state.settings(), changed);
     }
 
     /// A window that is not an editor has no capture, which is what makes a

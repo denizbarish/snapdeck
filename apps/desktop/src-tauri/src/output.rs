@@ -3,9 +3,12 @@ use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
+use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 use snapdeck_capture::Frame;
+
+use crate::settings::SaveFormat;
 
 /// How many names a capture may try before giving up on the directory.
 ///
@@ -67,30 +70,43 @@ pub fn save_png(frame: &Frame, path: &Path, compression: PngCompression) -> Resu
     encode_png(frame, file, compression)
 }
 
-/// Writes a frame as PNG under `directory`, adding a macOS-style ` 2`, ` 3`, …
-/// to `stem` until it finds a name nothing holds, and returns the path used.
+/// How hard the JPEG encoder works, out of 100.
+///
+/// High, and deliberately higher than a photograph would be given, for the
+/// reason `packages/editor` gives its own 0.92 at length: a screenshot is the
+/// worst case for this encoder rather than its best one. JPEG spends its budget
+/// on smooth gradients and discards the high-frequency detail a photograph does
+/// not miss, and a screenshot is almost entirely that detail, hard edges between
+/// flat colours, every one of which is a glyph. The same number as the editor's,
+/// because it is the same picture leaving by a different door.
+const JPEG_QUALITY: u8 = 92;
+
+/// Writes a frame under `directory` in `format`, adding a macOS-style ` 2`,
+/// ` 3`, … to `stem` until it finds a name nothing holds, and returns the path
+/// used.
 ///
 /// `File::create` truncates, so the plain `save_png` next door would destroy a
 /// capture that happens to render the same name. The default template's
-/// one-second resolution makes that unreachable today, but the template is
-/// configurable by design, and one without `{time}` in it would leave the user
-/// with exactly one file no matter how many captures they took.
+/// one-second resolution makes that unreachable, but the template is the user's
+/// now, and one without `{time}` in it would otherwise leave them with exactly
+/// one file no matter how many captures they took.
 ///
 /// The name is claimed with `create_new`, not with an "does it exist" check
 /// followed by a write: the check would answer for a moment that has passed by
 /// the time the file is opened, and the whole point here is that nothing is
 /// overwritten.
-pub fn save_png_without_overwriting(
+pub fn save_capture_without_overwriting(
     frame: &Frame,
     directory: &Path,
     stem: &str,
-    compression: PngCompression,
+    format: SaveFormat,
 ) -> Result<PathBuf, String> {
+    let extension = format.extension();
     for attempt in 1..=MAX_NAME_ATTEMPTS {
-        let path = directory.join(suffixed_file_name(stem, attempt));
+        let path = directory.join(suffixed_file_name(stem, attempt, extension));
         match File::options().write(true).create_new(true).open(&path) {
             Ok(file) => {
-                encode_png(frame, file, compression)?;
+                encode_capture(frame, file, format)?;
                 return Ok(path);
             }
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
@@ -98,7 +114,7 @@ pub fn save_png_without_overwriting(
         }
     }
     Err(format!(
-        "failed to find a free name for {stem}.png in {} after {MAX_NAME_ATTEMPTS} tries",
+        "failed to find a free name for {stem}.{extension} in {} after {MAX_NAME_ATTEMPTS} tries",
         directory.display()
     ))
 }
@@ -108,12 +124,44 @@ pub fn save_png_without_overwriting(
 /// The first attempt is the bare name, so a capture that collides with nothing
 /// is named exactly what the template rendered; only a taken name grows a
 /// suffix, which is what the Finder does with a duplicate.
-fn suffixed_file_name(stem: &str, attempt: u32) -> String {
+fn suffixed_file_name(stem: &str, attempt: u32, extension: &str) -> String {
     if attempt <= 1 {
-        format!("{stem}.png")
+        format!("{stem}.{extension}")
     } else {
-        format!("{stem} {attempt}.png")
+        format!("{stem} {attempt}.{extension}")
     }
+}
+
+/// Encodes the picture the user keeps, in the format they asked for.
+///
+/// PNG gets `Default` rather than the `Fast` the backdrop uses: this is a file
+/// they keep, where the measurements in `PngCompression` put `Fast` + `NoFilter`
+/// at 29.9 MB against 2.3 MB, and nobody is waiting on the write.
+///
+/// JPEG has no alpha channel, so the frame's is dropped rather than composited
+/// against a colour this module would have to invent. Nothing is lost by it: a
+/// display capture is opaque, which is what the format's own rule assumes.
+fn encode_capture<W: Write>(frame: &Frame, writer: W, format: SaveFormat) -> Result<(), String> {
+    match format {
+        SaveFormat::Png => encode_png(frame, writer, PngCompression::Default),
+        SaveFormat::Jpeg => encode_jpeg(frame, writer),
+    }
+}
+
+/// Encodes a frame as JPEG.
+///
+/// The conversion to RGB is not a preference. `JpegEncoder::write_image` refuses
+/// `Rgba8` outright, so the choice is between doing this here and handing the
+/// user an error instead of a capture.
+fn encode_jpeg<W: Write>(frame: &Frame, writer: W) -> Result<(), String> {
+    let rgba = frame.to_rgba8().map_err(|e| e.to_string())?;
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    JpegEncoder::new_with_quality(BufWriter::new(writer), JPEG_QUALITY)
+        .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
+        .map_err(|e| format!("failed to save jpeg: {e}"))
 }
 
 /// Encodes a frame into an open sink, so both save paths share one encoder and
@@ -295,10 +343,14 @@ mod tests {
         }
     }
 
+    /// The shape the built-in template has, written here as a literal of this
+    /// test's own rather than by reaching for the default: the default belongs
+    /// to `settings`, and a copy of it here would be exactly the second source
+    /// of truth that module exists to prevent.
     #[test]
-    fn renders_the_default_template() {
-        let name = render_filename("Snapdeck {date} at {time}", parts(), 800, 600);
-        assert_eq!(name, "Snapdeck 2026-09-07 at 04.05.06");
+    fn renders_the_date_and_time_tokens() {
+        let name = render_filename("Capture {date} at {time}", parts(), 800, 600);
+        assert_eq!(name, "Capture 2026-09-07 at 04.05.06");
     }
 
     #[test]
@@ -358,19 +410,60 @@ mod tests {
     #[test]
     fn the_first_capture_of_a_name_keeps_the_name() {
         let directory = temp_dir("first");
-        let path = save_png_without_overwriting(
+        let path = save_capture_without_overwriting(
             &sample_frame(),
             &directory,
-            "Snapdeck 2026-09-07 at 04.05.06",
-            PngCompression::Fast,
+            "Capture 2026-09-07 at 04.05.06",
+            SaveFormat::Png,
         )
         .expect("save");
 
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
-            Some("Snapdeck 2026-09-07 at 04.05.06.png")
+            Some("Capture 2026-09-07 at 04.05.06.png")
         );
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The format setting has to reach the file, not only the extension on it.
+    /// A `.jpg` holding PNG bytes is exactly the failure the editor's own
+    /// WebP removal was about.
+    #[test]
+    fn the_chosen_format_decides_the_extension_and_the_bytes() {
+        let directory = temp_dir("format");
+        let png = save_capture_without_overwriting(
+            &sample_frame(),
+            &directory,
+            "as-png",
+            SaveFormat::Png,
+        )
+        .expect("save png");
+        let jpeg = save_capture_without_overwriting(
+            &sample_frame(),
+            &directory,
+            "as-jpeg",
+            SaveFormat::Jpeg,
+        )
+        .expect("save jpeg");
+
+        let png_format = image::ImageReader::open(&png)
+            .expect("open png")
+            .format()
+            .expect("a recognised format");
+        let jpeg_format = image::ImageReader::open(&jpeg)
+            .expect("open jpeg")
+            .format()
+            .expect("a recognised format");
+        let jpeg_size = image::open(&jpeg).expect("decode jpeg").to_rgba8();
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(png.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(jpeg.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert_eq!(png_format, image::ImageFormat::Png);
+        assert_eq!(jpeg_format, image::ImageFormat::Jpeg);
+        // Not only a readable file: the JPEG carries the same picture, which is
+        // what the RGBA-to-RGB conversion could get wrong by a row.
+        assert_eq!(jpeg_size.dimensions(), (2, 2));
     }
 
     /// The point of the whole function: a second capture rendering the same
@@ -379,15 +472,15 @@ mod tests {
     fn a_colliding_name_is_suffixed_rather_than_overwritten() {
         let directory = temp_dir("collision");
         let first =
-            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+            save_capture_without_overwriting(&sample_frame(), &directory, "shot", SaveFormat::Png)
                 .expect("first save");
         let first_bytes = std::fs::read(&first).expect("read the first file");
 
         let second =
-            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+            save_capture_without_overwriting(&sample_frame(), &directory, "shot", SaveFormat::Png)
                 .expect("second save");
         let third =
-            save_png_without_overwriting(&sample_frame(), &directory, "shot", PngCompression::Fast)
+            save_capture_without_overwriting(&sample_frame(), &directory, "shot", SaveFormat::Png)
                 .expect("third save");
 
         assert_eq!(

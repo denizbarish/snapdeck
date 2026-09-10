@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings",
+  "description": "The settings window asks for focus as soon as its page is running, and that is the whole of what it needs from the ACL, for the reason the editor's capability gives at length: Snapdeck is a menu bar agent that is never the active application, so a window built at the front of its own stack still opens behind whatever the user was looking at, and AppKit ignores a focus request made before the window has been composited. Nothing else is granted. In particular the dialog plugin is not: the folder picker is opened by `commands::choose_save_directory` on the Rust side, so this window cannot put a file picker on screen by itself, and the folder it is handed back has already been proved writable. Reading and writing the settings, and recording a shortcut, all go through this application's own commands, which are not gated by the ACL.",
+  "windows": ["settings"],
+  "permissions": ["core:window:allow-set-focus"]
+}

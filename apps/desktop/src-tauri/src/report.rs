@@ -83,7 +83,13 @@ pub fn log_file_path(app: &AppHandle) -> Option<PathBuf> {
 /// Local wall clock, from the same clock the filenames use, because a user
 /// reading their own log to say when something failed is thinking in the time
 /// their screen was showing.
-fn append_to_log(app: &AppHandle, message: &str) {
+///
+/// Reachable on its own, without the tray marker `report_failure` also raises,
+/// for the one caller that has to say something on a path the user did not ask
+/// about: `settings::load` runs before every capture as well as at launch, and
+/// a settings file it cannot parse would otherwise put an exclamation mark in
+/// the menu bar in front of a capture that succeeded.
+pub(crate) fn append_to_log(app: &AppHandle, message: &str) {
     let Some(path) = log_file_path(app) else {
         return;
     };

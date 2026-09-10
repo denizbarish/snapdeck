@@ -8,10 +8,11 @@ use tauri::{
     AppHandle, Manager, Wry,
 };
 
-// No settings item. There is no settings window to open: the application
-// declares no windows and builds none at runtime, so the item could only ever
-// look up a "main" window that does not exist and do nothing. The settings
-// surface arrives with Plan 4, and the menu item arrives with it.
+// `Settings…` is back. It was taken out because there was no settings window
+// for it to open, and a menu item that does nothing is worse than no menu item:
+// the application declared no windows and built none at runtime, so the item
+// could only ever look up a "main" window that did not exist. It now opens
+// `settings_window`, which is a window this application really builds.
 
 /// The menu bar artwork, as a macOS template image: black pixels carrying the
 /// drawing in their alpha channel and nothing in their colour, which is what
@@ -145,13 +146,16 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .enabled(false)
         .build(app)?;
     let open_log = MenuItemBuilder::with_id("open_log", "Open Log").build(app)?;
+    // The ellipsis is the platform's own promise that the item opens something
+    // rather than doing something, which is what Apple's own menus mean by it.
+    let settings = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Snapdeck").build(app)?;
     let menu = MenuBuilder::new(app)
         .items(&[&region, &window, &display])
         .separator()
         .items(&[&last_failure, &open_log])
         .separator()
-        .items(&[&quit])
+        .items(&[&settings, &quit])
         .build()?;
 
     let tray = TrayIconBuilder::with_id("main")
@@ -164,6 +168,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "capture_window" => request_capture(app, "window"),
             "capture_display" => request_capture(app, "display"),
             "open_log" => reveal_log(app),
+            "settings" => crate::settings_window::open_settings(app),
             "quit" => app.exit(0),
             _ => {}
         })

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck Settings</title>
+    <style>
+      html, body, #settings-root { margin: 0; min-height: 100%; }
+      /*
+        The window's own background, written here as well as in the component.
+        This window is built visible, so the first frame is painted before React
+        has mounted; without this the user sees a white rectangle flash where a
+        grey settings sheet is about to be.
+      */
+      body { background: #f5f5f7; }
+    </style>
+  </head>
+  <body>
+    <div id="settings-root"></div>
+    <script type="module" src="/src/settings/main.tsx"></script>
+  </body>
+</html>
