@@ -73,6 +73,15 @@ semver = "1"
 # a thread per session is simpler than an async task, and no `tokio` comes with
 # it. Default features carry no TLS, and the crate's MSRV is the workspace's.
 tungstenite = "0.30"
+# The bridge proves itself to the extension with
+# `HMAC-SHA256(key = the token string, message = the nonce string)`, which is
+# what stops a program that took the port first from collecting the user's
+# pages. `sha2` was already in `Cargo.lock` by way of `tauri-codegen` and
+# `wry`, so it promotes a version the tree already resolves to; `hmac` is the
+# one addition, and it is RFC 2104 as the crate implements it rather than as
+# this file would.
+hmac = "0.12"
+sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The overlay window has to be lifted above the menu bar and allowed over a

@@ -28,12 +28,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tungstenite::http::{header::ORIGIN, StatusCode};
+use tungstenite::http::{
+    header::{HOST, ORIGIN},
+    StatusCode,
+};
 use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::frame::CloseFrame;
 use tungstenite::protocol::{Message, WebSocket, WebSocketConfig};
 
-use crate::bridge::protocol::MAX_MESSAGE_BYTES;
+use crate::bridge::protocol::{MAX_HANDSHAKE_MESSAGE_BYTES, MAX_MESSAGE_BYTES};
 use crate::bridge::session::{origin_is_allowed, run_session, BridgePolicy, Frames};
 
 /// How many sessions may be open at once.
@@ -59,9 +62,36 @@ const HANDSHAKE_TOO_SLOW: &str = "the opening took longer than the bridge waits 
 /// What a handshake with the wrong `Origin` is told, as the body of the 403.
 const REFUSED_ORIGIN: &str = "the bridge only answers a Snapdeck browser extension";
 
+/// What a handshake aimed at some other name for this machine is told.
+const REFUSED_HOST: &str = "the bridge only answers a request addressed to loopback";
+
+/// What a handshake that says who it is more than once is told.
+const REFUSED_HEADERS: &str = "the bridge reads one `Origin` and one `Host`, and this is not that";
+
+/// The names loopback answers to, and the whole of what a `Host` may say.
+///
+/// The address itself and the name that resolves to it. Anything else is a
+/// request that reached this socket while addressed somewhere else, which is
+/// what a rebinding attack looks like from in here.
+const LOOPBACK_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
+
+/// How many control frames a caller may send before it has proved anything.
+///
+/// A Ping is answered by tungstenite and never reaches the session, so before
+/// this cap existed a peer could hold one of the four slots by sending nothing
+/// else at all: the frames are well formed, so the handshake deadline is the
+/// only thing that ends them, and it ends them one slot at a time. A browser's
+/// `WebSocket` sends no control frames of its own before `hello`, so a real
+/// extension never comes near this. The cap comes off with the token.
+const MAX_CONTROL_FRAMES_BEFORE_AUTH: usize = 8;
+
 #[derive(Debug, Clone, Copy)]
 pub struct BridgeLimits {
     pub max_message_bytes: usize,
+    /// What a message may weigh while the caller is still nobody.
+    pub handshake_message_bytes: usize,
+    /// How many Pings and Pongs a caller may send before the token is in.
+    pub max_control_frames_before_auth: usize,
     pub max_sessions: usize,
     pub handshake_timeout: Duration,
 }
@@ -71,6 +101,8 @@ impl Default for BridgeLimits {
     fn default() -> Self {
         Self {
             max_message_bytes: MAX_MESSAGE_BYTES,
+            handshake_message_bytes: MAX_HANDSHAKE_MESSAGE_BYTES,
+            max_control_frames_before_auth: MAX_CONTROL_FRAMES_BEFORE_AUTH,
             max_sessions: MAX_SESSIONS,
             handshake_timeout: HANDSHAKE_TIMEOUT,
         }
@@ -168,7 +200,10 @@ impl BridgeServer {
         let accepting = {
             let stopping = Arc::clone(&stopping);
             let sessions = Arc::clone(&sessions);
-            std::thread::spawn(move || accept_loop(listener, policy, limits, &stopping, &sessions))
+            let port = local_addr.port();
+            std::thread::spawn(move || {
+                accept_loop(listener, policy, limits, port, &stopping, &sessions);
+            })
         };
 
         Ok(Self {
@@ -203,6 +238,7 @@ fn accept_loop(
     listener: TcpListener,
     policy: Arc<dyn BridgePolicy>,
     limits: BridgeLimits,
+    port: u16,
     stopping: &AtomicBool,
     sessions: &Arc<Sessions>,
 ) {
@@ -229,33 +265,51 @@ fn accept_loop(
         std::thread::spawn(move || {
             // Held for the length of the session, and given back by dropping.
             let _slot = slot;
-            serve(stream, policy.as_ref(), limits);
+            serve(stream, policy.as_ref(), limits, port);
         });
     }
 }
 
 /// Runs the handshake gate and then one session over the accepted socket.
-fn serve(stream: TcpStream, policy: &dyn BridgePolicy, limits: BridgeLimits) {
+fn serve(stream: TcpStream, policy: &dyn BridgePolicy, limits: BridgeLimits, port: u16) {
     // One deadline for the whole opening, taken before anything is read. See
     // `DeadlineStream` for why this is not a timeout on each read.
     let stream = DeadlineStream::until(stream, Instant::now() + limits.handshake_timeout);
 
+    // The opening budget, not the session's. Until the token is checked the
+    // caller is nobody, and nobody may make this side hold 64 MiB of their
+    // choosing; every field of a `hello` is short by schema, so a few KiB is
+    // room to spare. `SocketFrames::authenticated` lifts it once the token is
+    // in. Never above the session's own limit, because the opening is part of
+    // the session and a budget larger than the whole is not a budget.
+    let opening = limits.handshake_message_bytes.min(limits.max_message_bytes);
+
     // Both limits, because a message arrives as frames: capping the message
     // alone would still let a single oversized frame be read into memory first.
     let config = WebSocketConfig::default()
-        .max_message_size(Some(limits.max_message_bytes))
-        .max_frame_size(Some(limits.max_message_bytes));
+        .max_message_size(Some(opening))
+        .max_frame_size(Some(opening));
 
-    let Ok(socket) = tungstenite::accept_hdr_with_config(stream, origin_gate, Some(config)) else {
-        // Either the `Origin` gate refused, in which case the 403 has already
-        // been written, or the peer went away mid-handshake. Neither is
-        // something this side can do anything further about.
+    // A closure rather than a bare function, because the gate has to know which
+    // port this listener actually took before it can judge a `Host`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the closure's `Err` is `handshake_gate`'s, and that signature is tungstenite's \
+                  `Callback`. See the same expectation on the function itself."
+    )]
+    let gate = |request: &Request, response: Response| handshake_gate(port, request, response);
+    let Ok(socket) = tungstenite::accept_hdr_with_config(stream, gate, Some(config)) else {
+        // Either a gate refused, in which case the 403 has already been
+        // written, or the peer went away mid-handshake. Neither is something
+        // this side can do anything further about.
         return;
     };
 
     let mut frames = SocketFrames {
         socket,
         past_first_frame: false,
+        control_frames_left: Some(limits.max_control_frames_before_auth),
+        max_message_bytes: limits.max_message_bytes,
     };
     run_session(&mut frames, policy);
 }
@@ -325,6 +379,27 @@ impl std::io::Write for DeadlineStream {
     }
 }
 
+/// Whether a handshake's `Host` was addressed to this listener.
+///
+/// `Origin` is what keeps a web page off the socket; this is the second lock on
+/// the same door. A page served from a name that resolves to `127.0.0.1` is
+/// same-origin with nothing here, but the request it sends carries that name in
+/// `Host`, and a bridge that never looked would answer it. Today `Origin` alone
+/// would refuse such a page. Two gates rather than one, because rebinding is
+/// the attack that gets past exactly one of them.
+///
+/// The port is the one this listener actually took rather than the protocol's,
+/// so a request aimed at some other Snapdeck-shaped port is refused too, and so
+/// the tests can prove the rule on the ephemeral port they run on.
+fn host_is_allowed(host: Option<&str>, port: u16) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    LOOPBACK_HOSTS
+        .iter()
+        .any(|name| host == format!("{name}:{port}"))
+}
+
 /// The first gate: who is allowed to open a WebSocket at all.
 ///
 /// Refusing here rather than after the upgrade is the point. A page that is
@@ -336,24 +411,50 @@ impl std::io::Write for DeadlineStream {
               `http::Response`. Boxing it, which is what the lint suggests, would no longer \
               satisfy the trait, and the value is built once per refused handshake."
 )]
-fn origin_gate(request: &Request, response: Response) -> Result<Response, ErrorResponse> {
-    let origin = request
-        .headers()
-        .get(ORIGIN)
-        .and_then(|value| value.to_str().ok());
-    if origin_is_allowed(origin) {
-        return Ok(response);
+fn handshake_gate(
+    port: u16,
+    request: &Request,
+    response: Response,
+) -> Result<Response, ErrorResponse> {
+    let headers = request.headers();
+
+    // Exactly one of each, before either is read. `HeaderMap::get` answers the
+    // first of a repeated header, so a request carrying two `Origin`s would be
+    // judged on one of them and could be read elsewhere as the other. A browser
+    // sends one; nothing that sends two is asking a question worth answering.
+    if headers.get_all(ORIGIN).iter().count() != 1 || headers.get_all(HOST).iter().count() != 1 {
+        return Err(refusal(REFUSED_HEADERS));
     }
 
-    let mut refusal = ErrorResponse::new(Some(REFUSED_ORIGIN.to_owned()));
+    let origin = headers.get(ORIGIN).and_then(|value| value.to_str().ok());
+    if !origin_is_allowed(origin) {
+        return Err(refusal(REFUSED_ORIGIN));
+    }
+
+    let host = headers.get(HOST).and_then(|value| value.to_str().ok());
+    if !host_is_allowed(host, port) {
+        return Err(refusal(REFUSED_HOST));
+    }
+
+    Ok(response)
+}
+
+/// The 403 a refused handshake is answered with, and the sentence saying why.
+fn refusal(reason: &str) -> ErrorResponse {
+    let mut refusal = ErrorResponse::new(Some(reason.to_owned()));
     *refusal.status_mut() = StatusCode::FORBIDDEN;
-    Err(refusal)
+    refusal
 }
 
 /// The session state machine's view of a real socket.
 struct SocketFrames {
     socket: WebSocket<DeadlineStream>,
     past_first_frame: bool,
+    /// How many control frames are left before the token is in, and `None`
+    /// once it is: a paired extension may ping for as long as it likes.
+    control_frames_left: Option<usize>,
+    /// What a message may weigh once the caller has proved who it is.
+    max_message_bytes: usize,
 }
 
 impl Frames for SocketFrames {
@@ -372,7 +473,21 @@ impl Frames for SocketFrames {
                     return Ok(text.to_string());
                 }
                 // Answered by tungstenite itself; neither is a bridge frame.
-                Message::Ping(_) | Message::Pong(_) => continue,
+                // Counted all the same until the token is in, because a peer
+                // that sends nothing but these is never silent, never finished,
+                // and holding a slot the whole time.
+                Message::Ping(_) | Message::Pong(_) => {
+                    if let Some(left) = self.control_frames_left.as_mut() {
+                        if *left == 0 {
+                            return Err(
+                                "the opening carried more control frames than the bridge answers before a token"
+                                    .to_owned(),
+                            );
+                        }
+                        *left -= 1;
+                    }
+                    continue;
+                }
                 Message::Binary(_) => {
                     return Err("the bridge carries text frames, and this one is binary".to_owned())
                 }
@@ -398,6 +513,23 @@ impl Frames for SocketFrames {
         let _ = self.socket.close(Some(frame));
         let _ = self.socket.flush();
     }
+
+    /// Lifts what the socket was holding an unproven caller to.
+    ///
+    /// Both limits are read per frame rather than captured when the socket was
+    /// built, so raising them here applies to everything read after this point
+    /// and to nothing read before it. The write buffer settings are left
+    /// exactly as they were, which is what keeps `set_config`'s own assertion
+    /// satisfied.
+    fn authenticated(&mut self) {
+        self.control_frames_left = None;
+
+        let full = self.max_message_bytes;
+        self.socket.set_config(move |config| {
+            config.max_message_size = Some(full);
+            config.max_frame_size = Some(full);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +542,7 @@ mod tests {
     use tungstenite::http::HeaderValue;
 
     use crate::bridge::protocol::{AppInfo, FullPage, PROTOCOL_VERSION};
+    use crate::bridge::session::proof_for;
 
     /// The pairing token these tests hand around. Any 64 hex characters.
     const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -472,9 +605,12 @@ mod tests {
         }
     }
 
+    /// Sixteen bytes of hex, which is what a `hello` has to carry.
+    const TEST_NONCE: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
     fn hello_frame(token: &str) -> String {
         format!(
-            r#"{{"type":"hello","protocolVersion":{PROTOCOL_VERSION},"token":"{token}","client":{{"name":"snapdeck-extension","version":"0.1.0"}}}}"#
+            r#"{{"type":"hello","protocolVersion":{PROTOCOL_VERSION},"token":"{token}","nonce":"{TEST_NONCE}","client":{{"name":"snapdeck-extension","version":"0.1.0"}}}}"#
         )
     }
 
@@ -492,6 +628,18 @@ mod tests {
         addr: SocketAddr,
         origin: Option<&str>,
     ) -> Result<WebSocket<TcpStream>, tungstenite::Error> {
+        connect_with(addr, origin, None, &[])
+    }
+
+    /// The same, with `host` replacing the one the uri implies and `extra`
+    /// appended rather than replacing: appending is how a test says a header
+    /// twice, which is the case `HeaderMap::get` would quietly pick one of.
+    fn connect_with(
+        addr: SocketAddr,
+        origin: Option<&str>,
+        host: Option<&str>,
+        extra: &[(tungstenite::http::HeaderName, String)],
+    ) -> Result<WebSocket<TcpStream>, tungstenite::Error> {
         let mut request = format!("ws://{addr}/")
             .into_client_request()
             .expect("a loopback address makes a websocket uri");
@@ -499,6 +647,18 @@ mod tests {
             request.headers_mut().insert(
                 ORIGIN,
                 HeaderValue::from_str(origin).expect("a test origin is a header value"),
+            );
+        }
+        if let Some(host) = host {
+            request.headers_mut().insert(
+                HOST,
+                HeaderValue::from_str(host).expect("a test host is a header value"),
+            );
+        }
+        for (name, value) in extra {
+            request.headers_mut().append(
+                name.clone(),
+                HeaderValue::from_str(value).expect("a test header is a header value"),
             );
         }
 
@@ -527,6 +687,11 @@ mod tests {
             frame_type(&ready),
             "ready",
             "a paired session is answered with ready: {ready}"
+        );
+        assert_eq!(
+            parse_frame(&ready)["proof"],
+            proof_for(TEST_TOKEN, TEST_NONCE),
+            "and the answer proves it holds the token: {ready}"
         );
         client
     }
@@ -847,6 +1012,254 @@ mod tests {
         assert!(
             ended_after < DRIP_DEADLINE * DEADLINE_SLACK,
             "and it has to end at the deadline rather than whenever the peer stops: {ended_after:?}"
+        );
+    }
+
+    /// S22. Security, LOW-1. `Origin` is what keeps a web page off this socket,
+    /// and it is not allowed to be the only lock on the door: a request that
+    /// reached loopback while addressed to some other name is what a rebinding
+    /// attack looks like from in here, and `Host` is where it says so.
+    ///
+    /// Pure, so the rule can be read whole rather than inferred from a handful
+    /// of live handshakes.
+    #[test]
+    fn only_a_host_naming_this_listener_is_allowed() {
+        assert!(host_is_allowed(Some("127.0.0.1:51837"), 51_837));
+        assert!(
+            host_is_allowed(Some("localhost:51837"), 51_837),
+            "the name loopback answers to, as a browser may write it"
+        );
+
+        for host in [
+            None,
+            Some(""),
+            Some("evil.example:51837"),
+            // A name an attacker points at 127.0.0.1. The connection arrives
+            // here; the header is what gives it away.
+            Some("snapdeck.attacker.example:51837"),
+            // The right name and somebody else's port.
+            Some("127.0.0.1:51838"),
+            // The right name and no port at all.
+            Some("127.0.0.1"),
+            Some("localhost"),
+        ] {
+            assert!(
+                !host_is_allowed(host, 51_837),
+                "the bridge is not addressed as {host:?}"
+            );
+        }
+    }
+
+    /// S23. Security, LOW-1, over a real socket. A handshake with the right
+    /// `Origin` and a `Host` naming somewhere else never gets a WebSocket.
+    #[test]
+    fn a_handshake_addressed_to_another_name_is_refused_with_403() {
+        let (server, _policy) = started(BridgeLimits::default());
+
+        let refused = connect_with(
+            server.local_addr(),
+            Some(REAL_EXTENSION_ORIGIN),
+            Some("snapdeck.attacker.example:51837"),
+            &[],
+        )
+        .expect_err("a request addressed elsewhere is refused");
+
+        assert_eq!(
+            refusal_status(&refused),
+            Some(403),
+            "the second lock holds even when the first one opens: {refused}"
+        );
+    }
+
+    /// S24. Security. A hardening note rather than a live hole: a browser sends
+    /// one `Origin`, and `HeaderMap::get` answers the first of a repeated
+    /// header. A request judged on the first and read anywhere else as the
+    /// second is a disagreement this side refuses rather than resolves.
+    #[test]
+    fn a_handshake_that_says_where_it_came_from_twice_is_refused() {
+        let (server, _policy) = started(BridgeLimits::default());
+
+        let refused = connect_with(
+            server.local_addr(),
+            Some(REAL_EXTENSION_ORIGIN),
+            None,
+            &[(ORIGIN, "https://evil.example".to_owned())],
+        )
+        .expect_err("two origins are not one origin");
+
+        assert_eq!(
+            refusal_status(&refused),
+            Some(403),
+            "a doubled `Origin` is refused whichever of the two would have passed: {refused}"
+        );
+
+        // And the other way round, so the rule is not "the first one wins".
+        let also_refused = connect_with(
+            server.local_addr(),
+            Some("https://evil.example"),
+            None,
+            &[(ORIGIN, REAL_EXTENSION_ORIGIN.to_owned())],
+        )
+        .expect_err("nor in the other order");
+        assert_eq!(refusal_status(&also_refused), Some(403));
+    }
+
+    /// S25. Security, MEDIUM-1. A peer that sends nothing but Pings is never
+    /// silent and never finished, and before this cap it could hold a session
+    /// slot until the handshake deadline for free, four at a time.
+    ///
+    /// tungstenite answers each Ping itself, so these frames never reach the
+    /// session: the count is the only thing that ends them.
+    #[test]
+    fn a_flood_of_control_frames_before_the_token_ends_the_session() {
+        let allowed = 3;
+        let limits = BridgeLimits {
+            max_control_frames_before_auth: allowed,
+            ..BridgeLimits::default()
+        };
+        let (server, policy) = started(limits);
+
+        let mut client = connect(server.local_addr(), Some(REAL_EXTENSION_ORIGIN))
+            .expect("the handshake passes");
+        for _ in 0..=allowed {
+            // The last of these may fail to write, because the bridge is
+            // hanging up underneath it. That is the outcome, not a problem.
+            let _ = client.send(Message::Ping(Vec::new().into()));
+        }
+        let _ = client.send(Message::text(hello_frame(TEST_TOKEN)));
+
+        let mut answered = Vec::new();
+        while let Ok(message) = client.read() {
+            if let Message::Text(text) = message {
+                answered.push(text.to_string());
+            }
+        }
+
+        assert!(
+            answered.is_empty(),
+            "a caller past the control frame budget is answered nothing at all: {answered:?}"
+        );
+        assert!(
+            policy.delivered().is_empty(),
+            "and delivers nothing: {:?}",
+            policy.delivered()
+        );
+    }
+
+    /// S26. The other half of S25: a real extension pings freely once it holds
+    /// a session, because the budget is about callers who have proved nothing.
+    #[test]
+    fn a_paired_session_may_send_more_control_frames_than_the_budget() {
+        let allowed = 2;
+        let limits = BridgeLimits {
+            max_control_frames_before_auth: allowed,
+            ..BridgeLimits::default()
+        };
+        let (server, policy) = started(limits);
+        let mut client = paired(server.local_addr());
+
+        for _ in 0..(allowed * 4) {
+            client
+                .send(Message::Ping(Vec::new().into()))
+                .expect("a paired session takes a ping");
+        }
+        client
+            .send(Message::text(full_page_frame("one", 8)))
+            .expect("and still takes a page");
+
+        assert_eq!(
+            frame_type(&read_text(&mut client)),
+            "accepted",
+            "the session is untouched by pings it was allowed to send"
+        );
+        assert_eq!(policy.delivered(), vec!["one".to_owned()]);
+    }
+
+    /// S27. Security, MEDIUM-2. Before the token, the socket holds a few KiB
+    /// and no more: a caller that has proved nothing must not be able to make
+    /// this side buffer 64 MiB of its choosing.
+    #[test]
+    fn an_oversized_frame_before_the_token_is_refused() {
+        let opening = 512;
+        let limits = BridgeLimits {
+            handshake_message_bytes: opening,
+            ..BridgeLimits::default()
+        };
+        let (server, policy) = started(limits);
+
+        let mut client = connect(server.local_addr(), Some(REAL_EXTENSION_ORIGIN))
+            .expect("the handshake passes");
+        // Well past the opening budget and far inside the session's own limit,
+        // so only the first of the two limits can refuse it.
+        let _ = client.send(Message::text("a".repeat(opening * 4)));
+
+        let answer = client.read();
+        assert!(
+            !matches!(&answer, Ok(Message::Text(_))),
+            "an unproven caller's oversized frame is never answered: {answer:?}"
+        );
+        assert!(
+            policy.delivered().is_empty(),
+            "and never delivered: {:?}",
+            policy.delivered()
+        );
+    }
+
+    /// S28. Security, MEDIUM-2, and the half that makes it a two-stage limit
+    /// rather than a smaller one: a page is far past the opening budget, and a
+    /// paired extension has to be able to send it.
+    #[test]
+    fn a_page_far_past_the_opening_budget_is_carried_once_the_token_is_in() {
+        let opening = 512;
+        let limits = BridgeLimits {
+            handshake_message_bytes: opening,
+            ..BridgeLimits::default()
+        };
+        let (server, policy) = started(limits);
+        let mut client = paired(server.local_addr());
+
+        let page = full_page_frame("one", opening * 8);
+        assert!(
+            page.len() > opening,
+            "the page has to be past the opening budget for this to prove anything: {} bytes",
+            page.len()
+        );
+        client
+            .send(Message::text(page))
+            .expect("the bridge takes it");
+
+        assert_eq!(
+            frame_type(&read_text(&mut client)),
+            "accepted",
+            "the limit comes off with the token, not before and not never"
+        );
+        assert_eq!(policy.delivered(), vec!["one".to_owned()]);
+    }
+
+    /// S29. The application's own numbers, including the two this change added.
+    /// Written out rather than read from the constants they pin, for the reason
+    /// S16 gives.
+    #[test]
+    fn the_application_holds_an_unproven_caller_to_a_few_kilobytes() {
+        assert_eq!(
+            BridgeLimits::default().handshake_message_bytes,
+            4096,
+            "4 KiB is the contract for a caller that has proved nothing"
+        );
+        assert_eq!(
+            BridgeLimits::default().handshake_message_bytes,
+            MAX_HANDSHAKE_MESSAGE_BYTES,
+            "and it is the protocol's number, not a second one that happens to agree"
+        );
+        assert!(
+            BridgeLimits::default().handshake_message_bytes
+                < BridgeLimits::default().max_message_bytes,
+            "the opening budget is the smaller of the two, or there is only one limit"
+        );
+        assert_eq!(
+            BridgeLimits::default().max_control_frames_before_auth,
+            8,
+            "and eight control frames is what an unproven caller gets"
         );
     }
 

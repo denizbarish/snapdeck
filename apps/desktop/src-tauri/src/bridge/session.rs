@@ -12,6 +12,9 @@
 //! is: it is the entire rule, and a live handshake is not something a unit test
 //! can arrange.
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
 use crate::bridge::protocol::{
     AppInfo, BridgeError, ClientMessage, ErrorCode, FullPage, ServerMessage,
     CLOSE_POLICY_VIOLATION, EXTENSION_ORIGIN_PREFIX, PROTOCOL_VERSION,
@@ -34,6 +37,57 @@ const FIRST_FRAME_MUST_BE_HELLO: &str = "the first frame of a session has to be 
 
 /// What the extension is told when it says `hello` twice.
 const ONE_HELLO_PER_SESSION: &str = "a session is opened by one `hello`, and this one is open";
+
+/// The digits a proof is rendered with, matching the token's own.
+const HEX_DIGITS: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+];
+
+/// What `proof_for` answers if HMAC ever refuses the token as a key.
+///
+/// Unreachable as HMAC is built: it takes a key of any length and hashes down
+/// the ones longer than its block, so `new_from_slice` answers `Err` for no
+/// input at all. It is a value rather than an `expect` for the reason
+/// `protocol::UNRENDERABLE_RESPONSE` is, and it is a proof of nothing rather
+/// than something obviously broken so that the impossible fails in the safe
+/// direction: it is well formed, it is the right answer for no token and no
+/// nonce anyone holds, and an extension that receives it takes this side for an
+/// impostor and sends no page. Which is correct, because a bridge that could
+/// not compute its proof has not proved itself.
+const PROOF_OF_NOTHING: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The bridge's half of the handshake: what only a server holding the pairing
+/// token can say about the nonce the extension just made up.
+///
+/// `HMAC-SHA256(key = the token, message = the nonce)`, lowercase hex.
+///
+/// Both arguments are used as the strings they are, over their UTF-8 bytes,
+/// rather than as the bytes their hex spells. The token is 64 hex characters
+/// and the nonce is 32, so either reading is available to both sides, and a
+/// protocol that leaves the choice open is one where the two implementations
+/// agree on every line of this document and still never pair. The string is the
+/// reading, in both languages, and there is nothing to decode before signing.
+///
+/// This is the answer to the one thing the design was missing: the token proved
+/// the extension to the bridge and nothing proved the bridge to the extension,
+/// so a program that took port 51837 first could collect a token it never
+/// checked, answer `ready` out of nothing, and be handed every page the user
+/// captured while they watched it succeed.
+pub fn proof_for(token: &str, nonce: &str) -> String {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(token.as_bytes()) else {
+        return PROOF_OF_NOTHING.to_owned();
+    };
+    mac.update(nonce.as_bytes());
+
+    let digest = mac.finalize().into_bytes();
+    let mut proof = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Both halves of a byte are 0..=15, which is the length of `HEX_DIGITS`.
+        proof.push(HEX_DIGITS[usize::from(byte >> 4)]);
+        proof.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+    }
+    proof
+}
 
 /// Whether a handshake's `Origin` may open a bridge session.
 ///
@@ -65,6 +119,10 @@ pub trait Frames {
     fn recv_text(&mut self) -> Result<String, String>;
     fn send_text(&mut self, text: &str) -> Result<(), String>;
     fn close(&mut self, code: u16, reason: &str);
+    /// Called once, after the token has been checked and before `ready` goes
+    /// out. What a transport does with it is its own business; a real socket
+    /// lifts the two limits it accepted an unauthenticated peer under.
+    fn authenticated(&mut self);
 }
 
 /// What a connection is allowed to do, and who decides.
@@ -98,13 +156,19 @@ pub fn run_session<F: Frames>(frames: &mut F, policy: &dyn BridgePolicy) -> Sess
     let Ok(first) = frames.recv_text() else {
         return SessionEnd::Closed;
     };
-    if let Err(error) = handshake(&first, policy) {
-        return refuse(frames, None, &error);
-    }
+    let proof = match handshake(&first, policy) {
+        Ok(proof) => proof,
+        Err(error) => return refuse(frames, None, &error),
+    };
+
+    // The token is in. Whatever the transport was holding an unproven peer to
+    // can come off now, and not one frame earlier.
+    frames.authenticated();
 
     let ready = ServerMessage::Ready {
         protocol_version: PROTOCOL_VERSION,
         app: policy.app_info(),
+        proof,
     };
     if frames.send_text(&ready.encode()).is_err() {
         return SessionEnd::Closed;
@@ -128,11 +192,9 @@ pub fn run_session<F: Frames>(frames: &mut F, policy: &dyn BridgePolicy) -> Sess
                 request_id: page.request_id,
                 saved_path,
             },
-            Err(reason) => ServerMessage::Error {
-                request_id: Some(page.request_id),
-                code: ErrorCode::SaveFailed,
-                message: reason,
-            },
+            Err(reason) => {
+                ServerMessage::error(Some(page.request_id), ErrorCode::SaveFailed, &reason)
+            }
         };
         if frames.send_text(&answer.encode()).is_err() {
             return SessionEnd::Closed;
@@ -148,7 +210,12 @@ pub fn run_session<F: Frames>(frames: &mut F, policy: &dyn BridgePolicy) -> Sess
 /// answer is that one of the two sides needs updating. Nothing is hidden by
 /// answering honestly here, either, since a successful handshake has already
 /// told the caller that a bridge is listening.
-fn handshake(raw: &str, policy: &dyn BridgePolicy) -> Result<(), BridgeError> {
+///
+/// The proof comes back rather than being built by the caller, because it is
+/// the last step of this sequence and nothing else may reach it: computing it
+/// needs the token, and a proof built anywhere but after the comparison below
+/// would be a proof handed to a caller that failed it.
+fn handshake(raw: &str, policy: &dyn BridgePolicy) -> Result<String, BridgeError> {
     let hello = match ClientMessage::parse(raw)? {
         ClientMessage::Hello(hello) => hello,
         ClientMessage::FullPage(_) => {
@@ -161,10 +228,11 @@ fn handshake(raw: &str, policy: &dyn BridgePolicy) -> Result<(), BridgeError> {
             presented: hello.protocol_version,
         });
     }
-    if !tokens_match(&policy.token(), &hello.token) {
+    let token = policy.token();
+    if !tokens_match(&token, &hello.token) {
         return Err(BridgeError::Unauthorized);
     }
-    Ok(())
+    Ok(proof_for(&token, &hello.nonce))
 }
 
 /// Tells the extension why, then closes.
@@ -179,11 +247,7 @@ fn refuse<F: Frames>(
 ) -> SessionEnd {
     let code = error.code();
     let reason = error.to_string();
-    let message = ServerMessage::Error {
-        request_id,
-        code,
-        message: reason.clone(),
-    };
+    let message = ServerMessage::error(request_id, code, &reason);
     // Both failures are ignored: this is the last thing said on a connection
     // that is already going away, and there is nowhere left to report it to.
     let _ = frames.send_text(&message.encode());
@@ -203,14 +267,17 @@ mod tests {
         incoming: VecDeque<String>,
         sent: Vec<String>,
         closed: Option<(u16, String)>,
+        /// How many frames had been sent when `authenticated` was called, so a
+        /// test can say not just that it happened but where in the order.
+        authenticated_after: Option<usize>,
+        authentications: usize,
     }
 
     impl FakeFrames {
         fn saying(frames: &[String]) -> Self {
             Self {
                 incoming: frames.iter().cloned().collect(),
-                sent: Vec::new(),
-                closed: None,
+                ..Self::default()
             }
         }
 
@@ -234,6 +301,11 @@ mod tests {
 
         fn close(&mut self, code: u16, reason: &str) {
             self.closed = Some((code, reason.to_owned()));
+        }
+
+        fn authenticated(&mut self) {
+            self.authenticated_after = Some(self.sent.len());
+            self.authentications += 1;
         }
     }
 
@@ -302,15 +374,22 @@ mod tests {
     /// onto. A gate narrowed to `a` alone would still pass the one above.
     const WIDE_EXTENSION_ORIGIN: &str = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 
+    /// Sixteen bytes of hex, which is what a `hello` has to carry.
+    const TEST_NONCE: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
     fn hello_frame(protocol_version: u32, token: &str) -> String {
+        hello_frame_with_nonce(protocol_version, token, TEST_NONCE)
+    }
+
+    fn hello_frame_with_nonce(protocol_version: u32, token: &str, nonce: &str) -> String {
         format!(
-            r#"{{"type":"hello","protocolVersion":{protocol_version},"token":"{token}","client":{{"name":"snapdeck-extension","version":"0.1.0"}}}}"#
+            r#"{{"type":"hello","protocolVersion":{protocol_version},"token":"{token}","nonce":"{nonce}","client":{{"name":"snapdeck-extension","version":"0.1.0"}}}}"#
         )
     }
 
     fn full_page_frame(request_id: &str) -> String {
         format!(
-            r#"{{"type":"fullPage","requestId":"{request_id}","page":{{"url":"https://example.com/","title":"Example"}},"image":{{"pngBase64":"","width":4,"height":3,"devicePixelRatio":2}},"truncated":false}}"#
+            r#"{{"type":"fullPage","requestId":"{request_id}","page":{{"url":"https://example.com/","title":"Example"}},"image":{{"pngBase64":"iVBORw0KGgo=","width":4,"height":3,"devicePixelRatio":2}},"truncated":false}}"#
         )
     }
 
@@ -574,6 +653,171 @@ mod tests {
             accepted["savedPath"].is_null(),
             "with nothing where the path would be: {accepted}"
         );
+    }
+
+    /// S22. Security, HIGH-1. The proof, against a vector computed outside this
+    /// program.
+    ///
+    /// `HMAC-SHA256(key = "0123…cdef", message = "0f1e…e1f0")` is what OpenSSL
+    /// answers for those two strings, and the value is written out here rather
+    /// than taken from this file's own arithmetic: an implementation that
+    /// agrees only with itself is what a second implementation of this protocol
+    /// cannot pair with.
+    ///
+    /// The third assertion is the one the two languages would otherwise argue
+    /// about forever. Both the token and the nonce are hex, so a key could mean
+    /// the string or the bytes it spells, and the two produce different proofs.
+    /// The string is the reading, and the value that would come of the other one
+    /// is here so that a future change to it fails rather than drifts.
+    #[test]
+    fn the_proof_is_hmac_sha256_of_the_nonce_under_the_token_string() {
+        assert_eq!(
+            proof_for(TEST_TOKEN, TEST_NONCE),
+            "bd0b0ea0ed26cb9208586f1c5b039df3c2c157d46ade2476e82a127a6ea8636b",
+            "the proof is the one an outside implementation computes for these two strings"
+        );
+
+        let other_token = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        assert_eq!(
+            proof_for(other_token, TEST_NONCE),
+            "f74e7964c7f57a58bfd8da3d39f20107532ed4b2b28cc90b47e9d689dba166dd",
+            "and a different token answers a different proof for the same nonce"
+        );
+
+        assert_ne!(
+            proof_for(TEST_TOKEN, TEST_NONCE),
+            "0b7524f58c62339f46c8886db927c2edb6a39b64704ed9924857771e7ca30139",
+            "the key is the token as a string, not the 32 bytes its hex spells"
+        );
+    }
+
+    /// S23. Security, HIGH-1. The proof is over the nonce the extension chose,
+    /// so a server that answers the same thing to every session is answering
+    /// something it recorded rather than something it computed.
+    #[test]
+    fn a_different_nonce_gets_a_different_proof() {
+        let first = proof_for(TEST_TOKEN, TEST_NONCE);
+        let second = proof_for(TEST_TOKEN, "ffffffffffffffffffffffffffffffff");
+
+        assert_ne!(
+            first, second,
+            "a proof that ignores the nonce is a proof that can be replayed"
+        );
+        // 64 characters is the contract: the 32 bytes of a SHA-256 digest.
+        assert_eq!(first.len(), 64, "and it is 64 hex characters: {first}");
+        assert!(
+            first
+                .chars()
+                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character)),
+            "lowercase hex, as the token is: {first}"
+        );
+    }
+
+    /// S24. Security, HIGH-1. The whole of the scenario this exists for, from
+    /// the session's side: the answer a paired extension gets carries the proof
+    /// for the nonce it sent, and a program that does not hold the token cannot
+    /// have written it.
+    #[test]
+    fn a_paired_session_is_answered_with_the_proof_for_its_own_nonce() {
+        let nonce = "abcdefabcdefabcdefabcdefabcdefab";
+        let policy = FakePolicy::holding(TEST_TOKEN);
+        let mut frames =
+            FakeFrames::saying(&[hello_frame_with_nonce(PROTOCOL_VERSION, TEST_TOKEN, nonce)]);
+
+        run_session(&mut frames, &policy);
+
+        let ready = parse_frame(frames.sent.first().expect("a paired session is answered"));
+        assert_eq!(ready["type"], "ready");
+        assert_eq!(
+            ready["proof"],
+            proof_for(TEST_TOKEN, nonce),
+            "the proof is over the nonce this session presented: {ready}"
+        );
+        assert_ne!(
+            ready["proof"],
+            proof_for(TEST_TOKEN, TEST_NONCE),
+            "and not over some other one this file happens to know"
+        );
+    }
+
+    /// S25. Security, HIGH-1. A session that failed the token is told nothing
+    /// it could learn the proof from, because the proof is only ever computed
+    /// after the comparison the session failed.
+    #[test]
+    fn a_refused_session_is_never_given_a_proof() {
+        let policy = FakePolicy::holding(TEST_TOKEN);
+        let mut frames = FakeFrames::saying(&[hello_frame(PROTOCOL_VERSION, "not the token")]);
+
+        run_session(&mut frames, &policy);
+
+        let correct = proof_for(TEST_TOKEN, TEST_NONCE);
+        for frame in &frames.sent {
+            assert!(
+                !frame.contains(&correct),
+                "nothing said to a refused caller may carry the proof: {frame}"
+            );
+        }
+        assert_eq!(
+            frames.authentications, 0,
+            "and the transport is never told the caller is authenticated"
+        );
+    }
+
+    /// S26. Security, MEDIUM-1 and MEDIUM-2. The transport is told exactly once
+    /// that the caller is proven, and it is told after the token was checked and
+    /// before `ready` goes out. Everything a socket relaxes for a paired peer
+    /// hangs off that call, so its place in the order is the claim.
+    #[test]
+    fn the_transport_is_told_once_and_only_after_the_token() {
+        let policy = FakePolicy::answering(TEST_TOKEN, vec![Ok(None)]);
+        let mut frames = FakeFrames::saying(&[
+            hello_frame(PROTOCOL_VERSION, TEST_TOKEN),
+            full_page_frame("one"),
+        ]);
+
+        run_session(&mut frames, &policy);
+
+        assert_eq!(
+            frames.authenticated_after,
+            Some(0),
+            "the transport is told before the first frame is sent, which is `ready`"
+        );
+        assert_eq!(
+            frames.authentications, 1,
+            "and once, however many pages the session goes on to carry"
+        );
+    }
+
+    /// S27. Security, HIGH-1. A `hello` whose nonce is not a nonce ends the
+    /// session rather than being signed. Anything this side puts its token to
+    /// has to be 16 bytes the extension chose, not a message a caller composed.
+    #[test]
+    fn a_hello_whose_nonce_is_out_of_schema_never_reaches_ready() {
+        for nonce in [
+            // 32 hex characters is the contract.
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f00",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1fg",
+            "",
+        ] {
+            let policy = FakePolicy::holding(TEST_TOKEN);
+            let mut frames =
+                FakeFrames::saying(&[hello_frame_with_nonce(PROTOCOL_VERSION, TEST_TOKEN, nonce)]);
+
+            let end = run_session(&mut frames, &policy);
+
+            assert_eq!(
+                end,
+                SessionEnd::Refused(ErrorCode::MalformedMessage),
+                "a nonce of {} characters is not a handshake",
+                nonce.len()
+            );
+            assert!(
+                !frames.sent_types().contains(&"ready".to_owned()),
+                "and nothing is signed for it: {:?}",
+                frames.sent_types()
+            );
+        }
     }
 
     /// S11. One handshake per session. A second `hello` on an open session is
