@@ -60,6 +60,25 @@ export function createDocument(width: number, height: number): EditorDocument {
 }
 
 /**
+ * Whether this document would render as anything other than the capture it was
+ * opened on.
+ *
+ * A layer or a crop, and nothing subtler than that. It is deliberately not
+ * "does this hide anything": a host uses it to decide whether the picture the
+ * user has in hand has moved on from the one their environment already holds,
+ * and by the time a single arrow has been drawn the answer is yes. Asking only
+ * about `obscure` would leave the far more common staleness in place and would
+ * also miss a crop, which hides by removal rather than by covering.
+ *
+ * A crop that happens to be the whole image still counts. Reconstructing intent
+ * from geometry buys nothing here, and the honest answer to "has this been
+ * edited" for a document somebody cropped is yes.
+ */
+export function isEdited(doc: EditorDocument): boolean {
+  return doc.crop !== null || doc.layers.length > 0
+}
+
+/**
  * The number the next step badge should carry.
  *
  * The largest index in use plus one, not the number of badges plus one. Delete

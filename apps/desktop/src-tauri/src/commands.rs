@@ -487,7 +487,15 @@ fn dismiss_overlays_and_wait(app: &AppHandle) -> Result<(), String> {
 /// the boundary: nothing that arrives here is trusted to be one of those asks.
 /// Confining the writes to image files keeps a compromised page from dropping a
 /// shell script or a `.command` into a directory the user opens in the Finder.
-const EDITABLE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+///
+/// No `webp`. WKWebView answers `convertToBlob('image/webp')` with PNG bytes
+/// rather than refusing, so the editor dropped the format entirely and `toBlob`
+/// now rejects a blob whose type is not the one it asked for. An entry here
+/// would re-admit exactly the file that removal exists to prevent: PNG bytes
+/// under a `.webp` name, in the user's pictures folder, written by this
+/// command. An allowlist wider than the feature it guards is not a spare
+/// allowance, it is the hole.
+const EDITABLE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
 
 /// Writes an edited capture back to the pictures directory, and returns the
 /// path it used.
@@ -749,7 +757,7 @@ pub async fn copy_edited(app: AppHandle, bytes: Vec<u8>) -> Result<(), String> {
 ///
 /// The allocation ceiling that comes with `Limits::default()`, 512 MiB, is left
 /// as it is: it is what stops a picture inside these dimensions from being
-/// expensive, and 16384 squared in RGBA would be four times it.
+/// expensive, and 16384 squared in RGBA is 1 GiB, twice it.
 const MAX_EDITED_DIMENSION: u32 = 16_384;
 
 /// Blocking worker only; see `copy_edited`.
@@ -948,6 +956,11 @@ mod tests {
             linked.join("outside.png").to_string_lossy().into_owned(),
             // Not an image the editor can produce, inside the directory.
             dir.join("payload.command").to_string_lossy().into_owned(),
+            // WebP, which the editor stopped producing when it turned out
+            // WKWebView encodes PNG under that name. The allowlist has to be
+            // exactly the formats the editor can make, or this is a way back to
+            // a `.webp` file holding PNG bytes.
+            dir.join("payload.webp").to_string_lossy().into_owned(),
             // Relative, which no editor URL ever carries.
             "outside.png".to_string(),
         ];

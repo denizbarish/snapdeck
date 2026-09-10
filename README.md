@@ -13,6 +13,11 @@ cropping. Sharing is planned and is not part of this release.
 - Node.js 24
 - pnpm 11
 
+`pnpm install` runs a `prepare` script that downloads a Chromium build for Playwright, roughly 150 MB
+on a first install and cached after that. The editor's renderer, export and component tests measure
+real pixels from a real browser engine, so that download is what makes `pnpm test` work from a clean
+clone. It needs network access the first time.
+
 ## Getting started
 
 ```bash
@@ -110,9 +115,22 @@ JPEG. It is encoded at quality 0.92, which is high for this format on purpose, b
 screenshot is mostly text and flat colour and those are what JPEG handles worst. Text will still
 be very slightly softer than the PNG. If that matters, keep PNG.
 
-`Copy` puts the edited picture on the clipboard. It is unaffected by the format buttons: a
-clipboard image is handed to the next application as pixels rather than as a file, so it is always
-the lossless one. `Close` closes the window and keeps the file on disk.
+**Saving also replaces what is on the clipboard**, whenever you have drawn or cropped anything. The
+capture went onto the clipboard before the editor opened, so after an edit the copy sitting there is
+the picture you have just moved on from; saving puts the edited one there instead. What goes on the
+clipboard is always the lossless picture, whichever format the file was written in, for the same
+reason `Copy` is. Saving a document you have not touched leaves the clipboard alone, and so does
+`Close`.
+
+Saving as PNG replaces the capture by renaming a new file over it, which replaces the file itself
+rather than its contents. Finder tags, other extended attributes and the original creation date
+belong to the file that is replaced and do not survive the save; the name, the location and the
+pixels do.
+
+`Copy` puts the edited picture on the clipboard on its own, without writing anything. It is
+unaffected by the format buttons: a clipboard image is handed to the next application as pixels
+rather than as a file, so it is always the lossless one. `Close` closes the window and keeps the
+file on disk.
 
 ### Keyboard
 
@@ -167,6 +185,20 @@ that leaves nothing to recover. The other two are one click away on the toolbar.
 
 The redaction is applied to the picture before it is encoded, not drawn on top of it, so the
 hidden pixels are not in the saved file at all and no undo of the file can bring them back.
+
+Two things about the rest of the operation, because a redaction that is only true of the file is
+not much of a redaction.
+
+**The clipboard.** Snapdeck copies every capture the moment it takes it, before the editor opens, so
+until you save, the unredacted original is the picture on the clipboard. Saving replaces it with the
+edited one, which is why `Cmd+S` and then paste is safe. `Copy` does the same without writing a
+file. Closing the editor without doing either leaves the original capture on the clipboard, because
+that is where the capture put it.
+
+**Saving as JPEG.** A JPEG cannot overwrite a PNG, so that save writes a second file and leaves the
+capture where it is: the unredacted PNG stays in `~/Pictures` beside the redacted JPEG, under the
+same name. If the point of the redaction was that the original should not exist, save as PNG, which
+replaces the capture, or delete the PNG yourself.
 
 > **Unsigned builds:** Snapdeck releases are not notarized. Without an Apple Developer ID, macOS Gatekeeper will block the app on first launch. Right-click the app and choose Open, then confirm. Building from source avoids this.
 

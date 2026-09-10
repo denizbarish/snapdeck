@@ -35,6 +35,7 @@ import { handleAtPoint, layerAtPoint, moveLayer, resizeLayer, type Handle } from
 import {
   boundsOf,
   createDocument,
+  isEdited,
   nextStepIndex,
   type EditorDocument,
   type Layer,
@@ -141,6 +142,25 @@ const HIT_TOLERANCE = 4
 
 /** Gap between a layer's ink and its selection outline, in CSS pixels. */
 const CHROME_PADDING = 3
+
+/**
+ * How the modifier the shortcuts answer to is written in the status bar.
+ *
+ * The key handler takes `metaKey || ctrlKey`, so the shortcuts already work on
+ * both platforms; this is the label catching up with them. A hard-coded `⌘` in
+ * the one package built to be host-neutral tells a Windows or Linux user to
+ * press a key their keyboard does not have, and the browser extension this
+ * component exists to be reused by is where that user turns up.
+ *
+ * Read once, at module scope: the platform does not change while the editor is
+ * open, and `navigator` is absent in a non-DOM environment, which the component
+ * itself is never in but a bundler's server pass can be. `⌘` when the answer is
+ * unavailable, because that is the platform this ships on today.
+ */
+const MODIFIER_LABEL: string =
+  typeof navigator === 'undefined' || /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent)
+    ? '⌘'
+    : 'Ctrl+'
 
 /** Stroke widths the slider offers, in source-image pixels. */
 const MIN_STROKE = 1
@@ -765,6 +785,57 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
   }
 
   /**
+   * Writes the picture out, and then puts the same picture where the host's
+   * clipboard already holds an older one.
+   *
+   * This is a redaction fix before it is a convenience. A host that copies the
+   * capture when it takes it, which is what Snapdeck does, has the untouched
+   * original on the clipboard the whole time the editor is open. Black out a
+   * password, press Cmd+S, paste: without this line what arrives is the
+   * unredacted capture, which is precisely the failure the tool exists to
+   * prevent, on the shortest path a user takes to it.
+   *
+   * Not gated on `obscure`. The leak is the sharp case, but the general one is
+   * that any edit makes the pre-edit copy the wrong picture, and a rule that
+   * only fires for redactions would leave a user pasting a screenshot without
+   * the arrow they just drew on it. `isEdited` is the whole condition, so an
+   * untouched document that is closed straight after a save leaves the host's
+   * own copy exactly as it was.
+   *
+   * What goes on the clipboard is `COPY_TYPE`, the same as the Copy button
+   * puts there, and not whatever the format control chose for the file. A
+   * clipboard image is pixels handed to the next application rather than a
+   * file, so the reason to pick JPEG does not apply to it; and a host is
+   * entitled to accept a narrower set of formats here than on disk, which
+   * Snapdeck's own does. A PNG save is the common case and hands over the bytes
+   * it just encoded, so the second encode is paid only when the two differ.
+   *
+   * A clipboard that refuses gets its own message rather than the delivery's.
+   * "The picture could not be saved" is untrue by this point, and the thing the
+   * user needs to know is not that the save failed but that the clipboard is
+   * still holding the version they were trying to leave behind. Returning
+   * nothing keeps `deliver` from writing "Saved …" over the top of it.
+   */
+  const saveAndReplaceClipboard = async (blob: Blob): Promise<void | string> => {
+    const written = await onExport(blob, format)
+    if (!isEdited(history.document)) return written
+    try {
+      const forClipboard =
+        format === COPY_TYPE ? blob : await toBlob(image, history.document, COPY_TYPE)
+      await onCopy(forClipboard)
+    } catch (error: unknown) {
+      console.error('editor: the saved picture could not replace the clipboard', error)
+      setNotice({
+        source: 'deliver',
+        tone: 'warning',
+        message: 'Saved, but the clipboard still holds the capture as it was before the edits.',
+      })
+      return
+    }
+    return written
+  }
+
+  /**
    * The two ways a picture leaves, named once.
    *
    * Save is reachable from the button, from Cmd+S and from Cmd+S inside an open
@@ -772,7 +843,7 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
    * and tell the host which one that was. Writing that out three times is how
    * one of them ends up saving in yesterday's format.
    */
-  const save = (): void => deliver((blob) => onExport(blob, format), 'save', format)
+  const save = (): void => deliver(saveAndReplaceClipboard, 'save', format)
   const copy = (): void => deliver(onCopy, 'copy', COPY_TYPE)
 
   // No dependency array. The handler closes over the document, the selection
@@ -1274,7 +1345,9 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
         </span>
         {/* The shortcuts are not discoverable any other way, and this editor
             has no menu bar of its own to put them in. */}
-        <span style={{ marginLeft: 'auto' }}>⌘Z undo · ⌘C copy · ⌘S save · Esc close</span>
+        <span style={{ marginLeft: 'auto' }}>
+          {MODIFIER_LABEL}Z undo · {MODIFIER_LABEL}C copy · {MODIFIER_LABEL}S save · Esc close
+        </span>
         {notice && (
           <span
             data-testid="notice"

@@ -51,12 +51,18 @@ const MAX_STROKE = 24
 const PIXEL_SLACK = 2
 
 /**
- * What left through the props, and two switches to steer one handover.
+ * What left through the props, and the switches that steer a handover.
  *
  * `failNext` is how a host that cannot take the picture is stood up: the only
  * operation in this component that can fail in a way the user has to be told
  * about is the handover, and the status bar's behaviour around that failure is
  * not reachable any other way.
+ *
+ * `failCopy` is the same switch for the clipboard, and it is separate because
+ * the case worth standing up is a save that worked and a clipboard that did
+ * not. That pair is what decides whether the status bar reports a failed save,
+ * which would be untrue, or a stale clipboard, which is the thing the user has
+ * to know. It stays set, because unlike `failNext` nothing retries it.
  *
  * `savedAs` is the file name a host reports back, and it is null by default
  * because a host that names nothing is the case every other test in this file
@@ -75,6 +81,7 @@ type Delivered = {
   copied: Blob[]
   closed: number
   failNext: boolean
+  failCopy: boolean
   savedAs: string | null
 }
 
@@ -88,7 +95,15 @@ let container: HTMLDivElement | null = null
  * mid-export still resolves, and a shared record would let the last test's
  * picture arrive in the next test's list and be measured there.
  */
-let delivered: Delivered = { saved: [], types: [], copied: [], closed: 0, failNext: false, savedAs: null }
+let delivered: Delivered = {
+  saved: [],
+  types: [],
+  copied: [],
+  closed: 0,
+  failNext: false,
+  failCopy: false,
+  savedAs: null,
+}
 
 async function mountEditor(): Promise<void> {
   container = document.createElement('div')
@@ -99,7 +114,15 @@ async function mountEditor(): Promise<void> {
   container.style.height = `${CONTAINER.height}px`
   document.body.appendChild(container)
 
-  const own: Delivered = { saved: [], types: [], copied: [], closed: 0, failNext: false, savedAs: null }
+  const own: Delivered = {
+    saved: [],
+    types: [],
+    copied: [],
+    closed: 0,
+    failNext: false,
+    failCopy: false,
+    savedAs: null,
+  }
   delivered = own
   // Transparent, not noise: this file measures ink, and a picture under it
   // would make every pixel opaque and `inkBounds` the whole canvas.
@@ -121,6 +144,7 @@ async function mountEditor(): Promise<void> {
         return own.savedAs ?? undefined
       }}
       onCopy={(blob) => {
+        if (own.failCopy) throw new Error('the host would not take the clipboard')
         own.copied.push(blob)
       }}
       onClose={() => {
@@ -667,6 +691,169 @@ describe('the selection chrome', () => {
     await pressAt({ x: 80, y: 40 })
     await vi.waitFor(() => expect(selectedKind()).toBe('rect'))
     expect(handleCount()).toBe(8)
+  })
+
+  // A caption's box is measured from its glyphs at its point size, and a
+  // resize returns a new rect without re-measuring anything. Eight handles on
+  // one were a way to drag the box away from the ink: the renderer would keep
+  // painting the old size from the new origin while the outline and the hit
+  // test described the box the pointer made. Text is resized by the width
+  // slider, which re-measures, so the handles are simply not offered.
+  it('offers no resize handles on a caption', async () => {
+    await chooseTool('text')
+    await pressAt({ x: 60, y: 100 })
+    const box = await vi.waitFor(() => byTestId('text-input') as HTMLTextAreaElement)
+    await userEvent.type(box, 'Hello')
+    await userEvent.keyboard('{Control>}{Enter}{/Control}')
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+
+    await chooseTool('select')
+    await pressAt({ x: 65, y: 110 })
+    await vi.waitFor(() => expect(selectedKind()).toBe('text'))
+    expect(selectionBox()).not.toBeNull()
+    expect(handleCount()).toBe(0)
+  })
+})
+
+/**
+ * The two keys the README documents that nothing was driving.
+ *
+ * Both are the kind of shortcut that is easy to break without noticing,
+ * because the visible effect of breaking them is that a key does nothing.
+ */
+describe('the keyboard with no text box open', () => {
+  it('removes the selected annotation on Delete', async () => {
+    await chooseTool('rect')
+    await dragAcross({ x: 60, y: 60 }, { x: 200, y: 140 })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+    await chooseTool('select')
+    await pressAt({ x: 130, y: 60 })
+    await vi.waitFor(() => expect(selectedKind()).toBe('rect'))
+
+    await userEvent.keyboard('{Delete}')
+
+    await vi.waitFor(() => expect(layerCount()).toBe(0))
+    expect(selectedKind()).toBe('nothing')
+    expect(selectionBox()).toBeNull()
+    // Removal is an ordinary command, so the key that got out of a mistake is
+    // itself undoable.
+    await undo()
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+  })
+
+  // One press drops the selection and a second closes the window, so the key
+  // somebody reaches for to get out of a mis-click is never the key that
+  // throws the whole annotation away.
+  it('drops the selection on the first Escape and closes on the second', async () => {
+    await chooseTool('rect')
+    await dragAcross({ x: 60, y: 60 }, { x: 200, y: 140 })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+    await chooseTool('select')
+    await pressAt({ x: 130, y: 60 })
+    await vi.waitFor(() => expect(selectedKind()).toBe('rect'))
+
+    await userEvent.keyboard('{Escape}')
+
+    await vi.waitFor(() => expect(selectedKind()).toBe('nothing'))
+    // The annotation is still there: this key drops the selection, not the work.
+    expect(layerCount()).toBe(1)
+    expect(delivered.closed).toBe(0)
+
+    await userEvent.keyboard('{Escape}')
+
+    await vi.waitFor(() => expect(delivered.closed).toBe(1))
+    expect(layerCount()).toBe(1)
+  })
+})
+
+/**
+ * The clipboard after a save.
+ *
+ * A host that copies the capture when it takes it, which is what Snapdeck
+ * does, holds the untouched original the whole time the editor is open. Black
+ * out a password, press Cmd+S, paste: without this the unredacted capture is
+ * what arrives, which is the exact failure the redaction feature exists to
+ * prevent, on the shortest path a user takes to it.
+ */
+describe('saving and the clipboard', () => {
+  it('replaces the clipboard with the picture it just saved', async () => {
+    await chooseTool('obscure')
+    await dragAcross({ x: 60, y: 60 }, { x: 200, y: 140 })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+
+    await userEvent.click(byTestId('save'))
+
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    // The bytes just encoded, not a second export: the file and the clipboard
+    // cannot then be different pictures.
+    expect(delivered.copied[0]).toBe(delivered.saved[0])
+  })
+
+  // The clipboard takes pixels, not a file, so the reason to pick JPEG does
+  // not reach it, and a host is entitled to accept less here than on disk:
+  // Snapdeck's own decodes PNG only, so handing it the JPEG it had just
+  // written would fail the clipboard write and leave the unredacted capture
+  // sitting there, which is the whole leak, reopened on the JPEG path.
+  it('puts a lossless copy on the clipboard after a JPEG save', async () => {
+    await chooseTool('rect')
+    await dragAcross({ x: 60, y: 60 }, { x: 200, y: 140 })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+    await userEvent.click(byTestId('format-jpeg'))
+
+    await userEvent.click(byTestId('save'))
+
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    expect((delivered.saved[0] as Blob).type).toBe('image/jpeg')
+    expect((delivered.copied[0] as Blob).type).toBe('image/png')
+  })
+
+  // A crop hides by removal rather than by covering, so it is an edit for this
+  // purpose exactly as a layer is.
+  it('replaces the clipboard after a save that only cropped', async () => {
+    await chooseTool('crop')
+    await dragAcross({ x: 100, y: 80 }, { x: 300, y: 220 })
+    await vi.waitFor(() => expect(viewSize()).toBe('200 × 140'))
+    expect(layerCount()).toBe(0)
+
+    await userEvent.click(byTestId('save'))
+
+    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    const bitmap = await createImageBitmap(delivered.copied[0] as Blob)
+    try {
+      expect(bitmap.width).toBe(200)
+      expect(bitmap.height).toBe(140)
+    } finally {
+      bitmap.close()
+    }
+  })
+
+  // The other half of the rule. An untouched document is the picture the host
+  // already has, so a save of one has no business touching a clipboard the
+  // user may have put something else on.
+  it('leaves the clipboard alone when nothing was edited', async () => {
+    await userEvent.click(byTestId('save'))
+
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await settle()
+    expect(delivered.copied).toHaveLength(0)
+  })
+
+  // A save that worked followed by a clipboard that refused is not a failed
+  // save, and saying so would send the user back to press Save again while the
+  // stale capture stays where the leak is.
+  it('says the clipboard is stale rather than that the save failed', async () => {
+    delivered.failCopy = true
+    await chooseTool('rect')
+    await dragAcross({ x: 60, y: 60 }, { x: 200, y: 140 })
+    await vi.waitFor(() => expect(layerCount()).toBe(1))
+
+    await userEvent.click(byTestId('save'))
+
+    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await vi.waitFor(() => expect(byTestId('notice').textContent ?? '').toContain('clipboard'))
+    expect(byTestId('notice').textContent ?? '').not.toContain('could not be saved')
   })
 })
 

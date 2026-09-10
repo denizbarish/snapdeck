@@ -77,6 +77,17 @@ const MIN_BLUR_RADIUS = 4
 const BLUR_REGION_DIVISOR = 6
 
 /**
+ * Line height as a multiple of the font size, for a caption's second line on.
+ *
+ * `tools.ts` holds this number under the same name, and the two have to agree:
+ * there it decides how tall the box a click has to land in is, here it decides
+ * where the next line is painted. Named on both sides rather than written out
+ * as a literal on one of them, because a grep for `LINE_HEIGHT_RATIO` is how
+ * somebody changing one of the two finds the other.
+ */
+const LINE_HEIGHT_RATIO = 1.25
+
+/**
  * Draw a document into a context.
  *
  * The context's own transform is left as it was found. Inside, the origin is
@@ -291,7 +302,7 @@ function drawText(ctx: RenderTarget, layer: LayerOf<'text'>): void {
   // other way round, so wrapping here would fight the tool that sized it.
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
-  const lineHeight = layer.style.size * 1.25
+  const lineHeight = layer.style.size * LINE_HEIGHT_RATIO
   const lines = layer.content.split('\n')
   for (let index = 0; index < lines.length; index += 1) {
     ctx.fillText(lines[index] ?? '', layer.rect.x, layer.rect.y + index * lineHeight)

@@ -14,6 +14,7 @@ import {
   readableTextColor,
   restyleLayer,
   selectionBounds,
+  TEXT_FONT_STACK,
   textSizeFor,
   withDraft,
   type Gesture,
@@ -289,10 +290,16 @@ describe('selectionBounds', () => {
 })
 
 describe('hasResizeHandles', () => {
-  // A resize keeps the badge's size and only re-centres it on the box the drag
-  // is making, so the badge moves half as far as the pointer and appears to
-  // lag the hand. There is nothing to resize, so there is nothing to grab.
-  it('offers none on a step badge and some on everything else', () => {
+  // Two layers whose box is a measurement of something else, so a drag that
+  // changed the box without changing the thing would leave the two describing
+  // different shapes. A resize keeps the badge's size and only re-centres it on
+  // the box the drag is making, so the badge moves half as far as the pointer
+  // and appears to lag the hand. A caption's rect comes from `measureTextRect`
+  // at its point size and nothing re-measures after a resize, so the renderer
+  // would paint the old size from the new origin while the outline and the hit
+  // test described the dragged box; the width control resizes text instead, and
+  // it re-measures.
+  it('offers none on a step badge or a caption, and some on everything else', () => {
     const badge: Layer = {
       id: 'a',
       kind: 'step',
@@ -306,7 +313,15 @@ describe('hasResizeHandles', () => {
       rect: { x: 0, y: 0, width: 10, height: 10 },
       style: { stroke: { color: '#ff3b30', width: 4 }, fill: null },
     }
+    const caption: Layer = {
+      id: 'c',
+      kind: 'text',
+      rect: { x: 0, y: 0, width: 40, height: 25 },
+      content: 'hello',
+      style: { color: '#ff3b30', size: 20, family: TEXT_FONT_STACK },
+    }
     expect(hasResizeHandles(badge)).toBe(false)
+    expect(hasResizeHandles(caption)).toBe(false)
     expect(hasResizeHandles(rect)).toBe(true)
   })
 })

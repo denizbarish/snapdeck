@@ -135,6 +135,29 @@ describe('exportCanvas', () => {
     for (const scale of [0.25, 0.3, 0.5, 0.6]) {
       expect(exported).toBeLessThanOrEqual(detailAt(scale) + 0.02)
     }
+
+    // Direction is all the loop above claims, and at a small enough scale it
+    // claims nothing: the block is measured in the device pixels of the target
+    // and floored at 1, so a six-pixel block is one device pixel at a quarter
+    // scale and the preview is the identity function. "No stronger than an
+    // unredacted render" is true of everything, so the loop passes there
+    // whatever the renderer does.
+    //
+    // Both halves are therefore pinned by value. Where the block survives as
+    // three device pixels the preview is genuinely redacted, which is what
+    // makes the inequality above a test rather than a tautology.
+    for (const scale of [0.5, 0.6]) {
+      expect(detailAt(scale)).toBeLessThan(0.8)
+    }
+    // And where it does not, the preview keeps nearly all of the structure the
+    // file has lost. That is the trap `renderDocument` warns importers about
+    // and the reason `Editor.tsx` renders through `exportCanvas` below 1:1: the
+    // file is redacted exactly as asked while the screen shows the secret. A
+    // renderer that ever fixed this in place would make this expectation fail,
+    // which is the right way round for it to be noticed.
+    for (const scale of [0.25, 0.3]) {
+      expect(detailAt(scale)).toBeGreaterThan(0.9)
+    }
   })
 
   it('produces exactly what the preview draws, because it is the same code', () => {

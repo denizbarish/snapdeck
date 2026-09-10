@@ -61,10 +61,11 @@ export const TEXT_FONT_STACK = 'system-ui, -apple-system, "Helvetica Neue", sans
 /**
  * Line height as a multiple of the font size.
  *
- * The same ratio `render.ts` paints with. It is repeated rather than imported
- * because the two uses are different questions: there it decides where the
- * second line is drawn, here it decides how tall the box a click has to land
- * in is. They have to agree, and this comment is the link between them.
+ * The same ratio `render.ts` paints with, under the same name. It is repeated
+ * rather than imported because the two uses are different questions: there it
+ * decides where the second line is drawn, here it decides how tall the box a
+ * click has to land in is. They have to agree, so both sides name it, and a
+ * grep for this identifier finds them both.
  */
 const LINE_HEIGHT_RATIO = 1.25
 
@@ -261,14 +262,27 @@ export function restyleLayer(layer: Layer, settings: ToolSettings): Layer {
 /**
  * Whether the selection chrome should offer resize handles for this layer.
  *
- * Everything but a step badge. The badge keeps its size through a resize by
- * design, so dragging a handle only re-centres it on the box the drag is
- * making: the centre moves half as far as the pointer, in the direction of the
- * drag, and the badge appears to lag the hand. There is nothing to resize, so
- * there is nothing to grab.
+ * Everything but a step badge and a caption, and both exclusions are the same
+ * exclusion: the layer's box is a measurement of something else, so a drag that
+ * changes the box without changing the thing leaves the two describing
+ * different shapes.
+ *
+ * The badge keeps its size through a resize by design, so dragging a handle
+ * only re-centres it on the box the drag is making: the centre moves half as
+ * far as the pointer, in the direction of the drag, and the badge appears to
+ * lag the hand. There is nothing to resize, so there is nothing to grab.
+ *
+ * Text is the sharper case. `measureTextRect` sizes a caption's rect from its
+ * glyphs at its point size, and nothing re-measures after a resize: the drag
+ * would return a new rect while `style.size` stayed as it was, so the renderer
+ * would keep painting the old point size from the new origin while `boundsOf`,
+ * the selection outline and `layerAtPoint` all described the dragged box. The
+ * invariant the width slider protects, the box follows the text and not the
+ * other way round, is the same one this keeps. Captions are resized by the
+ * width control, which re-measures.
  */
 export function hasResizeHandles(layer: Layer): boolean {
-  return layer.kind !== 'step'
+  return layer.kind !== 'step' && layer.kind !== 'text'
 }
 
 /**
