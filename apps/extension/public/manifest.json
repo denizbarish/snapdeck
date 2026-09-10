@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Snapdeck",
   "description": "Capture a whole web page and hand it to the Snapdeck app.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "icons": {
     "16": "icons/16.png",

@@ -3553,7 +3553,7 @@ checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "snapdeck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "snapdeck-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "core-graphics",
  "screencapturekit",
@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "snapdeck-frame"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -3603,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "snapdeck-stitch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "snapdeck-frame",
