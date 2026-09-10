@@ -1,5 +1,6 @@
 /**
- * `shortcutNotice` is exported to be tested, and this is that test.
+ * The two sentences this window says on its own, and the tests that hold them
+ * to it.
  *
  * It is the sentence that stands between the user and the failure this whole
  * task exists to prevent: an application running with some capture shortcuts
@@ -10,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { shortcutNotice, type Shortcuts } from './SettingsWindow'
+import { bridgeStatusNotice, shortcutNotice, type Shortcuts } from './SettingsWindow'
 
 const BOUND: Shortcuts = {
   captureRegion: 'CmdOrCtrl+Shift+Digit7',
@@ -78,5 +79,31 @@ describe('shortcutNotice', () => {
     const notice = shortcutNotice(STORED, null, REFUSED)
     expect(notice).toContain('already registered')
     expect(notice).not.toContain('No capture shortcut is bound right now')
+  })
+})
+
+/**
+ * The bridge is the half of full-page capture that lives on this side, and the
+ * user cannot see it: from the browser, a Snapdeck that is not listening and one
+ * that refused the extension look exactly the same. This line is the only place
+ * they find out.
+ */
+describe('bridgeStatusNotice', () => {
+  // The working case names the port, because that is the one number the user
+  // may have to go and look for when something else is holding it.
+  it('names the port the extension connects to', () => {
+    const notice = bridgeStatusNotice({ state: 'listening', detail: { port: 51837 } })
+    expect(notice).toContain('51837')
+  })
+
+  // The broken case owes the user two things: why, and what it costs them. A
+  // reason on its own reads as a detail; without it, the sentence is a shrug.
+  it('gives the reason and says the extension will not work', () => {
+    const notice = bridgeStatusNotice({
+      state: 'unavailable',
+      detail: { reason: 'the bridge could not take port 51837 on this machine' },
+    })
+    expect(notice).toContain('could not take port 51837')
+    expect(notice).toContain('will not work')
   })
 })

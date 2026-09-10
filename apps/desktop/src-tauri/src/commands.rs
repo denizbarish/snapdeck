@@ -36,6 +36,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
+    bridge::BridgeOutcome,
     editor,
     output::{
         check_filename_template, render_filename, save_capture_without_overwriting,
@@ -483,7 +484,12 @@ fn write_capture(frame: &Frame, directory: &Path, settings: &Settings) -> Result
 ///
 /// Split out so that its failure is a value the caller can weigh against the
 /// file's, rather than an early return that decides for it.
-fn copy_to_clipboard(app: &AppHandle, frame: &Frame) -> Result<(), String> {
+///
+/// `pub(crate)` for the bridge, which delivers a full page down the same path a
+/// region capture takes and had been carrying a second copy of this to do it.
+/// Two clipboard writes is two places for the conversion, the image header or
+/// the failure text to drift apart.
+pub(crate) fn copy_to_clipboard(app: &AppHandle, frame: &Frame) -> Result<(), String> {
     let rgba = frame
         .to_rgba8()
         .map_err(|err| format!("failed to convert the capture for the clipboard: {err}"))?;
@@ -876,6 +882,24 @@ pub struct SettingsView {
     settings: Settings,
     bound_shortcuts: Option<Shortcuts>,
     shortcut_problem: Option<String>,
+    /// The pairing token, at the top level rather than only inside `settings`,
+    /// because it is not a setting the window edits: it is a value the window
+    /// shows, and the form must not be able to write one back.
+    bridge_token: String,
+    /// Whether the browser extension has anything to connect to.
+    bridge_status: BridgeStatus,
+}
+
+/// Whether the bridge is listening, and why it is not when it is not.
+///
+/// Two states and no third. A port that is held by something else is the
+/// ordinary failure here, and the reason is the only thing that tells the user
+/// which of the two answers they are looking at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "state", content = "detail")]
+pub enum BridgeStatus {
+    Listening { port: u16 },
+    Unavailable { reason: String },
 }
 
 impl SettingsView {
@@ -883,12 +907,23 @@ impl SettingsView {
         settings: Settings,
         bound_shortcuts: Option<Shortcuts>,
         shortcut_problem: Option<String>,
+        bridge_status: BridgeStatus,
     ) -> Self {
         Self {
+            bridge_token: settings.bridge_token.clone(),
             settings,
             bound_shortcuts,
             shortcut_problem,
+            bridge_status,
         }
+    }
+}
+
+/// What the bridge managed to do at launch, in the shape the window renders.
+fn bridge_status(app: &AppHandle) -> BridgeStatus {
+    match app.state::<BridgeOutcome>().read() {
+        Ok(port) => BridgeStatus::Listening { port },
+        Err(reason) => BridgeStatus::Unavailable { reason },
     }
 }
 
@@ -900,7 +935,12 @@ impl SettingsView {
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> SettingsView {
     let state = app.state::<AppState>();
-    SettingsView::new(state.settings(), state.registered_shortcuts(), None)
+    SettingsView::new(
+        state.settings(),
+        state.registered_shortcuts(),
+        None,
+        bridge_status(&app),
+    )
 }
 
 /// Puts new settings into force and writes them down.
@@ -976,15 +1016,17 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<SettingsView,
         settings,
         applied.bound,
         applied.shortcuts_refused,
+        bridge_status(&app),
     ))
 }
 
 /// What a save actually writes down, given what the form asked for and whether
 /// the platform took the shortcuts.
 ///
-/// Everything except the shortcuts is what the user typed. The shortcuts are
-/// what is already on disk whenever the rebind was refused, and this is the one
-/// line that decides it.
+/// Everything except the shortcuts and the pairing token is what the user
+/// typed. The shortcuts are what is already on disk whenever the rebind was
+/// refused, and this is the one line that decides it. The token is always what
+/// is already on disk, because it is not on the form at all.
 ///
 /// Two wrong answers were both tried on the way here. Writing the *requested*
 /// shortcuts would record a combination that is not in force and never was, so
@@ -997,13 +1039,80 @@ fn settings_to_store(
     requested: Settings,
     shortcuts_refused: bool,
 ) -> Settings {
-    if !shortcuts_refused {
-        return requested;
-    }
+    let shortcuts = if shortcuts_refused {
+        previous.shortcuts.clone()
+    } else {
+        requested.shortcuts
+    };
     Settings {
-        shortcuts: previous.shortcuts.clone(),
+        shortcuts,
+        // Never the requested one. The pairing token is not a field on the
+        // form: the window is handed it to show, and the only thing allowed to
+        // replace it is `regenerate_bridge_token`. Taking it from the request
+        // would mean a form loaded before a regenerate could put the old secret
+        // back on the next save of an unrelated checkbox, and the extension the
+        // user had just re-paired would stop working.
+        bridge_token: previous.bridge_token.clone(),
         ..requested
     }
+}
+
+/// Replaces the pairing token, and tells the window what is now in force.
+///
+/// The button behind it is the answer to one question: what does a user do when
+/// they think their token has got out. Everything else in the window is a
+/// preference; this is a secret being retired, so it is written to the file and
+/// put into force before the call returns, and the bridge reads the new one on
+/// the very next handshake because `AppPolicy::token` never keeps a copy.
+///
+/// Nothing else in the settings is touched, and the file is written before the
+/// running application is changed: a token in force that is not on disk would
+/// be a pairing the user cannot repeat after a relaunch.
+#[tauri::command]
+pub fn regenerate_bridge_token(app: AppHandle) -> Result<SettingsView, String> {
+    let state = app.state::<AppState>();
+    let settings = regenerated(&state.settings())?;
+    settings::save(&app, &settings)?;
+    state.set_settings(settings.clone());
+    Ok(SettingsView::new(
+        settings,
+        state.registered_shortcuts(),
+        None,
+        bridge_status(&app),
+    ))
+}
+
+/// The settings a regenerate writes: the same settings with a fresh token.
+///
+/// Split out to be tested, and it is the one line of the command that can be:
+/// everything around it needs a running application, and the property worth
+/// proving is that the token actually changes and nothing else does.
+fn regenerated(previous: &Settings) -> Result<Settings, String> {
+    Ok(Settings {
+        bridge_token: crate::bridge::token::generate_token()?,
+        ..previous.clone()
+    })
+}
+
+/// Puts the pairing token on the clipboard.
+///
+/// Rust writes it, not the window. The webview is granted no clipboard
+/// permission at all, for the reason the editor's capability gives: a page that
+/// can write the clipboard can write it whenever it likes, and this particular
+/// page is being handed the one secret the bridge has. The user presses a
+/// button, this copies once, and nothing on the page ever holds a clipboard
+/// permission.
+#[tauri::command]
+pub fn copy_bridge_token(app: AppHandle) -> Result<(), String> {
+    let token = app.state::<AppState>().settings().bridge_token;
+    if token.is_empty() {
+        return Err(
+            "Snapdeck has no pairing token yet, so there is nothing to copy. Restart Snapdeck to mint one.".to_string(),
+        );
+    }
+    app.clipboard()
+        .write_text(token)
+        .map_err(|err| format!("Snapdeck could not copy the pairing token ({err})."))
 }
 
 /// Asks the user for a save folder and proves it can be written to.
@@ -1048,6 +1157,15 @@ fn pick_writable_directory(app: &AppHandle, start: &Path) -> Result<Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bridge doing its job, which is the state none of the shortcut tests
+    /// are about. The port comes from the protocol rather than from a literal
+    /// here, so this cannot be the second place the number is written down.
+    fn listening() -> BridgeStatus {
+        BridgeStatus::Listening {
+            port: crate::bridge::protocol::BRIDGE_PORT,
+        }
+    }
 
     fn window(id: u32) -> WindowInfo {
         WindowInfo {
@@ -1094,7 +1212,7 @@ mod tests {
     #[test]
     fn a_set_that_did_not_register_is_reported_as_not_bound() {
         let settings = Settings::default();
-        let view = SettingsView::new(settings.clone(), None, None);
+        let view = SettingsView::new(settings.clone(), None, None, listening());
         assert_eq!(view.settings, settings, "the file's own values are kept");
         assert_eq!(view.bound_shortcuts, None);
 
@@ -1110,7 +1228,12 @@ mod tests {
     #[test]
     fn a_registered_set_is_reported_alongside_the_settings() {
         let settings = Settings::default();
-        let view = SettingsView::new(settings.clone(), Some(settings.shortcuts.clone()), None);
+        let view = SettingsView::new(
+            settings.clone(),
+            Some(settings.shortcuts.clone()),
+            None,
+            listening(),
+        );
         let json = serde_json::to_string(&view).expect("render");
         assert!(json.contains("\"boundShortcuts\""), "{json}");
         assert!(json.contains("\"settings\""), "{json}");
@@ -1127,6 +1250,7 @@ mod tests {
             settings.clone(),
             Some(settings.shortcuts.clone()),
             Some("the region shortcut is already taken".to_string()),
+            listening(),
         );
         let json = serde_json::to_string(&view).expect("render");
         assert!(json.contains("\"shortcutProblem\""), "{json}");
@@ -1137,9 +1261,69 @@ mod tests {
     /// window must not be left showing the reason a previous save gave.
     #[test]
     fn a_plain_read_carries_no_reason() {
-        let view = SettingsView::new(Settings::default(), None, None);
+        let view = SettingsView::new(Settings::default(), None, None, listening());
         let json = serde_json::to_string(&view).expect("render");
         assert!(json.contains("\"shortcutProblem\":null"), "{json}");
+    }
+
+    /// T5. Regenerating has to actually regenerate. A `Regenerate` that handed
+    /// back the token the extension is already paired with would look exactly
+    /// like one that worked, and the user would believe they had replaced a
+    /// secret they had not.
+    #[test]
+    fn regenerating_mints_a_different_token_and_changes_nothing_else() {
+        let previous = Settings {
+            bridge_token: "0123456789abcdef".to_string(),
+            ..Settings::default()
+        };
+
+        let next = regenerated(&previous).expect("the system CSPRNG answers");
+
+        assert_ne!(
+            next.bridge_token, previous.bridge_token,
+            "the whole of what the user pressed the button for"
+        );
+        assert!(
+            !next.bridge_token.is_empty(),
+            "a regenerate that empties the token would take the bridge down with it"
+        );
+        assert_eq!(
+            Settings {
+                bridge_token: previous.bridge_token.clone(),
+                ..next
+            },
+            previous,
+            "the token is the only thing a regenerate may touch"
+        );
+    }
+
+    /// The other half of the same rule, on the way back in. The window is
+    /// handed the token to show, so a form loaded before a regenerate still
+    /// holds the old one; a save that took the request at its word would put
+    /// the retired secret back and un-pair the extension the user had just
+    /// paired.
+    #[test]
+    fn a_save_cannot_write_a_pairing_token() {
+        let previous = Settings {
+            bridge_token: "the token in force".to_string(),
+            ..stored()
+        };
+        let requested = Settings {
+            bridge_token: "the one the form was loaded with".to_string(),
+            open_editor_after_capture: !previous.open_editor_after_capture,
+            ..previous.clone()
+        };
+
+        let written = settings_to_store(&previous, requested.clone(), false);
+
+        assert_eq!(
+            written.bridge_token, previous.bridge_token,
+            "the token is not a field on the form"
+        );
+        assert_eq!(
+            written.open_editor_after_capture, requested.open_editor_after_capture,
+            "and the rest of the save is still the user's"
+        );
     }
 
     fn stored() -> Settings {

@@ -90,6 +90,15 @@ pub struct Settings {
     /// the network at all, which is why it is a setting rather than a
     /// behaviour. See `updater`.
     pub check_for_updates_at_launch: bool,
+    /// The token the extension has to present. Empty until the first launch
+    /// that mints one.
+    ///
+    /// The one field in here the user does not choose, and the one the window
+    /// shows rather than edits: it is a secret, and the only thing that may
+    /// replace it is a fresh one from the system CSPRNG. It lives in the
+    /// settings because it has to survive a relaunch, which is the whole of
+    /// what pairing means; a token minted at every launch pairs with nothing.
+    pub bridge_token: String,
 }
 
 /// Reads a `shortcuts` object, filling any binding it does not name from the
@@ -164,8 +173,52 @@ impl Default for Settings {
             // one they did not ask for. `Check for Updates…` in the menu bar
             // works whatever this says.
             check_for_updates_at_launch: false,
+            // Not a default so much as the absence of one, and the comment on
+            // `ensure_bridge_token` is the reason: a constant here would be the
+            // same pairing secret on every installation in the world.
+            bridge_token: String::new(),
         }
     }
+}
+
+/// The token in force, minting and storing one the first time.
+///
+/// Not a `Default`: a default is a constant, and a constant pairing token would
+/// be the same secret on every installation in the world. The default is "none
+/// yet", and the first launch is what mints one.
+///
+/// The write is part of it. A token that is only in memory pairs the extension
+/// for exactly as long as this process lives, which is the bug this replaced:
+/// the bridge minted one at every launch, so an extension paired yesterday was
+/// refused today and there was no way to pair it at all.
+///
+/// The token is set on `settings` whether or not the write succeeds, and the
+/// failure is passed back rather than swallowed. The bridge then works for this
+/// run, the caller says why the pairing will not survive a relaunch, and
+/// nothing pretends a secret was written down when it was not.
+pub fn ensure_bridge_token(app: &AppHandle, settings: &mut Settings) -> Result<String, String> {
+    if mint_if_missing(crate::bridge::token::generate_token, settings)? {
+        save(app, settings)?;
+    }
+    Ok(settings.bridge_token.clone())
+}
+
+/// The decision inside `ensure_bridge_token`, with the mint injected, and
+/// whether it minted anything.
+///
+/// Split out for the reason `choose_save_directory` is: everything around it
+/// needs a live `AppHandle`, and this one line is the whole of what the feature
+/// turns on. `false` is what stops the save: a token already in the file is not
+/// a token to write again.
+fn mint_if_missing<M>(mint: M, settings: &mut Settings) -> Result<bool, String>
+where
+    M: FnOnce() -> Result<String, String>,
+{
+    if !settings.bridge_token.is_empty() {
+        return Ok(false);
+    }
+    settings.bridge_token = mint()?;
+    Ok(true)
 }
 
 /// Reads the settings, falling back to the defaults and logging when the file
@@ -707,6 +760,7 @@ mod tests {
             launch_at_login: true,
             open_editor_after_capture: false,
             check_for_updates_at_launch: true,
+            bridge_token: "0123456789abcdef".to_string(),
         };
         let json = serde_json::to_string(&written).expect("render");
         let (read_back, complaint) = settings_from_json(&json);
@@ -1043,5 +1097,81 @@ mod tests {
             !editor.contains("DEFAULT_FORMAT"),
             "the editor package states an opening format of its own again; the format a capture is in is the host's answer, not the component's"
         );
+    }
+
+    /// T1. Security. The pairing token is the one secret the bridge has, and a
+    /// default is a constant: a constant here would be the same secret on every
+    /// installation in the world, and pairing would prove nothing at all. The
+    /// default is "none yet", and the first launch is what mints one.
+    #[test]
+    fn the_default_settings_carry_no_pairing_token() {
+        assert!(
+            Settings::default().bridge_token.is_empty(),
+            "a default pairing token would be a shared secret, not a secret"
+        );
+    }
+
+    /// T2. The property the whole field exists for. A token minted once stays
+    /// minted, so the extension the user paired yesterday is still paired
+    /// today; before this, every launch generated a fresh one and the bridge
+    /// could not be paired at all.
+    #[test]
+    fn a_token_is_minted_once_and_then_left_alone() {
+        let mut settings = Settings::default();
+
+        let minted = mint_if_missing(|| Ok("f00d".to_string()), &mut settings)
+            .expect("a mint that answers cannot fail");
+        assert!(minted, "an empty token is what a first launch has to fill");
+        assert_eq!(settings.bridge_token, "f00d");
+
+        let minted_again = mint_if_missing(|| Ok("beef".to_string()), &mut settings)
+            .expect("a mint that answers cannot fail");
+        assert!(
+            !minted_again,
+            "a token already in the file is not a token to mint"
+        );
+        assert_eq!(
+            settings.bridge_token, "f00d",
+            "the second launch has to present the token the extension was paired with"
+        );
+    }
+
+    /// T3. A token that is not written down is a token the next launch does not
+    /// have. The file is the only place it lives.
+    #[test]
+    fn the_pairing_token_survives_the_file() {
+        let written = Settings {
+            bridge_token: "0123456789abcdef".to_string(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&written).expect("render");
+        let (read_back, complaint) = settings_from_json(&json);
+        assert_eq!(complaint, None);
+        assert_eq!(
+            read_back.bridge_token, "0123456789abcdef",
+            "a token the file does not carry is one the next launch mints again"
+        );
+    }
+
+    /// T4. A settings file written before this field existed is a file from
+    /// every user who already has Snapdeck. It has to load as it is, with an
+    /// empty token that the launch then mints, and it must not cost them the
+    /// folder and the template they chose.
+    #[test]
+    fn a_file_written_before_the_token_existed_keeps_everything_else() {
+        let (settings, complaint) = settings_from_json(
+            r#"{"saveDirectory": "/Volumes/Shots", "filenameTemplate": "shot-{time}"}"#,
+        );
+        assert_eq!(complaint, None);
+        assert!(
+            settings.bridge_token.is_empty(),
+            "a file that names no token has none yet"
+        );
+        assert_eq!(
+            settings.save_directory,
+            Some(PathBuf::from("/Volumes/Shots")),
+            "a new field must not cost the user the settings they already had"
+        );
+        assert_eq!(settings.filename_template, "shot-{time}");
     }
 }

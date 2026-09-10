@@ -48,7 +48,19 @@ export type Settings = {
   launchAtLogin: boolean
   openEditorAfterCapture: boolean
   checkForUpdatesAtLaunch: boolean
+  /**
+   * The token the browser extension has to present. Carried so that a save
+   * writes back the whole of what it loaded; never rendered from here, and
+   * never edited: what the window shows is `SettingsView.bridgeToken`, and
+   * Rust writes back its own copy whatever this says.
+   */
+  bridgeToken: string
 }
+
+/** Mirrors `commands::BridgeStatus`. */
+export type BridgeStatus =
+  | { state: 'listening'; detail: { port: number } }
+  | { state: 'unavailable'; detail: { reason: string } }
 
 /**
  * Mirrors `commands::SettingsView`: the settings, what the keyboard actually
@@ -67,6 +79,15 @@ export type SettingsView = {
   settings: Settings
   boundShortcuts: Shortcuts | null
   shortcutProblem: string | null
+  /**
+   * The pairing token in force, which is the one the window shows. Separate
+   * from the copy inside `settings` for the reason `boundShortcuts` is
+   * separate from `settings.shortcuts`: this is what is true, and the form is
+   * only what was loaded.
+   */
+  bridgeToken: string
+  /** Whether the extension has anything to connect to. */
+  bridgeStatus: BridgeStatus
 }
 
 /** The capture modes, in the order the tray menu lists them. */
@@ -132,6 +153,25 @@ export function shortcutNotice(
   return `These are not what is bound right now: ${inForce} are. Save to put them into force.`
 }
 
+/**
+ * What to say about the bridge the browser extension connects to.
+ *
+ * The one thing a user cannot see for themselves. From the extension's side a
+ * Snapdeck that never opened the port and one that refused them look the same,
+ * and the port is fixed, so anything else on this machine can be holding it.
+ * The failing case owes them two things: the reason, which names the port they
+ * have to go and free, and what it costs them, because a reason on its own
+ * reads as a detail rather than as a feature that is not going to work.
+ *
+ * Exported to be tested, for the reason `shortcutNotice` is.
+ */
+export function bridgeStatusNotice(status: BridgeStatus): string {
+  if (status.state === 'listening') {
+    return `Snapdeck is listening on port ${status.detail.port} for the browser extension.`
+  }
+  return `Snapdeck is not listening, so full-page capture from your browser will not work: ${status.detail.reason}`
+}
+
 export function SettingsWindow(): JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null)
   // What the platform has registered, which is a different question from what
@@ -140,6 +180,10 @@ export function SettingsWindow(): JSX.Element {
   // Why the last save did not change the shortcuts, which is a thing only Rust
   // can say and only a save can produce.
   const [shortcutProblem, setShortcutProblem] = useState<string | null>(null)
+  // The pairing token in force and whether the bridge is up: Rust's answers,
+  // rendered rather than edited, and `null` until it has given them.
+  const [bridgeToken, setBridgeToken] = useState<string | null>(null)
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [saving, setSaving] = useState(false)
   const [recording, setRecording] = useState<keyof Shortcuts | null>(null)
@@ -161,6 +205,8 @@ export function SettingsWindow(): JSX.Element {
     setSettings(view.settings)
     setBoundShortcuts(view.boundShortcuts)
     setShortcutProblem(view.shortcutProblem)
+    setBridgeToken(view.bridgeToken)
+    setBridgeStatus(view.bridgeStatus)
   }, [])
 
   // Through `applyView` rather than by setting the fields here, so that the two
@@ -229,6 +275,44 @@ export function SettingsWindow(): JSX.Element {
       setNotice({ kind: 'error', text: String(error) })
     }
   }, [update])
+
+  // Rust writes the clipboard, not this page. The window is granted no
+  // clipboard permission at all, for the reason the editor's capability gives:
+  // a page that may write the clipboard may write it whenever it likes, and
+  // this one is being handed the one secret the bridge has.
+  const copyToken = useCallback(async () => {
+    setNotice(null)
+    try {
+      await invoke('copy_bridge_token')
+      setNotice({ kind: 'ok', text: 'The pairing token is on the clipboard.' })
+    } catch (error: unknown) {
+      setNotice({ kind: 'error', text: String(error) })
+    }
+  }, [])
+
+  const regenerateToken = useCallback(async () => {
+    setNotice(null)
+    try {
+      const inForce = await invoke<SettingsView>('regenerate_bridge_token')
+      setBridgeToken(inForce.bridgeToken)
+      setBridgeStatus(inForce.bridgeStatus)
+      // The form still holds the token it was loaded with, and it travels back
+      // with the next save. Rust writes its own copy whatever the form says,
+      // and this keeps the two from disagreeing in the meantime.
+      setSettings((current) =>
+        current ? { ...current, bridgeToken: inForce.bridgeToken } : current,
+      )
+      // The whole cost of the button, said where the user is looking. A token
+      // that has been replaced is a paired extension that has been unpaired,
+      // and it stays unpaired until they go and paste the new one.
+      setNotice({
+        kind: 'ok',
+        text: 'A new pairing token is in force. The browser extension cannot connect until you paste this one into its options page.',
+      })
+    } catch (error: unknown) {
+      setNotice({ kind: 'error', text: String(error) })
+    }
+  }, [])
 
   const save = useCallback(async () => {
     if (!settings) return
@@ -376,6 +460,51 @@ export function SettingsWindow(): JSX.Element {
           checked={settings.launchAtLogin}
           onChange={(launchAtLogin) => update({ launchAtLogin })}
         />
+      </Section>
+
+      <Section
+        title="Browser Extension"
+        hint="Snapdeck's browser extension captures a whole page and hands it back over a connection this machine never leaves. Paste the token into the extension's options page to pair it."
+      >
+        {bridgeStatus && (
+          <p
+            style={bridgeStatus.state === 'unavailable' ? warningStyle : hintStyle}
+            role="status"
+          >
+            {bridgeStatusNotice(bridgeStatus)}
+          </p>
+        )}
+        <Row label="Pairing token">
+          <div style={folderStyle}>
+            {/*
+              Shown, not edited: the only thing allowed to replace a token is a
+              fresh one from Rust. Truncated like the folder path is, with the
+              whole of it in the tooltip, because Copy is how it gets to the
+              extension and reading 64 characters off a screen is not.
+            */}
+            <span style={tokenStyle} title={bridgeToken ?? undefined}>
+              {bridgeToken === '' ? 'None yet' : bridgeToken}
+            </span>
+            <span style={buttonRowStyle}>
+              <button
+                type="button"
+                style={buttonStyle}
+                aria-label="Copy the pairing token"
+                onClick={copyToken}
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                style={buttonStyle}
+                aria-label="Replace the pairing token"
+                onClick={regenerateToken}
+              >
+                Regenerate
+              </button>
+            </span>
+          </div>
+        </Row>
       </Section>
 
       {/*
@@ -591,6 +720,15 @@ const pathStyle: CSSProperties = {
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
   color: '#3c3c43',
+}
+
+// Monospace and truncated, for two different reasons. Hex in a proportional
+// face is where a 0 and an O become the same glyph, and a token is 64
+// characters in a window 460 points wide, so it is cut off at the end exactly
+// as the folder path is and the tooltip holds the whole of it.
+const tokenStyle: CSSProperties = {
+  ...pathStyle,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
 }
 
 const buttonRowStyle: CSSProperties = { display: 'flex', gap: 6, flex: '0 0 auto' }

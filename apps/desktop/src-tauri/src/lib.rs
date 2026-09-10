@@ -68,6 +68,10 @@ pub fn run() {
                 .build(),
         )
         .manage(AppState::new())
+        // The bridge's own answer about itself, which outlives the attempt to
+        // open it: the settings window is the one place a user can find out
+        // that the extension has nothing to connect to.
+        .manage(bridge::BridgeOutcome::default())
         .invoke_handler(tauri::generate_handler![
             commands::permission_state,
             commands::request_permission,
@@ -79,7 +83,9 @@ pub fn run() {
             commands::close_editor,
             commands::get_settings,
             commands::save_settings,
-            commands::choose_save_directory
+            commands::choose_save_directory,
+            commands::regenerate_bridge_token,
+            commands::copy_bridge_token
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -138,31 +144,47 @@ pub fn run() {
 /// `BridgeServer` stops it, so a listener that nothing holds would close on the
 /// next line.
 fn open_bridge(app: &tauri::AppHandle) {
-    let token = match bridge::token::generate_token() {
-        Ok(token) => token,
-        Err(err) => {
-            report::report_failure(
-                app,
-                &format!("the browser extension bridge has no pairing token, so it was not started: {err}"),
-            );
-            return;
-        }
-    };
+    let outcome = start_bridge(app);
+    if let Err(reason) = &outcome {
+        report::report_failure(app, reason);
+    }
+    // Recorded whichever way it went. The report is a line in the log and a
+    // marker in the menu bar, both of which are gone by the time somebody opens
+    // Settings to find out why the extension says nothing is listening.
+    app.state::<bridge::BridgeOutcome>().record(outcome);
+}
+
+/// Starts the listener and answers with the port it took, or with the sentence
+/// the settings window shows instead.
+///
+/// The token is not handed over, only checked. `AppPolicy` reads the one in
+/// force for every handshake, so a token replaced from the settings window
+/// takes effect on the next connection instead of at the next launch; what this
+/// refuses is a bridge with no token at all, which is a listener that could
+/// only ever be paired by presenting the empty string.
+fn start_bridge(app: &tauri::AppHandle) -> Result<u16, String> {
+    if app.state::<AppState>().settings().bridge_token.is_empty() {
+        return Err(
+            "Snapdeck has no pairing token, so the bridge the browser extension connects to was not started. Restart Snapdeck to mint one.".to_string(),
+        );
+    }
 
     let info = bridge::protocol::AppInfo {
         name: app.package_info().name.clone(),
         version: app.package_info().version.to_string(),
     };
-    let policy = std::sync::Arc::new(bridge::intake::AppPolicy::new(app.clone(), token, info));
+    let policy = std::sync::Arc::new(bridge::intake::AppPolicy::new(app.clone(), info));
 
-    match bridge::server::BridgeServer::start(
+    let server = bridge::server::BridgeServer::start(
         bridge::protocol::BRIDGE_PORT,
         policy,
         bridge::server::BridgeLimits::default(),
-    ) {
-        Ok(server) => app.state::<AppState>().set_bridge_server(server),
-        Err(err) => report::report_failure(app, &err),
-    }
+    )?;
+    let port = server.local_addr().port();
+    // The server is handed on rather than dropped here, for the reason
+    // `open_bridge` gives: dropping a `BridgeServer` stops it.
+    app.state::<AppState>().set_bridge_server(server);
+    Ok(port)
 }
 
 /// Puts the stored settings into force at launch, and answers with both the
@@ -190,6 +212,21 @@ fn open_bridge(app: &tauri::AppHandle) {
 /// settings window has no way to catch.
 fn adopt(app: &tauri::AppHandle) -> (Settings, Option<Shortcuts>) {
     let mut settings = settings::load(app);
+    // The pairing token is the third thing that can disagree with the file, and
+    // the only one this fills in rather than reports: a file with no token in
+    // it is a first launch, and a first launch is what mints one.
+    //
+    // First, before either of the two adoptions below. Minting writes the file,
+    // and what it has to write is the file as it stands plus a token: doing it
+    // after the login item has been adopted would put the system's answer to a
+    // question the user did not ask into their settings as a side effect of
+    // pairing an extension.
+    if let Err(err) = settings::ensure_bridge_token(app, &mut settings) {
+        report::report_failure(
+            app,
+            &format!("Snapdeck could not put a pairing token in place for the browser extension ({err})."),
+        );
+    }
     let (bound, complaint) = adopt_shortcuts(
         |shortcuts| register_shortcuts(app, shortcuts),
         &settings.shortcuts,

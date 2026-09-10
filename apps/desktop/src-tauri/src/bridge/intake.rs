@@ -24,9 +24,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use image::{ImageReader, Limits};
 use snapdeck_capture::{Frame, PixelFormat};
-use tauri::image::Image;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::bridge::protocol::{AppInfo, FullPage, ImagePayload, MAX_IMAGE_PIXELS, MAX_PNG_BYTES};
 use crate::bridge::session::BridgePolicy;
@@ -238,21 +236,27 @@ pub fn deliver(
 /// checked.
 pub struct AppPolicy {
     app: AppHandle,
-    /// Minted at launch and shown nowhere yet. Where the token comes from is
-    /// the settings window's business, not the bridge's.
-    token: String,
     info: AppInfo,
 }
 
 impl AppPolicy {
-    pub fn new(app: AppHandle, token: String, info: AppInfo) -> Self {
-        Self { app, token, info }
+    pub fn new(app: AppHandle, info: AppInfo) -> Self {
+        Self { app, info }
     }
 }
 
 impl BridgePolicy for AppPolicy {
+    /// The token in force at this moment, read for every handshake rather than
+    /// copied when the bridge was opened.
+    ///
+    /// A copy would outlive the token it copied. `Regenerate` exists so that a
+    /// user who believes their token has got out can replace it, and a bridge
+    /// still answering to the old one would make that button a lie: the very
+    /// sessions it is meant to lock out would keep pairing until the next
+    /// relaunch. Reading here is what makes a new token take effect on the next
+    /// connection.
     fn token(&self) -> String {
-        self.token.clone()
+        self.app.state::<AppState>().settings().bridge_token
     }
 
     fn app_info(&self) -> AppInfo {
@@ -287,7 +291,7 @@ impl BridgePolicy for AppPolicy {
         // is not.
         let copied = Cell::new(false);
         let Delivered { path, complaint } = deliver(&frame, &directory, &settings, |frame| {
-            let outcome = copy_to_clipboard(&self.app, frame);
+            let outcome = crate::commands::copy_to_clipboard(&self.app, frame);
             copied.set(outcome.is_ok());
             outcome
         });
@@ -335,16 +339,6 @@ impl BridgePolicy for AppPolicy {
             None => Err(complaint.unwrap_or_else(|| NOTHING_DELIVERED.to_owned())),
         }
     }
-}
-
-/// Puts a delivered page's pixels on the clipboard.
-fn copy_to_clipboard(app: &AppHandle, frame: &Frame) -> Result<(), String> {
-    let rgba = frame
-        .to_rgba8()
-        .map_err(|err| format!("failed to convert the page for the clipboard: {err}"))?;
-    app.clipboard()
-        .write_image(&Image::new(&rgba, frame.width, frame.height))
-        .map_err(|err| format!("failed to copy the page to the clipboard: {err}"))
 }
 
 #[cfg(test)]
