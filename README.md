@@ -342,7 +342,7 @@ starting.
 
 ## Architecture
 
-Three parts, in one workspace, with the dependency arrow pointing one way.
+Six parts, in one workspace, with the dependency arrow pointing one way.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -370,6 +370,35 @@ Three parts, in one workspace, with the dependency arrow pointing one way.
 │                           │   │                                 │
 │ no Tauri, no windows,     │   │ no Tauri: saving and copying    │
 │ no files                  │   │ leave through props as a Blob   │
+└─────────────┬─────────────┘   └─────────────────────────────────┘
+              │
+              ▼
+┌───────────────────────────┐   ┌─────────────────────────────────┐
+│ crates/frame              │   │ crates/stitch                   │
+│ snapdeck-frame            │   │ snapdeck-stitch                 │
+│                           │   │                                 │
+│ Frame, PixelFormat, Rect, │◀──│ finds how far one frame         │
+│ the capture error type:   │   │ scrolled past the last and      │
+│ plain data, so a crate    │   │ joins a run of them into one    │
+│ that only reasons about   │   │ picture                         │
+│ pixels never links a      │   │                                 │
+│ platform capture          │   │ pixels in, pixels out: no       │
+│ framework                 │   │ screen, no window, no file      │
+└───────────────────────────┘   └─────────────────────────────────┘
+
+              the browser side, over a loopback bridge
+
+┌───────────────────────────┐   ┌─────────────────────────────────┐
+│ apps/extension            │──▶│ packages/protocol               │
+│ @snapdeck/extension       │   │ @snapdeck/protocol              │
+│                           │   │                                 │
+│ MV3: measures the page,   │   │ the bridge contract as zod       │
+│ plans the scroll, joins   │   │ schemas, imported by the        │
+│ the layers on a canvas,   │   │ extension and mirrored by the   │
+│ hands the PNG to the app  │   │ desktop app, which reads this   │
+│                           │   │ file in its own tests so the    │
+│ falls back to a download  │   │ two cannot drift apart          │
+│ when the app is not there │   │                                 │
 └───────────────────────────┘   └─────────────────────────────────┘
 ```
 
@@ -381,6 +410,24 @@ back pixels and the scale factor they were captured at, and knows nothing about 
 Everything below the `Editor` component is plain TypeScript over the canvas 2D API, so the same
 model, renderer and export could be driven by a browser extension. `Editor` itself takes its host
 through props: a save is a `Blob` leaving through a callback, not a file being written.
+
+**`crates/frame`** holds the picture types and nothing else. They live apart from
+`crates/capture` because they are plain data: a crate that only reasons about pixels, such as
+`crates/stitch`, can take a `Frame` without linking a platform's capture framework and the Swift
+runtime behind it.
+
+**`crates/stitch`** joins overlapping frames. It measures how far one frame scrolled past the one
+before it, drops the rows they share and pastes the rest, and it knows about pixels and nothing
+else, which is what lets every case in its tests be built by hand and compared byte for byte.
+
+**`packages/protocol`** is the bridge contract, written once as zod schemas. The extension imports
+it; the desktop app mirrors it in Rust and reads these very files in its tests, so the two
+languages cannot quietly come to disagree about what a message is.
+
+**`apps/extension`** is the Chrome extension that captures a whole page, described in
+[docs/EXTENSION.md](docs/EXTENSION.md). It asks for no host permissions, hands the finished PNG to
+the desktop app over a connection that never leaves the machine, and falls back to an ordinary
+download when the app is not running.
 
 **`apps/desktop`** is the only part that knows this is a Mac app. Rust owns the tray, the shortcuts,
 the overlay and editor windows, the settings file, the writing and the updater; the React side is
