@@ -1,0 +1,276 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check the manifests against, e.g. v0.1.0. Nothing is published: the run builds the bundles and uploads them as workflow artifacts."
+        required: true
+        type: string
+
+# The draft release and its assets are written with the job's own token.
+permissions:
+  contents: write
+
+# Two runs for the same tag would race each other over the same draft release.
+# Queue the second one rather than cancelling the first: a cancelled run can
+# have uploaded half of the assets already.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag says which version this is. `tauri.conf.json` says which version the
+  # app reports and names its bundles after. `Cargo.toml` says which version the
+  # binary is built as. A release where those three disagree ships a DMG that is
+  # not what its tag claims, and nobody finds out until something refuses to
+  # line up with its own name. So they are compared first, on a cheap runner,
+  # and the build below never starts unless they agree.
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        env:
+          # Empty for a tag push, where the tag is the ref being built.
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          tag="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          conf_version="$(jq -er '.version' apps/desktop/src-tauri/tauri.conf.json)"
+
+          # `[workspace.package] version`, which every crate in the workspace
+          # inherits.
+          cargo_version="$(
+            awk '
+              /^\[workspace\.package\]/ { in_section = 1; next }
+              /^\[/                     { in_section = 0 }
+              in_section && /^version[[:space:]]*=/ {
+                gsub(/[",]/, "", $3); print $3; exit
+              }
+            ' Cargo.toml
+          )"
+
+          echo "tag              $tag -> $version"
+          echo "tauri.conf.json  $conf_version"
+          echo "Cargo.toml       $cargo_version"
+
+          failed=0
+
+          if [ -z "$version" ] || [ "$version" = "$tag" ]; then
+            echo "::error::'$tag' is not a version tag: it has to look like v0.1.0"
+            failed=1
+          fi
+
+          if [ "$conf_version" != "$version" ]; then
+            echo "::error::apps/desktop/src-tauri/tauri.conf.json says $conf_version, the tag says $version"
+            failed=1
+          fi
+
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::Cargo.toml [workspace.package] says $cargo_version, the tag says $version"
+            failed=1
+          fi
+
+          # The app crate carries no version of its own, so the workspace
+          # version above is the version the binary is built as. If that ever
+          # stops being true, this check is reading the wrong file and has to
+          # say so rather than keep passing.
+          if ! grep -qx 'version.workspace = true' apps/desktop/src-tauri/Cargo.toml; then
+            echo "::error::apps/desktop/src-tauri/Cargo.toml no longer inherits [workspace.package] version"
+            failed=1
+          fi
+
+          [ "$failed" -eq 0 ] || exit 1
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: version
+    # macos-latest, not a pinned older image, for the reason CI's `rust` job
+    # gives: screencapturekit's apple-metal dependency builds a Swift bridge
+    # that needs a Metal SDK macos-14 does not ship. The app's own runtime
+    # baseline is still macOS 14.0, set in `tauri.conf.json`.
+    runs-on: macos-latest
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      # Signing and notarization are one unit here: a Developer ID build that is
+      # not notarized is still stopped by Gatekeeper, and Tauri fails outright
+      # when handed only part of the notarization credentials. So all six or
+      # none, and none is a supported outcome.
+      SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # No `version:` input: it must not disagree with packageManager in
+      # package.json, and the action reads that field on its own.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install the frontend dependencies
+        # The root `prepare` script downloads the Chromium the editor's tests
+        # are driven in. This job builds the app and never runs them, and that
+        # download is 150 MB of nothing on every release.
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: pnpm install --frozen-lockfile
+
+      # Runs only when every Developer ID secret is set. When they are not, the
+      # variables stay absent and `tauri build` produces the same ad-hoc signed
+      # bundle a developer gets locally, rather than failing: Tauri reads these
+      # with `var_os`, which cannot tell an empty variable from an unset one, so
+      # passing them through unconditionally would break every unsigned build.
+      - name: Provide the Apple Developer ID credentials
+        if: env.SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            # The delimited form, because a pasted certificate is allowed to
+            # carry newlines.
+            {
+              printf '%s<<SNAPDECK_SECRET_EOF\n' "$name"
+              printf '%s\n' "${!name}"
+              printf 'SNAPDECK_SECRET_EOF\n'
+            } >> "$GITHUB_ENV"
+          done
+
+      - name: Build the app
+        run: pnpm tauri build
+
+      - name: Collect the bundles
+        id: bundles
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bundle=target/release/bundle
+          app="$bundle/macos/Snapdeck.app"
+          [ -d "$app" ] || { echo "::error::no app bundle at $app"; exit 1; }
+
+          dmgs=("$bundle"/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one DMG in $bundle/dmg, found ${#dmgs[@]}"
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
+
+          # `Snapdeck_0.1.0_aarch64`, which already carries the architecture the
+          # runner built for, so the tarball beside it is named the same way
+          # without this workflow having to know what that architecture was.
+          base="$(basename "$dmg" .dmg)"
+
+          mkdir -p dist
+          cp "$dmg" "dist/$base.dmg"
+          # macOS `tar` writes an AppleDouble `._` file beside every entry with
+          # extended attributes unless this is set, and an app bundle has them.
+          COPYFILE_DISABLE=1 tar -czf "dist/$base.app.tar.gz" -C "$bundle/macos" Snapdeck.app
+
+          ( cd dist && shasum -a 256 "$base.dmg" "$base.app.tar.gz" > SHA256SUMS.txt )
+
+          # What Gatekeeper will see, read off the bundle rather than inferred
+          # from which secrets happened to be set. An ad-hoc signature, which is
+          # what the linker leaves on an Apple silicon build, has no authority.
+          if codesign --display --verbose=2 "$app" 2>&1 | grep -q '^Authority=Developer ID Application'; then
+            signed=true
+          else
+            signed=false
+          fi
+          echo "signed: $signed"
+
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+
+      - name: Write the release notes
+        id: notes
+        env:
+          BASE: ${{ steps.bundles.outputs.base }}
+          SIGNED: ${{ steps.bundles.outputs.signed }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+
+          {
+            echo "Snapdeck $VERSION for macOS 14 or later, on Apple silicon."
+            echo
+            echo "## Install"
+            echo
+            echo "1. Download \`$BASE.dmg\`, open it and drag **Snapdeck** into Applications."
+            if [ "$SIGNED" = true ]; then
+              echo "2. Open Snapdeck from Applications. This build is signed with an Apple Developer ID and notarized, so macOS opens it without a warning."
+            else
+              echo "2. **This build is not signed with an Apple Developer ID**, so macOS will not open it on a double-click. Control-click (or right-click) Snapdeck in Applications, choose **Open**, and confirm. On macOS 15 and later it may have to be allowed from System Settings > Privacy & Security instead, under an **Open Anyway** button. If macOS refuses both ways, wording it as Snapdeck being damaged rather than unverified, strip the quarantine flag yourself with \`xattr -dr com.apple.quarantine /Applications/Snapdeck.app\`. It is once per install either way."
+            fi
+            echo "3. Snapdeck is a menu bar app: it has no Dock icon and opens no window on launch."
+            echo "4. The first capture asks for Screen Recording permission. Grant it in System Settings > Privacy & Security > Screen & System Audio Recording, then **quit Snapdeck and open it again**. macOS decides what a process may capture when the process starts, so a running Snapdeck cannot see a permission granted after launch."
+            echo
+            echo "## Signing"
+            echo
+            if [ "$SIGNED" = true ]; then
+              echo "Signed with an Apple Developer ID certificate and notarized by Apple."
+            else
+              echo "Unsigned: there is no Apple Developer ID for this project, so the bundle carries only the ad-hoc signature the linker leaves on its executable, and Gatekeeper cannot assess it. The app is identical either way; what differs is that macOS cannot attribute it to a developer, which is why the first launch needs the step above."
+            fi
+            echo
+            echo "## Checksums"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } > "$notes"
+
+          echo "path=$notes" >> "$GITHUB_OUTPUT"
+          cat "$notes" >> "$GITHUB_STEP_SUMMARY"
+
+      # Uploaded on every run, including the manual ones that publish nothing:
+      # this is what makes the workflow provable without cutting a release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapdeck-${{ needs.version.outputs.version }}-macos
+          path: dist
+          if-no-files-found: error
+
+      # Only a tag push publishes, and it publishes a draft: a human decides
+      # when the release goes public.
+      - name: Open the draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ steps.notes.outputs.path }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # No --draft here: re-running the build must not un-publish a
+            # release a human has already decided to publish.
+            gh release edit "$TAG" --title "Snapdeck $VERSION" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" --draft --title "Snapdeck $VERSION" --notes-file "$NOTES"
+          fi
+          gh release upload "$TAG" dist/* --clobber
