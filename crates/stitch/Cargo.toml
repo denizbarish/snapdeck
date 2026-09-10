@@ -1,0 +1,12 @@
+[package]
+name = "snapdeck-stitch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Joins overlapping scroll frames into a single picture"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+snapdeck-capture = { path = "../capture" }

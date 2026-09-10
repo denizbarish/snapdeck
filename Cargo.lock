@@ -3477,6 +3477,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapdeck-stitch"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "snapdeck-capture",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
