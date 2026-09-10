@@ -97,6 +97,9 @@ pub fn run() {
             // in the application that reads a setting to decide whether it may
             // happen at all: it does nothing unless the user has turned it on.
             updater::check_at_launch(&handle);
+            // Last, because it is the one thing here that can fail without the
+            // launch failing with it, and it has to be able to report that.
+            open_bridge(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -120,6 +123,46 @@ pub fn run() {
             RunEvent::Exit => overlay::discard_cached_frozen_frames(app),
             _ => {}
         });
+}
+
+/// Opens the loopback bridge the browser extension connects to, or tells the
+/// user why it could not be opened.
+///
+/// A bridge that cannot listen is not a reason to fail the launch. The port is
+/// a fixed one and anything on this machine may already hold it, and every
+/// other way of taking a screenshot still works without a bridge; what the user
+/// must not get is silence, because from the browser's side a bridge that is
+/// not running and one that refused them look the same.
+///
+/// The server is handed to `AppState` rather than dropped here: dropping a
+/// `BridgeServer` stops it, so a listener that nothing holds would close on the
+/// next line.
+fn open_bridge(app: &tauri::AppHandle) {
+    let token = match bridge::token::generate_token() {
+        Ok(token) => token,
+        Err(err) => {
+            report::report_failure(
+                app,
+                &format!("the browser extension bridge has no pairing token, so it was not started: {err}"),
+            );
+            return;
+        }
+    };
+
+    let info = bridge::protocol::AppInfo {
+        name: app.package_info().name.clone(),
+        version: app.package_info().version.to_string(),
+    };
+    let policy = std::sync::Arc::new(bridge::LaunchPolicy::new(token, info));
+
+    match bridge::server::BridgeServer::start(
+        bridge::protocol::BRIDGE_PORT,
+        policy,
+        bridge::server::BridgeLimits::default(),
+    ) {
+        Ok(server) => app.state::<AppState>().set_bridge_server(server),
+        Err(err) => report::report_failure(app, &err),
+    }
 }
 
 /// Puts the stored settings into force at launch, and answers with both the

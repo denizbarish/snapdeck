@@ -59,6 +59,15 @@ thiserror.workspace = true
 # `updater::is_upgrade`, which is the one place this application decides what
 # counts as an update.
 semver = "1"
+# The bridge's WebSocket server. Tauri's ecosystem has no server-side one:
+# `tauri-plugin-websocket` is a client and `tauri-plugin-localhost` serves the
+# application's own page. `accept_hdr_with_config` hands over the handshake
+# headers, which is where `Origin` is read, and `WebSocketConfig` carries the
+# size limit; those are exactly the two hooks the gates need. The synchronous
+# build is the one taken: the bridge sees a handful of connections in its life,
+# a thread per session is simpler than an async task, and no `tokio` comes with
+# it. Default features carry no TLS, and the crate's MSRV is the workspace's.
+tungstenite = "0.30"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The overlay window has to be lifted above the menu bar and allowed over a

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use snapdeck_capture::macos::MacCapturer;
 
+use crate::bridge::server::BridgeServer;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 
@@ -126,6 +127,15 @@ pub struct AppState {
     /// `lib::run`'s setup replaces it with what was on disk before the tray can
     /// be clicked.
     recent_captures: Mutex<Vec<PathBuf>>,
+    /// The loopback listener the browser extension connects to, while it is
+    /// running.
+    ///
+    /// Held here because a `BridgeServer` stops the moment it is dropped: this
+    /// field is what keeps the bridge open for the life of the process. `None`
+    /// when the port could not be taken, which `lib::run`'s setup reports and
+    /// then carries on from, since every other way of taking a screenshot still
+    /// works without it.
+    bridge_server: Mutex<Option<BridgeServer>>,
 }
 
 impl AppState {
@@ -140,6 +150,7 @@ impl AppState {
             registered_shortcuts: Mutex::new(None),
             settings_window_id: Mutex::new(None),
             recent_captures: Mutex::new(Vec::new()),
+            bridge_server: Mutex::new(None),
         }
     }
 
@@ -222,6 +233,18 @@ impl AppState {
         self.registered_shortcuts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Keeps a running bridge alive for as long as the application is.
+    ///
+    /// Poisoning is treated as recoverable for the reason `overlay_ids` gives:
+    /// the whole value is replaced, and propagating an unrelated panic here
+    /// would drop the listener the extension is connected to.
+    pub fn set_bridge_server(&self, server: BridgeServer) {
+        *self
+            .bridge_server
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(server);
     }
 
     /// Records the settings window's id, or forgets it once the window is gone.
