@@ -8,6 +8,7 @@ mod settings_window;
 mod shortcuts;
 mod state;
 mod tray;
+mod update_history;
 mod updater;
 
 use settings::Settings;

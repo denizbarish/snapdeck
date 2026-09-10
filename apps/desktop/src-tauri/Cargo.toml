@@ -61,3 +61,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # `MainThreadMarker`, which is what makes touching a main-thread-only `NSWindow`
 # from a raw pointer checked rather than assumed.
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The refusal itself, tested rather than assumed. `tauri-plugin-updater` keeps
+# its `verify_signature` private, so the test calls what that function calls:
+# both crates are already in the tree as dependencies of the plugin, and the
+# versions here are the ones it already resolves to.
+minisign-verify = "0.2"
+base64 = "0.22"

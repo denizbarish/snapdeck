@@ -449,7 +449,12 @@ static NEXT_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// the reason `commands::temporary_name` gives: a probe interrupted between the
 /// create and the unlink leaves nothing the user has to recognise, and two
 /// probes at once cannot land on one name.
-fn probe_name() -> String {
+///
+/// Shared with `updater::takes_a_write`, which asks the same question about the
+/// folder Snapdeck is installed in and must not answer it with a second naming
+/// scheme: two probe names is two things to recognise in a folder listing after
+/// a crash.
+pub(crate) fn probe_name() -> String {
     let sequence = NEXT_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(".snapdeck-write-probe-{}-{sequence}", std::process::id())
 }
@@ -546,13 +551,13 @@ mod tests {
     /// changed later. `assert_eq!(commands::TEMPLATE, settings.template)` would
     /// pass right up until the moment it stopped mattering.
     ///
-    /// All eleven, not the seven with an obvious reason to state one.
+    /// All twelve, not the seven with an obvious reason to state one.
     /// `editor.rs`, `overlay.rs` and `report.rs` have no such reason today,
     /// which is not a reason to leave them unread: the list is a rule about the
     /// crate, and a rule with three holes in it is where the next copy goes.
-    /// Every module added to the crate joins it, which is why `updater.rs` is
-    /// here.
-    const SOURCES: [(&str, &str); 11] = [
+    /// Every module added to the crate joins it, which is why `updater.rs` and
+    /// `update_history.rs` are here.
+    const SOURCES: [(&str, &str); 12] = [
         ("commands.rs", include_str!("commands.rs")),
         ("editor.rs", include_str!("editor.rs")),
         ("lib.rs", include_str!("lib.rs")),
@@ -563,6 +568,7 @@ mod tests {
         ("shortcuts.rs", include_str!("shortcuts.rs")),
         ("state.rs", include_str!("state.rs")),
         ("tray.rs", include_str!("tray.rs")),
+        ("update_history.rs", include_str!("update_history.rs")),
         ("updater.rs", include_str!("updater.rs")),
     ];
 

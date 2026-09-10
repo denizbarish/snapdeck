@@ -3446,8 +3446,10 @@ checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 name = "snapdeck"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "image",
+ "minisign-verify",
  "objc2",
  "objc2-app-kit",
  "percent-encoding",

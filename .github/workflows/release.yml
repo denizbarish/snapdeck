@@ -330,6 +330,79 @@ jobs:
           signature="$(cat "$archive.sig")"
           rm "$archive.sig"
 
+          # Proof that the two halves of the key are two halves of one key.
+          #
+          # Nothing else in this workflow can tell. A wrong, truncated or
+          # rotated `TAURI_SIGNING_PRIVATE_KEY` signs perfectly well and
+          # produces a release that looks right on the draft: the manifest is
+          # there, with the right version and the right URL. Every installed
+          # copy then downloads the archive, checks it against the public key
+          # compiled into its own bundle, refuses it, and says so in a tooltip
+          # on somebody else's Mac. That is the whole failure signal, and it
+          # arrives after the release is out.
+          #
+          # Both halves are already in this step, so the check is free: the
+          # signature that was just produced, and the public key the build was
+          # compiled with. Node rather than a `minisign` binary because the
+          # runner already has one and installing a tool to verify the release
+          # is a second thing that can be missing on release day.
+          pubkey="$(jq -er '.plugins.updater.pubkey' apps/desktop/src-tauri/tauri.conf.json)"
+          ARCHIVE="$archive" SIGNATURE="$signature" PUBKEY="$pubkey" node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+
+            const fail = (why) => {
+              console.error("::error::" + why);
+              process.exit(1);
+            };
+
+            // A minisign public key file and signature file are both base64
+            // wrapped in comment lines, and both decode to a two-byte
+            // algorithm, an eight-byte key id, and then the key or signature.
+            const lines = (text) =>
+              text.split("\n").filter((line) => line.trim() !== "" && !line.includes("comment:"));
+            const decode = (value) => Buffer.from(value, "base64");
+
+            const key = decode(lines(decode(process.env.PUBKEY).toString("utf8"))[0] || "");
+            const sig = decode(lines(decode(process.env.SIGNATURE).toString("utf8"))[0] || "");
+            if (key.length !== 42) fail("plugins.updater.pubkey is not a minisign public key");
+            if (sig.length !== 74) fail("the signer did not produce a minisign signature");
+
+            const keyId = key.subarray(2, 10).toString("hex");
+            const sigId = sig.subarray(2, 10).toString("hex");
+            if (keyId !== sigId) {
+              fail(
+                "TAURI_SIGNING_PRIVATE_KEY is key " + sigId + " and this build ships key " + keyId +
+                ". Every installed copy would refuse this release. Fix the secret or plugins.updater.pubkey in tauri.conf.json."
+              );
+            }
+
+            const algorithm = sig.subarray(0, 2).toString("utf8");
+            const archive = fs.readFileSync(process.env.ARCHIVE);
+            let signed;
+            if (algorithm === "ED") {
+              signed = crypto.createHash("blake2b512").update(archive).digest();
+            } else if (algorithm === "Ed") {
+              signed = archive;
+            } else {
+              fail("unknown minisign algorithm " + JSON.stringify(algorithm));
+            }
+
+            // Ed25519 raw key to SPKI, which is the only form Node accepts.
+            const spki = Buffer.concat([
+              Buffer.from("302a300506032b6570032100", "hex"),
+              key.subarray(10),
+            ]);
+            const publicKey = crypto.createPublicKey({ key: spki, format: "der", type: "spki" });
+            if (!crypto.verify(null, signed, publicKey, sig.subarray(10))) {
+              fail(
+                "the signature over " + process.env.ARCHIVE +
+                " does not verify against plugins.updater.pubkey, so no installed copy would accept this release."
+              );
+            }
+            console.log("signing key " + keyId + " matches the public key this build ships");
+          '
+
           # The updater looks the platform up by `{os}-{arch}`, and the DMG's
           # own name carries the architecture Tauri built for. Mapped rather
           # than passed through: the two vocabularies agree on `aarch64` and
@@ -375,6 +448,19 @@ jobs:
 
           echo "manifest for $platform:"
           jq '.platforms[].signature = "<signature>"' dist/latest.json
+
+          # `latest.json` is the one published asset with no line in
+          # `SHA256SUMS.txt`, and that is a consequence of the order rather than
+          # an oversight. The checksums are written before this step because the
+          # release notes quote them, and the manifest embeds those same notes,
+          # so a checksum of the manifest would have to be taken before the
+          # manifest exists. Nothing is lost by it: `SHA256SUMS.txt` is there so
+          # a person can check a download they made by hand, and the manifest is
+          # never downloaded by hand. What protects an installed copy from a
+          # manifest that has been tampered with is not a checksum published
+          # beside it, which an endpoint that could rewrite one could rewrite
+          # too, but the signature the manifest carries over the archive and the
+          # public key compiled into the bundle. See `docs/RELEASING.md`.
 
       # Said out loud rather than left to be discovered. A release with no
       # manifest is a release nobody can update to: every installed copy asks

@@ -163,13 +163,17 @@ export function SettingsWindow(): JSX.Element {
     setShortcutProblem(view.shortcutProblem)
   }, [])
 
+  // Through `applyView` rather than by setting the fields here, so that the two
+  // places a `SettingsView` arrives, this load and the save below, render it the
+  // same way. Setting two of the three fields by hand was the one point at which
+  // they could disagree: a `shortcutProblem` left over from a failed save would
+  // have survived a reload that is supposed to show what Rust says now.
   useEffect(() => {
     let abandoned = false
     invoke<SettingsView>('get_settings')
       .then((loaded) => {
         if (!abandoned) {
-          setSettings(loaded.settings)
-          setBoundShortcuts(loaded.boundShortcuts)
+          applyView(loaded)
         }
       })
       .catch((error: unknown) => {
@@ -180,7 +184,7 @@ export function SettingsWindow(): JSX.Element {
     return () => {
       abandoned = true
     }
-  }, [])
+  }, [applyView])
 
   // The recorder. Bound to the window rather than to the button, because the
   // combinations worth binding are the ones macOS would otherwise route

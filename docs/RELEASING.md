@@ -142,6 +142,21 @@ whatever backup the maintainer keeps. The matching public key is `plugins.update
 `apps/desktop/src-tauri/tauri.conf.json`, ships inside every build, and is what makes the check work
 on a machine that has never seen this repository.
 
+It is worth being plain about what a repository secret is and is not. `TAURI_SIGNING_PRIVATE_KEY` is
+an ordinary, unprotected repository secret, so anybody with write access to this repository can sign
+arbitrary bytes with it: a workflow file is a thing they can add, a workflow is a thing that can read
+the secret, and the key does not know the difference between an archive this workflow built and one
+somebody handed it. Nothing in this repository stops that today. A GitHub Environment with required
+reviewers, holding the two updater secrets and named by the release job, would: the job would then
+wait for a human to approve before the secrets were available to it, and a workflow added by somebody
+else could not reach them at all.
+
+The self-check in the signing step is a different question and does not answer this one. It proves
+that the secret in use and the key in the bundle are two halves of one key, by verifying the
+signature it just produced against `plugins.updater.pubkey`. Without it, a wrong, truncated or
+rotated secret produces a release that looks perfect on the draft, and the only signal is that every
+installed copy refuses the download it fetches. The job now fails instead.
+
 Losing the private key is not recoverable in place. A new key means a new `pubkey` in
 `tauri.conf.json`, and every copy already installed carries the old one: those installations can
 still check for updates, but they will refuse every download signed with the new key, and their
@@ -167,6 +182,17 @@ signature it carries is taken over the exact `.app.tar.gz` being uploaded in the
 names that same asset, and the version is the one the version job already proved the tag,
 `tauri.conf.json` and `Cargo.toml` agree on. There is no moment at which the manifest and the
 release can come to describe different builds.
+
+`latest.json` is the only published asset with no line in `SHA256SUMS.txt`, and that follows from the
+order rather than from an oversight: the checksums are written before the manifest, because the
+release notes quote them and the manifest embeds those same notes. Nothing is lost by it.
+`SHA256SUMS.txt` exists so a person can check a download they made by hand, and nobody downloads the
+manifest by hand. What protects an installed copy from a tampered manifest is not a checksum
+published beside it, which anybody able to rewrite the one could rewrite the other, but the signature
+the manifest carries over the archive and the public key compiled into the bundle. The version, the
+notes, the URL and the date in it are not signed by anything, which is why the app measures a
+manifest against the highest version it has ever run and refuses a download URL on any host but
+GitHub.
 
 ```json
 {
