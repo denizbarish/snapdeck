@@ -8,6 +8,6 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "tauri": "pnpm --filter @snapdeck/desktop tauri",
-    "prepare": "pnpm --filter @snapdeck/editor --filter @snapdeck/extension exec playwright install chromium"
+    "prepare": "pnpm --filter @snapdeck/editor exec playwright install chromium && pnpm --filter @snapdeck/extension exec playwright install chromium"
   }
 }

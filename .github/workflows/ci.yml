@@ -65,7 +65,13 @@ jobs:
       # and the second install is a few seconds of finding it already there. The
       # day one of them moves, that coincidence ends, and a browser project with
       # no browser is not a failure this job should have to diagnose.
-      - run: pnpm --filter @snapdeck/editor --filter @snapdeck/extension exec playwright install --with-deps chromium
+      #
+      # Two runs rather than one command with two filters: pnpm runs filtered
+      # commands in parallel, both of these call apt-get, and the second one
+      # loses the lock. The system packages are the same for both and only the
+      # first run needs them.
+      - run: pnpm --filter @snapdeck/editor exec playwright install --with-deps chromium
+      - run: pnpm --filter @snapdeck/extension exec playwright install chromium
       - run: pnpm test
       # The bundle the app actually loads. Without it the Vite build, the two
       # HTML entry points and the TypeScript in them are unexercised on every
