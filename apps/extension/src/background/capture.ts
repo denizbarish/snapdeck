@@ -65,10 +65,29 @@ export async function captureFullPage(
   } finally {
     // A failed capture costs the user a screenshot. A page left scrolled with
     // its header invisible costs them a reload, and they have no way of knowing
-    // that is what it needs.
-    await deps.setPinnedHidden(false)
-    await deps.restoreScroll()
+    // that is what it needs. Both repairs are attempted even if the first one
+    // fails, because they undo two separate things.
+    await attemptRepair(deps.setPinnedHidden(false))
+    await attemptRepair(deps.restoreScroll())
   }
 
-  return { blob: await compositeToPng(layers, plan, metrics.devicePixelRatio), plan, metrics }
+  try {
+    return { blob: await compositeToPng(layers, plan, metrics.devicePixelRatio), plan, metrics }
+  } finally {
+    // Every layer is a bitmap the size of the window. A long page holds dozens
+    // of them at once, and waiting for the collector to notice is how a service
+    // worker with a memory ceiling gets killed in the middle of a capture.
+    for (const layer of layers) {
+      layer.bitmap.close()
+    }
+  }
+}
+
+/** Runs a repair, and reports its failure rather than raising it. */
+async function attemptRepair(repair: Promise<void>): Promise<void> {
+  try {
+    await repair
+  } catch (error) {
+    console.warn('snapdeck: could not put the page back', error)
+  }
 }

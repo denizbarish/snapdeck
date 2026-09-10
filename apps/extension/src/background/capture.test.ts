@@ -43,10 +43,22 @@ function metricsOf(
   return { documentHeight, viewportHeight, viewportWidth, devicePixelRatio }
 }
 
-/** Stands in for a captured viewport: the loop only ever hands it on. */
-const FAKE_BITMAP = { width: 1, height: 1 } as unknown as ImageBitmap
+/**
+ * Stands in for a captured viewport. It counts its own closing, because a
+ * bitmap the size of the window is the largest thing the loop holds.
+ */
+function fakeBitmap(closed: ImageBitmap[]): ImageBitmap {
+  const bitmap = {
+    width: 1,
+    height: 1,
+    close: () => {
+      closed.push(bitmap)
+    },
+  } as unknown as ImageBitmap
+  return bitmap
+}
 
-type Recorded = { deps: CaptureDeps; calls: string[] }
+type Recorded = { deps: CaptureDeps; calls: string[]; closed: ImageBitmap[] }
 
 /**
  * Records every call in order. `failAtCapture` is 1-based and makes that
@@ -54,6 +66,7 @@ type Recorded = { deps: CaptureDeps; calls: string[] }
  */
 function record(metrics: PageMetrics, failAtCapture?: number): Recorded {
   const calls: string[] = []
+  const closed: ImageBitmap[] = []
   let captures = 0
   const deps: CaptureDeps = {
     measure: () => {
@@ -78,14 +91,14 @@ function record(metrics: PageMetrics, failAtCapture?: number): Recorded {
       if (captures === failAtCapture) {
         return Promise.reject(new Error('the tab refused the capture'))
       }
-      return Promise.resolve(FAKE_BITMAP)
+      return Promise.resolve(fakeBitmap(closed))
     },
     restoreScroll: () => {
       calls.push('restoreScroll')
       return Promise.resolve()
     },
   }
-  return { deps, calls }
+  return { deps, calls, closed }
 }
 
 /** Runs the loop to completion with the throttle's sleeps fast-forwarded. */
@@ -179,5 +192,33 @@ describe('captureFullPage', () => {
     expect(outcome.metrics).toEqual(metrics)
     expect(outcome.plan).toEqual(planScroll(metrics, budget))
     expect(outcome.plan.truncated).toBe(true)
+  })
+
+  it('closes every captured layer once the composite is made', async () => {
+    // Each layer is a bitmap the size of the window: a ten step page on a
+    // retina screen is hundreds of megabytes held at once. A service worker
+    // with a memory ceiling is killed for that, mid capture.
+    const { deps, closed } = record(metricsOf(2500, 1000))
+
+    const result = await run(deps, NO_LIMIT)
+
+    expect(result).not.toBeInstanceOf(Error)
+    expect(closed).toHaveLength(3)
+  })
+
+  it('puts the scroll back even when unhiding the pinned elements fails', async () => {
+    // Two repairs undoing two separate things. Awaiting them in a row means the
+    // first one throwing leaves the page scrolled to the middle, which is the
+    // half the user actually notices.
+    const { deps, calls } = record(metricsOf(2500, 1000))
+    deps.setPinnedHidden = (hidden: boolean) => {
+      calls.push(`setPinnedHidden(${String(hidden)})`)
+      return hidden ? Promise.resolve() : Promise.reject(new Error('the tab is gone'))
+    }
+
+    const result = await run(deps, NO_LIMIT)
+
+    expect(result).not.toBeInstanceOf(Error)
+    expect(calls).toContain('restoreScroll')
   })
 })
