@@ -249,6 +249,52 @@ capture where it is: the unredacted PNG stays in `~/Pictures` beside the redacte
 same name. If the point of the redaction was that the original should not exist, save as PNG, which
 replaces the capture, or delete the PNG yourself.
 
+## Settings
+
+`Settings…` in the menu bar opens them. Nothing needs a relaunch: a change is in force as soon as
+you save it.
+
+**Shortcuts.** The three capture shortcuts are rebindable. Click one and press the combination you
+want; there is no text field, so what you press is what you get. The defaults avoid the macOS
+screenshot bindings on `Cmd+Shift+3/4/5`.
+
+If a combination is already held by another application, macOS refuses to give it to Snapdeck. The
+rebind is then refused as a whole rather than half applied, your previous binding is left as it was
+on disk, and the window tells you the shortcut is not currently bound. The rest of your changes
+still save: a save that only moves the folder does not fail because a shortcut is contested.
+
+**Save folder.** `~/Pictures` unless you choose another. The folder you pick is proved writable by
+writing to it, not by inspecting a permission bit, so a folder that will not work is refused while
+you are still looking at the dialog. If it stops being writable later, because a volume was
+unplugged or a permission changed, the capture falls back to `~/Pictures` and says so rather than
+losing the picture.
+
+**Filename template.** `Snapdeck {date} at {time}` by default. The tokens are `{date}`, `{time}`,
+`{width}` and `{height}`, and the last two are the file's real pixel dimensions. Anything that
+looks like a path separator becomes a hyphen, so a template cannot write outside the folder you
+chose, and a name that is already taken gets a numeric suffix rather than overwriting the file that
+is there.
+
+**Default format.** PNG or JPEG, PNG by default. A screenshot is the worst case for a lossy
+encoder: it is mostly hard edges, and most of those edges are letters. JPEG is there for when the
+file has to be small enough to send.
+
+**Open the editor after a capture.** On by default. Turn it off and a capture is written and
+copied without the editor appearing, which is the faster path when you already know you are not
+going to annotate it.
+
+**Launch at login.** Off by default.
+
+**Check for updates at launch.** Off by default, and deliberately so: it is the only network
+connection Snapdeck makes, and one that happens because nobody turned it off is not one you asked
+for. `Check for Updates…` in the menu bar works whatever this is set to.
+
+Settings live in `~/Library/Application Support/com.snapdeck.app/settings.json`. You can edit it by
+hand; Snapdeck reads it on launch. A missing field is filled in from the default, a misspelled one
+makes Snapdeck complain rather than quietly ignore what you meant, and a file it cannot parse at
+all is reported in the log and replaced with the defaults, so a bad edit never stops the app from
+starting.
+
 ## Architecture
 
 Three parts, in one workspace, with the dependency arrow pointing one way.

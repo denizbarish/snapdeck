@@ -320,6 +320,44 @@ async function settle(): Promise<void> {
   })
 }
 
+/**
+ * How long an assertion that cannot pass until a picture has been encoded is
+ * given.
+ *
+ * `vi.waitFor` allows one second, and one second is the wrong budget to hold a
+ * `convertToBlob` to. Encoding this canvas was measured at 9-25 ms on every
+ * save in this file across about a hundred and forty instrumented runs, with
+ * one exception: the first encode a page performs sometimes returns after
+ * roughly 1005 ms instead. Six of those were caught, at 1004, 1005, 1005,
+ * 1042, 1048 and 1053 ms, and nothing was ever measured in between: no encode
+ * in any run took between 25 ms and a second. A gap like that is a fallback
+ * timer inside the browser and not a machine under load, which a spread of
+ * intermediate times would have looked like. The component is not part of it
+ * either: `deliver` calls `toBlob` synchronously while handling the keydown,
+ * and from there it only awaits the promise.
+ *
+ * So a browser that stalls for 1005 ms was being measured against a deadline of
+ * 1000, and whichever test saved first lost that coin toss about one run in
+ * twenty. It was `does not let Cmd+S reach the host`, the first save in the
+ * file, and it would have moved to whatever test took that place next.
+ *
+ * Five seconds sits well clear of the stall and well inside the thirty this
+ * project allows a browser test, so a delivery that never arrives still fails,
+ * and still fails long before the suite gives up on the test.
+ */
+const DELIVERY_DEADLINE = 5_000
+
+/**
+ * `vi.waitFor` for the things a delivery produces: the blobs a host was handed,
+ * and the status bar lines that only appear once one has been.
+ *
+ * Everything else in this file waits on a React commit, which is a frame away,
+ * and keeps the shorter default.
+ */
+async function waitForDelivery<T>(assertion: () => T | Promise<T>): Promise<T> {
+  return vi.waitFor(assertion, { timeout: DELIVERY_DEADLINE })
+}
+
 describe('drawing', () => {
   // One case per tool, because "the toolbar works" is not a thing a test can
   // fail on and "the rectangle tool produced a rectangle" is. The hit point is
@@ -638,7 +676,7 @@ describe('the keyboard while a text box is open', () => {
       const save = probe.seen.find((event) => event.key.toLowerCase() === 's')
       expect(save).toBeDefined()
       expect(save?.defaultPrevented).toBe(true)
-      await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+      await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
     } finally {
       probe.stop()
     }
@@ -783,8 +821,8 @@ describe('saving and the clipboard', () => {
 
     await userEvent.click(byTestId('save'))
 
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
-    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.copied).toHaveLength(1))
     // The bytes just encoded, not a second export: the file and the clipboard
     // cannot then be different pictures.
     expect(delivered.copied[0]).toBe(delivered.saved[0])
@@ -803,8 +841,8 @@ describe('saving and the clipboard', () => {
 
     await userEvent.click(byTestId('save'))
 
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
-    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.copied).toHaveLength(1))
     expect((delivered.saved[0] as Blob).type).toBe('image/jpeg')
     expect((delivered.copied[0] as Blob).type).toBe('image/png')
   })
@@ -819,7 +857,7 @@ describe('saving and the clipboard', () => {
 
     await userEvent.click(byTestId('save'))
 
-    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.copied).toHaveLength(1))
     const bitmap = await createImageBitmap(delivered.copied[0] as Blob)
     try {
       expect(bitmap.width).toBe(200)
@@ -835,7 +873,7 @@ describe('saving and the clipboard', () => {
   it('leaves the clipboard alone when nothing was edited', async () => {
     await userEvent.click(byTestId('save'))
 
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
     await settle()
     expect(delivered.copied).toHaveLength(0)
   })
@@ -851,8 +889,8 @@ describe('saving and the clipboard', () => {
 
     await userEvent.click(byTestId('save'))
 
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
-    await vi.waitFor(() => expect(byTestId('notice').textContent ?? '').toContain('clipboard'))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(byTestId('notice').textContent ?? '').toContain('clipboard'))
     expect(byTestId('notice').textContent ?? '').not.toContain('could not be saved')
   })
 })
@@ -866,12 +904,12 @@ describe('the status bar', () => {
   it('clears a delivery warning once a later save works', async () => {
     delivered.failNext = true
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() => expect(maybeTestId('notice')?.textContent ?? '').toContain('could not be saved'))
+    await waitForDelivery(() => expect(maybeTestId('notice')?.textContent ?? '').toContain('could not be saved'))
     expect(delivered.saved).toHaveLength(0)
 
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
-    await vi.waitFor(() => expect(maybeTestId('notice')).toBeNull())
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(maybeTestId('notice')).toBeNull())
   })
 })
 
@@ -885,7 +923,7 @@ describe('the save format', () => {
     expect(byTestId('format-jpeg').getAttribute('aria-pressed')).toBe('false')
 
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
     expect(delivered.types[0]).toBe('image/png')
     expect((delivered.saved[0] as Blob).type).toBe('image/png')
 
@@ -894,7 +932,7 @@ describe('the save format', () => {
     expect(byTestId('format-png').getAttribute('aria-pressed')).toBe('false')
 
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(2))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(2))
     expect(delivered.types[1]).toBe('image/jpeg')
     expect((delivered.saved[1] as Blob).type).toBe('image/jpeg')
   })
@@ -904,7 +942,7 @@ describe('the save format', () => {
   it('copies losslessly even with JPEG chosen', async () => {
     await userEvent.click(byTestId('format-jpeg'))
     await userEvent.click(byTestId('copy'))
-    await vi.waitFor(() => expect(delivered.copied).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.copied).toHaveLength(1))
     expect((delivered.copied[0] as Blob).type).toBe('image/png')
   })
 
@@ -915,7 +953,7 @@ describe('the save format', () => {
   it('shows the name the host says it wrote', async () => {
     delivered.savedAs = 'Snapdeck 2026-09-09 at 12.00.01.jpg'
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() =>
+    await waitForDelivery(() =>
       expect(byTestId('notice').textContent).toBe('Saved Snapdeck 2026-09-09 at 12.00.01.jpg'),
     )
   })
@@ -928,7 +966,7 @@ describe('cropping', () => {
     await vi.waitFor(() => expect(viewSize()).toBe('200 × 140'))
 
     await userEvent.click(byTestId('save'))
-    await vi.waitFor(() => expect(delivered.saved).toHaveLength(1))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
 
     const bitmap = await createImageBitmap(delivered.saved[0] as Blob)
     try {
