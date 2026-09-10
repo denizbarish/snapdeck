@@ -78,6 +78,19 @@ importers:
         specifier: 3.2.7
         version: 3.2.7(@types/node@24.13.3)(@vitest/browser@3.2.7)
 
+  packages/protocol:
+    dependencies:
+      zod:
+        specifier: ^4.6.1
+        version: 4.6.1
+    devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.7
+        version: 3.2.7(@types/node@24.13.3)(@vitest/browser@3.2.7)
+
 packages:
 
   '@babel/code-frame@7.29.7':
@@ -1031,6 +1044,9 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
+  zod@4.6.1:
+    resolution: {integrity: sha512-341aRWQsve0rvronKNTqZpjmzdbUDlFuzHaI/XLg/Ej82qffDJRRfBTCuv7+9q/rMjB6LSLyEBnW4InJeMtt/Q==}
+
 snapshots:
 
   '@babel/code-frame@7.29.7':
@@ -1838,3 +1854,5 @@ snapshots:
   ws@8.21.3: {}
 
   yallist@3.1.1: {}
+
+  zod@4.6.1: {}
