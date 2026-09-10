@@ -112,6 +112,20 @@ pub struct AppState {
     /// the user a picture of the window they are choosing settings in, and offer
     /// it first, because it is the frontmost window on screen while it is open.
     settings_window_id: Mutex<Option<u32>>,
+    /// The captures the tray's Recent Captures submenu offers, newest first.
+    ///
+    /// Paths and nothing else; see the `recents` module for why that is the
+    /// whole of what this feature is allowed to remember.
+    ///
+    /// Held here rather than read from disk when the menu is clicked, because a
+    /// menu event runs on the main thread and a click has to resolve to a file
+    /// without touching the filesystem first. `recents` owns what goes in it.
+    ///
+    /// Starts empty for the reason `settings` starts at the defaults: there is
+    /// no `AppHandle` to find the file with at the moment this is built, and
+    /// `lib::run`'s setup replaces it with what was on disk before the tray can
+    /// be clicked.
+    recent_captures: Mutex<Vec<PathBuf>>,
 }
 
 impl AppState {
@@ -125,7 +139,44 @@ impl AppState {
             settings: Mutex::new(Settings::default()),
             registered_shortcuts: Mutex::new(None),
             settings_window_id: Mutex::new(None),
+            recent_captures: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Reads and replaces the list in one hold of the lock, and answers with
+    /// what is now in force.
+    ///
+    /// One method rather than a getter and a setter, because a read, a decision
+    /// and a write done as three steps is two bugs. The lost update is the
+    /// obvious one. The worse one is that the caller then renders the list it
+    /// computed rather than the list that won: two captures finishing together
+    /// leave the state holding one and the menu showing the other, and nothing
+    /// corrects it until the next capture. Both are reachable, because a capture
+    /// and an editor save are on different threads and only captures are
+    /// serialised by `begin_capture`; two editors can be open at once by design.
+    ///
+    /// The answer is the list to render, and it is deliberately returned rather
+    /// than rendered here: rebuilding the menu asks the main thread to do it and
+    /// waits, while a click on that menu runs on the main thread, so a caller
+    /// still holding this lock while it rebuilt would be the two halves of a
+    /// deadlock.
+    pub fn update_recent_captures<F>(&self, update: F) -> Vec<PathBuf>
+    where
+        F: FnOnce(&[PathBuf]) -> Vec<PathBuf>,
+    {
+        let mut captures = self.recent_captures_lock();
+        *captures = update(captures.as_slice());
+        captures.clone()
+    }
+
+    /// The recent captures lock, with poisoning treated as recoverable for the
+    /// reason `overlay_ids` gives: every user replaces or reads the whole list,
+    /// and propagating an unrelated panic would leave the menu unable to say
+    /// where the last capture went.
+    fn recent_captures_lock(&self) -> std::sync::MutexGuard<'_, Vec<PathBuf>> {
+        self.recent_captures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The settings in force, cloned so no caller holds the lock across a
@@ -396,6 +447,74 @@ mod tests {
         let mut ids = state.editor_window_ids();
         ids.sort_unstable();
         assert_eq!(ids, vec![11, 22]);
+    }
+
+    /// Nothing is offered until a launch has read the file, the update sees what
+    /// is there, and what it answers with is what is now in force.
+    #[test]
+    fn the_recent_captures_start_empty_and_the_update_answers_with_what_it_wrote() {
+        let state = AppState::new();
+        let seen = state.update_recent_captures(|current| {
+            assert_eq!(current, Vec::<PathBuf>::new().as_slice());
+            vec![PathBuf::from("/Pictures/a.png")]
+        });
+        assert_eq!(seen, vec![PathBuf::from("/Pictures/a.png")]);
+
+        let seen = state.update_recent_captures(|current| {
+            assert_eq!(current, [PathBuf::from("/Pictures/a.png")]);
+            let mut next = vec![PathBuf::from("/Pictures/b.png")];
+            next.extend(current.iter().cloned());
+            next
+        });
+        assert_eq!(
+            seen,
+            vec![
+                PathBuf::from("/Pictures/b.png"),
+                PathBuf::from("/Pictures/a.png"),
+            ]
+        );
+    }
+
+    /// Two captures finishing at the same time. An editor save runs on a
+    /// blocking worker and a capture on another, and `begin_capture` serialises
+    /// captures only, so this really is two threads adding to the list at once.
+    ///
+    /// Both have to survive. A read, a decision and a write done as three steps
+    /// loses whichever finished first, and the loop is what makes that
+    /// reproducible rather than a race the test happens not to lose.
+    #[test]
+    fn two_threads_recording_at_once_both_end_up_in_the_list() {
+        for _ in 0..200 {
+            let state = std::sync::Arc::new(AppState::new());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let threads: Vec<_> = ["/Pictures/a.png", "/Pictures/b.png"]
+                .into_iter()
+                .map(|name| {
+                    let state = state.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        state.update_recent_captures(|current| {
+                            crate::recents::remember(current, Path::new(name), 5)
+                        });
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().expect("the recording thread");
+            }
+
+            let mut captures = state.update_recent_captures(|current| current.to_vec());
+            captures.sort();
+            assert_eq!(
+                captures,
+                vec![
+                    PathBuf::from("/Pictures/a.png"),
+                    PathBuf::from("/Pictures/b.png"),
+                ],
+                "one of the two captures was lost"
+            );
+        }
     }
 
     /// A saved change has to be the thing the next capture and the next

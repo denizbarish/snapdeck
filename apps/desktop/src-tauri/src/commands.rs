@@ -41,7 +41,7 @@ use crate::{
         check_filename_template, render_filename, save_capture_without_overwriting,
         OffsetDateTimeParts,
     },
-    overlay,
+    overlay, recents,
     report::report_failure,
     settings::{self, Settings},
     shortcuts::Shortcuts,
@@ -410,6 +410,15 @@ fn capture_and_write(
     // paste away from being useful. Only losing both is a failed capture.
     let clipboard = copy_to_clipboard(app, &frame);
     let saved = write_capture(&frame, &directory, &settings);
+    // The one place a direct capture becomes a file, and therefore the only
+    // place that knows one did. Here rather than in either arm of the match
+    // below, because a capture that reached the disk goes in the menu whether
+    // or not it also reached the clipboard, and here rather than inside
+    // `write_capture`, which is given a directory and a frame so that it can be
+    // tested without an application.
+    if let Ok(path) = &saved {
+        recents::record(app, path);
+    }
 
     let result = |path: Option<String>| Captured {
         result: CaptureResult {
@@ -564,12 +573,22 @@ pub async fn save_edited(
         .parent()
         .ok_or_else(|| format!("{} has no directory", capture.display()))?
         .to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || {
+    let written = tauri::async_runtime::spawn_blocking(move || {
         write_edited(&directory, &capture, &path, &bytes)
-            .map(|written| written.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|err| format!("the save task did not finish: {err}"))?
+    .map_err(|err| format!("the save task did not finish: {err}"))??;
+    // The second way a capture reaches the disk, and the reason the menu is not
+    // filled from the capture path alone: an edited save writes back over the
+    // capture it was opened on, which moves that path to the front, and a save
+    // into the other format writes a file the capture path never saw at all.
+    //
+    // As a `PathBuf`, not as the string this command answers with: a macOS path
+    // is bytes, and going through `to_string_lossy` and back is how a path with
+    // one un-decodable byte in it becomes a menu entry naming a file that does
+    // not exist.
+    recents::record(&app, &written);
+    Ok(written.to_string_lossy().into_owned())
 }
 
 /// Blocking worker only; see `save_edited`.

@@ -2,6 +2,7 @@ mod commands;
 mod editor;
 mod output;
 mod overlay;
+mod recents;
 mod report;
 mod settings;
 mod settings_window;
@@ -86,6 +87,11 @@ pub fn run() {
             let state = handle.state::<AppState>();
             state.set_settings(settings);
             state.set_registered_shortcuts(bound);
+            // After the tray exists, because this fills the submenu the tray
+            // just built, and before anything can be captured, so the first
+            // capture of the run is added to the list that was on disk rather
+            // than to an empty one.
+            recents::restore(&handle);
             // After the settings are in force, because this is the one thing
             // in the application that reads a setting to decide whether it may
             // happen at all: it does nothing unless the user has turned it on.

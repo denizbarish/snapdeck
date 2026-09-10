@@ -31,6 +31,10 @@ The first release. Apple silicon, macOS 14 or later.
 - **Saving** as PNG writes the edited picture back over the capture through a rename, so a failed
   save leaves the picture you already had. Saving as JPEG writes a second file beside it and
   leaves the original alone. Either way the edited picture goes on the clipboard.
+- **Recent Captures** in the menu bar, holding the last five, each one revealing its own file in
+  the Finder. The list survives a restart and holds paths and nothing else: no thumbnails, no
+  pixels, nothing the Finder would not show you anyway. A capture that has since been deleted is
+  taken out of the list rather than failing silently.
 - **A settings window** for the capture folder, the filename template, the format and the three
   shortcuts.
 - **Check for Updates…**, and the same check at launch behind a checkbox that is off by default.
