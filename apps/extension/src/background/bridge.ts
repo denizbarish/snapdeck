@@ -1,6 +1,9 @@
 import {
   BRIDGE_PORT,
   encode,
+  fullPageSchema,
+  MAX_HANDSHAKE_MESSAGE_BYTES,
+  NONCE_HEX_LENGTH,
   parseServerMessage,
   PROTOCOL_VERSION,
   ProtocolError,
@@ -24,6 +27,12 @@ import { version as EXTENSION_VERSION } from '../../package.json'
  * loopback port, so every frame that arrives goes through the protocol package's
  * schema before it is believed, and a frame that does not parse ends the
  * session rather than being skipped.
+ *
+ * Parsing is not enough on its own, because a `ready` carries no secret and
+ * anything can write one. So the handshake runs in both directions: the `hello`
+ * carries a challenge, the `ready` has to answer it with a proof only something
+ * holding the pairing token can compute, and no page leaves this module until
+ * that proof has been recomputed here and found to match.
  */
 
 export type BridgeSocket = {
@@ -33,9 +42,15 @@ export type BridgeSocket = {
   onClose(handler: () => void): void
 }
 
+/**
+ * `impostor` is deliberately not `unreachable`. Something did answer, and it
+ * failed to prove it was Snapdeck: telling the user their app is not running
+ * would send them to open a window while the program that wants their pages
+ * keeps the port.
+ */
 export type SendOutcome =
   | { ok: true; savedPath: string | null }
-  | { ok: false; code: ErrorCode | 'unreachable'; message: string }
+  | { ok: false; code: ErrorCode | 'unreachable' | 'impostor'; message: string }
 
 type Failure = Extract<SendOutcome, { ok: false }>
 
@@ -75,6 +90,24 @@ const NOT_RUNNING = 'Snapdeck is not running, or it is not listening for the ext
 const UNREADABLE_ANSWER =
   'Something answered on Snapdeck’s bridge port without speaking its protocol, so the connection was closed.'
 
+/**
+ * Said when something holds the port and cannot prove it is Snapdeck.
+ *
+ * Its own sentence rather than `NOT_RUNNING`, because the two ask opposite
+ * things of the user. This one names the port, since that is the thing they
+ * have to act on, and it says where the capture went so that a refusal never
+ * reads like a capture that was lost.
+ */
+const IMPOSTOR = `Something is listening on Snapdeck’s bridge port (${BRIDGE_PORT}) but could not prove it is Snapdeck, so the capture was not sent to it and went to your downloads instead. Quit whatever else is using that port, then try again.`
+
+/**
+ * Said when a frame this side built would be refused by the far end's own
+ * schema. It never leaves the machine, so nothing is at risk; what the user
+ * needs to know is that the capture is in their downloads folder.
+ */
+const UNSENDABLE =
+  'This capture is outside the limits Snapdeck’s bridge accepts, so it went to your downloads instead.'
+
 function unreachable(detail: string): Failure {
   return { ok: false, code: 'unreachable', message: `${NOT_RUNNING} (${detail})` }
 }
@@ -88,8 +121,102 @@ function unreadable(detail: string): Failure {
   return { ok: false, code: 'malformedMessage', message: `${UNREADABLE_ANSWER} (${detail})` }
 }
 
+function impostor(detail: string): Failure {
+  return { ok: false, code: 'impostor', message: `${IMPOSTOR} (${detail})` }
+}
+
+function unsendable(detail: string): Failure {
+  return { ok: false, code: 'malformedMessage', message: `${UNSENDABLE} (${detail})` }
+}
+
 function reasonOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
+}
+
+/** Measured the way the socket counts, which is not the way `length` does. */
+function byteLengthOf(text: string): number {
+  return new TextEncoder().encode(text).length
+}
+
+/** The base a nonce, a proof and the pairing token are all written in. */
+const HEX_RADIX = 16
+
+/** Every byte gets both its digits, so that a small one keeps its leading zero. */
+const HEX_DIGITS_PER_BYTE = 2
+
+/**
+ * Bytes as lower-case hex, which is how the token is written and therefore how
+ * both halves of the handshake are written.
+ */
+function toHex(bytes: Uint8Array): string {
+  let hex = ''
+  for (const byte of bytes) {
+    hex += byte.toString(HEX_RADIX).padStart(HEX_DIGITS_PER_BYTE, '0')
+  }
+  return hex
+}
+
+/**
+ * The challenge this side puts in its `hello`: sixteen bytes of the browser's
+ * own randomness, as hex.
+ *
+ * Fresh for every session and from `crypto.getRandomValues` rather than
+ * anything cheaper, because a nonce that repeats is a proof that can be
+ * replayed: a program holding the port watches one answer go past, keeps it,
+ * and passes the next challenge with it without ever knowing the token.
+ *
+ * The byte count comes from `NONCE_HEX_LENGTH` rather than being written again
+ * here, so the two cannot say different things about how long a nonce is.
+ */
+function freshNonce(): string {
+  const bytes = new Uint8Array(NONCE_HEX_LENGTH / HEX_DIGITS_PER_BYTE)
+  crypto.getRandomValues(bytes)
+  return toHex(bytes)
+}
+
+/**
+ * The bridge's half of the handshake, as this side computes it:
+ * `HMAC-SHA256(key = the token, message = the nonce)`, lowercase hex.
+ *
+ * The key is the token *as a string*. Both the token and the nonce are hex, so
+ * a key could mean the characters or the 32 bytes they spell, and the two
+ * answer different proofs; the desktop's `bridge::session::proof_for` makes the
+ * same reading, and `bridge.test.ts` pins both against a vector neither program
+ * computed.
+ *
+ * Exported because it is the whole of the rule and worth a test of its own, the
+ * way `proof_for` is on the other side.
+ */
+export async function proofFor(token: string, nonce: string): Promise<string> {
+  const utf8 = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    utf8.encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  return toHex(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8.encode(nonce))))
+}
+
+/**
+ * Whether two proofs are the same, in time that does not depend on where they
+ * first differ.
+ *
+ * A comparison that stops at the first wrong character tells whoever holds the
+ * port how much of a proof it had right, and a proof that answers that question
+ * is one that can be guessed a character at a time. The length is not a secret,
+ * the schema fixes it at `PROOF_HEX_LENGTH`, so a difference there returns at
+ * once; past that every character is read whatever the ones before it were.
+ */
+function proofsMatch(offered: string, expected: string): boolean {
+  if (offered.length !== expected.length) return false
+
+  let difference = 0
+  for (let index = 0; index < offered.length; index += 1) {
+    difference |= offered.charCodeAt(index) ^ expected.charCodeAt(index)
+  }
+  return difference === 0
 }
 
 /** One thing that arrived, or one reason nothing did. */
@@ -162,6 +289,14 @@ type Received<T extends ServerMessage['type']> =
 async function receive<T extends ServerMessage['type']>(
   session: Session,
   type: T,
+  /**
+   * What a frame that will not parse, or that is not the one asked for, means
+   * at this point in the session. Waiting for `ready` it means the far end has
+   * not proved it is Snapdeck and never will, which is `impostor`; after that
+   * the session is one this side already trusts, and a frame it cannot read is
+   * `unreadable`.
+   */
+  onUnreadable: (detail: string) => Failure,
 ): Promise<Received<T>> {
   const incoming = await session.receive()
   switch (incoming.state) {
@@ -170,12 +305,12 @@ async function receive<T extends ServerMessage['type']>(
     case 'closed':
       return { failure: unreachable(`the connection was closed before the ${type}`) }
     case 'unreadable':
-      return { failure: unreadable(incoming.reason) }
+      return { failure: onUnreadable(incoming.reason) }
     case 'frame': {
       const { message } = incoming
       if (message.type === 'error') return { failure: refused(message.code, message.message) }
       if (message.type !== type) {
-        return { failure: unreadable(`expected a ${type}, got a ${message.type}`) }
+        return { failure: onUnreadable(`expected a ${type}, got a ${message.type}`) }
       }
       // The comparison above is the narrowing; a generic `T` is not something
       // the compiler can carry through it.
@@ -213,11 +348,39 @@ async function runSession(
   }
 
   try {
-    session.send(
-      encode({ type: 'hello', protocolVersion: PROTOCOL_VERSION, token, client: CLIENT }),
-    )
-    const ready = await receive(session, 'ready')
+    const nonce = freshNonce()
+    const hello = encode({
+      type: 'hello',
+      protocolVersion: PROTOCOL_VERSION,
+      token,
+      nonce,
+      client: CLIENT,
+    })
+
+    // Until a token has been checked the bridge reads at most this much per
+    // frame, because a caller that has proved nothing must not be able to make
+    // it hold a buffer of that caller's choosing. Every field of a `hello` is
+    // short by schema, so going over means the stored token is not one Snapdeck
+    // ever issued, and the frame is dropped here rather than closed there.
+    const weight = byteLengthOf(hello)
+    if (weight > MAX_HANDSHAKE_MESSAGE_BYTES) {
+      return refused(
+        'unauthorized',
+        `the handshake would weigh ${weight} bytes, over the ${MAX_HANDSHAKE_MESSAGE_BYTES} the bridge reads before a token is checked`,
+      )
+    }
+    session.send(hello)
+
+    const ready = await receive(session, 'ready', impostor)
     if (ready.failure) return ready.failure
+
+    // The half of the handshake that runs the other way. A `ready` carries no
+    // secret, so anything that took the port can write one; what it cannot
+    // write is this, which needs the token it has only just been handed a copy
+    // of. Nothing is sent to a far end that fails here.
+    if (!proofsMatch(ready.frame.proof, await proofFor(token, nonce))) {
+      return impostor('the proof it answered is not the one this token and this challenge make')
+    }
 
     return await handOver(session)
   } catch (cause) {
@@ -244,8 +407,24 @@ export function sendFullPage(
   timeoutMs: number,
 ): Promise<SendOutcome> {
   return runSession(open, token, timeoutMs, async (session) => {
-    session.send(encode({ type: 'fullPage', ...page }))
-    const accepted = await receive(session, 'accepted')
+    const frame: FullPage = { type: 'fullPage', ...page }
+
+    // The far end's own schema, run against the frame before it goes rather
+    // than after 55 MB of it has crossed the socket and been closed with 1008.
+    //
+    // Refused rather than trimmed to fit. A URL is metadata and is clipped by
+    // the caller, but the numbers of a picture are not: a width cut down to the
+    // limit does not describe a smaller picture, it describes the same one
+    // wrongly, and an app that believed it would place every pixel in the wrong
+    // row. So an oversized capture is not sent at all, and the caller's fallback
+    // puts it in the downloads folder whole.
+    const checked = fullPageSchema.safeParse(frame)
+    if (!checked.success) {
+      return unsendable(checked.error.issues.map((issue) => issue.message).join('; '))
+    }
+
+    session.send(encode(frame))
+    const accepted = await receive(session, 'accepted', unreadable)
     if (accepted.failure) return accepted.failure
     // `null` is what the app answers when the user's settings say clipboard
     // only. Nothing was saved, and nothing went wrong.

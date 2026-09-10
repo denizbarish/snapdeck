@@ -1,4 +1,4 @@
-import { MAX_IMAGE_PIXELS } from '@snapdeck/protocol'
+import { MAX_IMAGE_PIXELS, MAX_TITLE_CHARS, MAX_URL_CHARS } from '@snapdeck/protocol'
 
 import type { ContentRequest, ContentResponse } from '../content/main'
 import { readPairingToken } from '../options/token'
@@ -40,14 +40,6 @@ const BADGE_COLOUR = '#b3261e'
 
 /** What a page with no address of its own is called on the wire. */
 const UNKNOWN_URL = 'about:blank'
-
-/**
- * `fullPageSchema` in `@snapdeck/protocol` refuses anything longer, and a
- * `data:` page's address goes well past it. Clipping here costs a truncated URL
- * in a file name; not clipping costs the whole capture.
- */
-const MAX_URL_LENGTH = 2048
-const MAX_TITLE_LENGTH = 1024
 
 /**
  * The tabs a capture is already running in. A second press would drive the same
@@ -162,9 +154,11 @@ async function clearBadge(tabId: number): Promise<void> {
  *
  * An app that is not running gets the sentence `fallback` owns, because that is
  * the case the badge exists for. Everything else carries the sentence the
- * bridge wrote for it: a token that was refused and a version mismatch need
- * different things from the user, and "Snapdeck is not running" would send them
- * looking for a window that is already open.
+ * bridge wrote for it: a token that was refused, a version mismatch and a port
+ * held by something that could not prove it is Snapdeck need different things
+ * from the user, and "Snapdeck is not running" would send them looking for a
+ * window that is already open - or, for the last of the three, to open the app
+ * and leave the impostor holding the port.
  */
 function badgeFor(outcome: Extract<SendOutcome, { ok: false }>): {
   text: string
@@ -197,8 +191,13 @@ async function handOver(
     {
       requestId: crypto.randomUUID(),
       page: {
-        url: clip(tab.url ?? UNKNOWN_URL, MAX_URL_LENGTH),
-        title: clip(tab.title ?? '', MAX_TITLE_LENGTH),
+        // `fullPageSchema` refuses anything longer, and a `data:` page's
+        // address goes well past it. Where the picture's own numbers are never
+        // altered to fit - a clamped width describes the same picture wrongly -
+        // an address is metadata, and clipping one costs a truncated URL in a
+        // file name where not clipping costs the whole capture.
+        url: clip(tab.url ?? UNKNOWN_URL, MAX_URL_CHARS),
+        title: clip(tab.title ?? '', MAX_TITLE_CHARS),
       },
       image: {
         pngBase64: await toBase64(capture.blob),
