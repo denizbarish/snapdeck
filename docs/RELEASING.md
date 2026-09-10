@@ -9,21 +9,25 @@ update from. Nothing becomes public until a human presses Publish.
 
 1. Make sure CI is green on the commit you are about to tag. The release workflow builds, it does
    not re-run `cargo fmt`, `clippy`, the Rust tests, `pnpm lint` or `pnpm test`.
-2. Set the new version in **both** files, in the same commit:
+2. Set the new version in **all three** files, in the same commit:
    - `Cargo.toml`, under `[workspace.package]`
    - `apps/desktop/src-tauri/tauri.conf.json`, the top-level `version`
-3. Tag and push:
+   - `apps/desktop/package.json`, the top-level `version`
+3. Write the release notes into [`CHANGELOG.md`](../CHANGELOG.md), in the same commit, under a
+   heading that is the tag: `## v0.2.0`. The build fails without it, on purpose, and this is not a
+   thing that can be done afterwards. See [The release notes](#the-release-notes).
+4. Tag and push:
 
    ```bash
    git tag v0.2.0
    git push origin v0.2.0
    ```
 
-4. Watch the run: `gh run watch` or the Actions tab.
-5. Open the draft release. Check the artifact names, the checksums and the signing line in the
+5. Watch the run: `gh run watch` or the Actions tab.
+6. Open the draft release. Check the artifact names, the checksums and the signing line in the
    notes. Check that `latest.json` is there and that its `version` and `url` match the release; the
    run logs it with the signature elided. Then Publish.
-6. Publishing is what makes the release reachable at `releases/latest`, which is both the README's
+7. Publishing is what makes the release reachable at `releases/latest`, which is both the README's
    install link and the updater's endpoint. Until then, installed copies see nothing.
 
 ### If it goes wrong
@@ -43,13 +47,14 @@ published.
 
 ## The version check
 
-The first job compares three things and fails before the build starts if any of them disagree:
+The first job compares four things and fails before the build starts if any of them disagree:
 
 | Source | What it decides |
 | --- | --- |
 | the tag, minus its `v` | what the release claims to be |
 | `apps/desktop/src-tauri/tauri.conf.json` `version` | the version the app reports, and the version in the bundle filenames |
 | `Cargo.toml` `[workspace.package] version` | the version the binary is built as |
+| `apps/desktop/package.json` `version` | nothing, today |
 
 It also fails if `apps/desktop/src-tauri/Cargo.toml` stops inheriting the workspace version, because
 then the check would be reading a file that no longer decides anything.
@@ -57,7 +62,145 @@ then the check would be reading a file that no longer decides anything.
 This is a hard failure on purpose. A DMG named `Snapdeck_0.1.0` hanging off a `v0.2.0` tag is the
 kind of mismatch nobody notices until something refuses to line up with its own name.
 
+The fourth row is the odd one and is worth being explicit about, because there were two ways to go.
+`apps/desktop/package.json` is a private workspace package: nothing publishes it, nothing installs
+it by version, and no code reads that field, so the version in it could equally have been deleted.
+It is **checked rather than deleted**, for one reason: it is the file a person opens when they want
+to know what version this app is, and a number sitting there that nothing compares is a number that
+drifts and then misleads whoever trusted it. Checking it costs one `jq` call on a runner that was
+going to start anyway. If it is ever deleted instead, delete the check with it in the same commit,
+or the gate starts failing on a file that no longer exists.
+
+## The release notes
+
+The notes a release carries come from one place: the section of [`CHANGELOG.md`](../CHANGELOG.md)
+whose heading is the tag. The version job reads it, hands it to the build job, and the build job
+puts it in the generated notes as a `## Changes` section, above the signing paragraph. Those same
+notes then go two ways: to the GitHub release page, and, minus the **Install** and **Checksums**
+sections, into `latest.json` as the text the in-app update dialog shows.
+
+**A tag with no section fails the build, and so does a section with nothing in it.** That is not
+strictness for its own sake. It is that this is the one part of a release which genuinely cannot be
+repaired afterwards:
+
+- `latest.json` is generated during the run and is never written by hand. Editing the draft's notes
+  on GitHub changes the release page and reaches no installed copy, because the manifest was already
+  written with the old text and uploaded beside it.
+- Re-running the build to pick up the edit overwrites the edit, because the notes are generated from
+  `CHANGELOG.md` and the checksums, not read back from the release.
+
+So the failure has to happen before anything is built, which is why the check lives in the version
+job on the cheap runner rather than next to the step that writes the notes. The cost of getting this
+wrong is not a broken release: it is a working release whose update dialog says nothing about what
+changed, discovered by users, permanently.
+
+Two rules for writing a section, both enforced by the shape of the pipeline rather than by taste:
+
+- The heading is exactly the tag, `## v0.2.0`. It is matched literally.
+- Inside a section, use `###` and below. The section ends at the next `##`, and the manifest filters
+  the notes by `##` heading as well, so a level-2 heading inside a section truncates the notes in
+  one place and confuses the filter in the other.
+
+Blank lines around a section are trimmed; blank lines inside it are kept.
+
+## Pinned actions
+
+Every third-party action in `release.yml` is pinned to a 40-character commit SHA, with the version
+it corresponds to in a trailing comment:
+
+```yaml
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+```
+
+The reason is the build job specifically. That job is granted `contents: write`, and one step later
+it holds `TAURI_SIGNING_PRIVATE_KEY`. A tag like `@v4` is a mutable reference: the owner of that
+repository can move it, and `dtolnay/rust-toolchain@stable` was not even a tag but a branch, which
+is moved by design on every toolchain release. Whoever controls where those names point controls
+code that runs on this runner.
+
+The step-scoped `env:` on the signing step means a compromised action cannot read the signing key.
+It does not need to. It runs **before** `pnpm tauri build`, in the same workspace, and can change
+what gets built. This project then signs that result with its own key and publishes it, and every
+installed copy verifies the signature happily, because the signature is real. The updater's
+guarantee is "this archive is the one the workflow produced", and tampering with the build turns
+that guarantee into the attacker's alibi.
+
+The checkout in the build job also passes `persist-credentials: false`. By default
+`actions/checkout` leaves the job's token in `.git/config` for the whole job, where every later step
+can read it, and in this job that token can write releases. Nothing here talks to GitHub over git:
+the release is created and uploaded with `gh` and an explicit `GH_TOKEN`.
+
+### Why this comes before the Environment gate
+
+The [updater signing key](#the-updater-signing-key) section describes a different way to reach the
+key: anybody with write access to this repository can add a workflow that reads the secret. The fix
+named there is a GitHub Environment with required reviewers.
+
+That gate does not close this hole, which is why pinning came first. An Environment makes a human
+approve the *release job* before the secrets are handed to it. The reviewer approving it sees a tag
+and a workflow name; they do not see that a third-party action three steps earlier now resolves to a
+different commit than it did last month. Approval of a tampered build is still a tampered build,
+signed with this project's key and blessed by a human. Pinning removes the tampering; the
+Environment removes an unrelated path to the secret. Both are worth having, in that order.
+
+### Updating a pinned action
+
+Pinning is a decision to upgrade deliberately rather than never to upgrade. To move one:
+
+```bash
+# What the tag you want points at today.
+gh api repos/actions/checkout/commits/v4 --jq '.sha'
+
+# Which release that commit is, for the trailing comment.
+gh api 'repos/actions/checkout/tags?per_page=100' \
+  --jq '.[] | select(.commit.sha == "<sha from above>") | .name'
+```
+
+Put the SHA after the `@` and the precise version in the comment, then read the action's changelog
+between the old version and the new one before committing. The comment is documentation, not a
+constraint: nothing verifies that it matches the SHA, so it is only true if it is kept true.
+
+`dtolnay/rust-toolchain` has no release tags. Its pin is the head of the `stable` branch at the time
+it was set, whose `action.yml` defaults the `toolchain` input to `stable`; the comment is `# stable`
+rather than a version. Move it with `gh api repos/dtolnay/rust-toolchain/commits/stable --jq '.sha'`
+when a newer Rust is wanted on the release runner.
+
+`ci.yml` is deliberately not pinned. It has no secrets and no write permission, it runs on every
+pull request including ones from strangers, and the cost of a moved tag there is a failed check
+rather than a signed artifact. If it ever gains a secret, pin it in the same change.
+
 ## Proving the workflow without releasing
+
+> [!IMPORTANT]
+> **Do this once, before the first real tag, as the first thing after this branch is merged.**
+>
+> The manifest half of this workflow has never run. Every Release run on record predates the commit
+> that added the `Sign the update archive and write the manifest` step, so the step that signs the
+> archive, maps the platform key and writes `latest.json` has only ever been reasoned about, never
+> executed. Both updater secrets are set, which means that without this run its first execution
+> would be on the real `v0.1.0` tag.
+>
+> ```bash
+> gh workflow run release.yml --ref main -f tag=v0.1.0
+> ```
+>
+> Then download the run's artifact and confirm four things:
+>
+> 1. `latest.json` is in it at all.
+> 2. Its `version` is `0.1.0`.
+> 3. Its one platform key is `darwin-aarch64`, not `darwin-x64` or anything else.
+> 4. The run log carries the line `signing key <id> matches the public key this build ships`.
+>
+> What is already known and what is not: the ordering is fail-safe, since the manifest is written
+> before anything is published and the release step never runs on a dispatch. The Node self-check
+> was executed against a real `tauri signer sign` output during review, and accepts a good
+> signature, rejects a one-byte-tampered archive and catches a key-id mismatch; the assumption that
+> the signer writes its signature to `<archive>.sig` was confirmed the same way. What has never run
+> on a runner is `pnpm tauri signer sign` itself, the architecture mapping against a real bundle
+> name, and the notes filter against real generated notes. That is what this run is for.
+>
+> `workflow_dispatch` cannot do this from a feature branch: GitHub only offers the entry point once
+> the workflow file is on the default branch. So it is a post-merge step, not a pre-merge one.
 
 The workflow has a `workflow_dispatch` entry point. It runs the whole thing, version check
 included, but publishes nothing: the bundles come back as workflow artifacts on the run.
@@ -151,6 +294,13 @@ reviewers, holding the two updater secrets and named by the release job, would: 
 wait for a human to approve before the secrets were available to it, and a workflow added by somebody
 else could not reach them at all.
 
+There is a second path to a release this project did not build, and it does not go through the
+secret at all: change what gets built, and let this workflow sign it. Everything that runs in the
+build job before `pnpm tauri build` is in a position to do that, third-party actions included, and
+the key signs whatever it is handed. That is why every action in `release.yml` is pinned to a commit
+rather than to a tag or a branch, and why that came before the Environment gate rather than after
+it. See [Pinned actions](#pinned-actions).
+
 The self-check in the signing step is a different question and does not answer this one. It proves
 that the secret in use and the key in the bundle are two halves of one key, by verifying the
 signature it just produced against `plugins.updater.pubkey`. Without it, a wrong, truncated or
@@ -214,7 +364,11 @@ than publishing a manifest no installed copy can match itself against.
 
 The `notes` are the release notes minus the **Install** and **Checksums** sections. Those two are
 for somebody downloading a DMG by hand: the updater does the installing itself, and it verifies the
-download with the signature rather than with a checksum a person compares by eye.
+download with the signature rather than with a checksum a person compares by eye. What survives the
+filter is the line naming the version, the `## Changes` section taken from
+[`CHANGELOG.md`](../CHANGELOG.md) and the signing paragraph, which is why that section is required:
+without it the update dialog would show a version number and a paragraph about Gatekeeper. See
+[The release notes](#the-release-notes).
 
 The signature is inline. The `.sig` file the signer leaves next to the archive is deleted rather
 than published, because two copies of one signature is one more thing that can disagree.
