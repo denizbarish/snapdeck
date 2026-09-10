@@ -29,6 +29,30 @@ can be checked with `shasum -a 256 -c SHA256SUMS.txt`.
    Security > Screen & System Audio Recording, then **quit Snapdeck and open it again**. Relaunching
    is not optional, for the reason under [Getting started](#getting-started).
 
+## Updates
+
+**Snapdeck makes no network connection you did not ask for.** Checking for an update is the only
+one it makes at all, and it is off until you turn it on.
+
+- **Check for Updates…** in the menu bar asks the releases page whether there is a newer version.
+  If there is, Snapdeck shows what it is and what the release says about it, and downloads nothing
+  until you press **Update and Restart**. That one button does the whole thing: download, replace,
+  restart.
+- **Settings > Updates** has a checkbox for the same check at launch. It is **off by default**, and
+  the menu item works whether or not you turn it on.
+
+Every update is signed. The archive Snapdeck downloads carries a signature made by this project's
+release workflow, checked against a public key built into the copy you are running. A download whose
+signature does not verify is thrown away rather than installed, and Snapdeck puts the reason in the
+menu bar and in its log instead of failing quietly.
+
+One consequence of the app being signed ad-hoc rather than with an Apple Developer ID: **macOS asks
+for Screen Recording permission again after an update.** The permission is tied to the app's
+signature, an ad-hoc signature is different in every build, so to macOS the updated Snapdeck is a
+different application. Grant it again in System Settings > Privacy & Security > Screen & System
+Audio Recording, then quit Snapdeck and open it again. The update dialog says so before you agree
+to it.
+
 ## Requirements
 
 - macOS 14 or later

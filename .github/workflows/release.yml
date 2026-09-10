@@ -118,6 +118,18 @@ jobs:
       # when handed only part of the notarization credentials. So all six or
       # none, and none is a supported outcome.
       SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+      # The updater's signing key, which is a different key from the Apple one
+      # above and answers a different question: not who built the app, but
+      # whether an archive an installed copy just downloaded is the one this
+      # workflow produced. The private half exists only as this secret. Its
+      # public half is in `tauri.conf.json` and ships inside every build, which
+      # is what makes the check work on a machine that has never seen this
+      # repository.
+      #
+      # Both or neither. The key this project uses carries a password, and a
+      # signing step that runs without it fails in the middle of a release
+      # rather than before it.
+      UPDATER: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -286,6 +298,93 @@ jobs:
           echo "path=$notes" >> "$GITHUB_OUTPUT"
           cat "$notes" >> "$GITHUB_STEP_SUMMARY"
 
+      # The manifest `Check for Updates…` reads, written here and nowhere else.
+      #
+      # A hand-written manifest is a promise about a file somebody else built.
+      # This one is generated from the archive that is being published in the
+      # same run: the signature is taken over those exact bytes, the URL names
+      # the asset this job is about to upload, and the version is the one the
+      # first job already proved the tag, `tauri.conf.json` and `Cargo.toml`
+      # agree on. There is no step at which the manifest and the release can
+      # come to describe different builds.
+      #
+      # The `.sig` the signer leaves behind is deleted rather than published.
+      # The manifest carries the same signature inline, and two copies of one
+      # signature is one more thing that can disagree.
+      - name: Sign the update archive and write the manifest
+        if: env.UPDATER == 'true'
+        env:
+          # Read by the Tauri CLI. Given to this step alone, so they are not in
+          # the environment of anything that runs after it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BASE: ${{ steps.bundles.outputs.base }}
+          NOTES: ${{ steps.notes.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          # Absolute, because `pnpm tauri` runs the CLI with `apps/desktop` as
+          # its working directory and a relative path would land there.
+          archive="$PWD/dist/$BASE.app.tar.gz"
+          pnpm tauri signer sign "$archive"
+          signature="$(cat "$archive.sig")"
+          rm "$archive.sig"
+
+          # The updater looks the platform up by `{os}-{arch}`, and the DMG's
+          # own name carries the architecture Tauri built for. Mapped rather
+          # than passed through: the two vocabularies agree on `aarch64` and
+          # disagree on Intel, where the bundle says `x64` and the updater says
+          # `x86_64`. An architecture neither of them names is a runner change,
+          # and it fails here instead of publishing a manifest no installed copy
+          # can match itself against.
+          arch="${BASE##*_}"
+          case "$arch" in
+            aarch64) platform="darwin-aarch64" ;;
+            x64) platform="darwin-x86_64" ;;
+            *)
+              echo "::error::unknown architecture '$arch' in bundle name '$BASE'"
+              exit 1
+              ;;
+          esac
+
+          # What the update dialog shows, which is the release notes minus the
+          # two sections that only make sense for a manual download: the install
+          # steps, which the updater performs itself, and the checksums, which
+          # it verifies with the signature instead.
+          notes="$(
+            awk '
+              BEGIN { keep = 1 }
+              /^## / { keep = ($0 != "## Install" && $0 != "## Checksums") }
+              keep
+            ' "$NOTES"
+          )"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$notes" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg platform "$platform" \
+            --arg signature "$signature" \
+            --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$BASE.app.tar.gz" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: { ($platform): { signature: $signature, url: $url } }
+            }' > dist/latest.json
+
+          echo "manifest for $platform:"
+          jq '.platforms[].signature = "<signature>"' dist/latest.json
+
+      # Said out loud rather than left to be discovered. A release with no
+      # manifest is a release nobody can update to: every installed copy asks
+      # `releases/latest/download/latest.json`, gets a 404, and reports that it
+      # could not check.
+      - name: Warn that this release cannot be updated to
+        if: env.UPDATER != 'true'
+        run: |
+          echo "::warning::TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not set, so no latest.json was written and no installed copy can update to this release."
+
       # Uploaded on every run, including the manual ones that publish nothing:
       # this is what makes the workflow provable without cutting a release.
       - uses: actions/upload-artifact@v4
@@ -303,11 +402,27 @@ jobs:
           NOTES: ${{ steps.notes.outputs.path }}
         run: |
           set -euo pipefail
+
+          # A version with a pre-release part, `v0.2.0-rc.1`, is marked as one.
+          # Two things point at GitHub's idea of "latest" and neither of them
+          # should ever reach a release candidate: the README's install link,
+          # and the updater endpoint every installed copy asks. Without this
+          # flag, publishing an `-rc` draft would hand it to all of them. Set
+          # explicitly either way, so that re-running a build cannot leave the
+          # flag from a previous tag on the release.
+          case "$VERSION" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          echo "prerelease: $prerelease"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             # No --draft here: re-running the build must not un-publish a
             # release a human has already decided to publish.
-            gh release edit "$TAG" --title "Snapdeck $VERSION" --notes-file "$NOTES"
+            gh release edit "$TAG" --title "Snapdeck $VERSION" --notes-file "$NOTES" \
+              --prerelease="$prerelease"
           else
-            gh release create "$TAG" --draft --title "Snapdeck $VERSION" --notes-file "$NOTES"
+            gh release create "$TAG" --draft --prerelease="$prerelease" \
+              --title "Snapdeck $VERSION" --notes-file "$NOTES"
           fi
           gh release upload "$TAG" dist/* --clobber

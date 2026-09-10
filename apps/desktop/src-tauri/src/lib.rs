@@ -8,6 +8,7 @@ mod settings_window;
 mod shortcuts;
 mod state;
 mod tray;
+mod updater;
 
 use settings::Settings;
 use shortcuts::{register_shortcuts, Shortcuts};
@@ -33,6 +34,12 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        // The only plugin here that can reach the network, and it does so only
+        // when something calls it. Built by `updater::plugin` rather than by
+        // `tauri_plugin_updater::Builder::new()` so that the rule for what
+        // counts as a newer release is written once, in `updater::is_upgrade`.
+        // No window is granted its commands: every check is started from Rust.
+        .plugin(updater::plugin())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -78,6 +85,10 @@ pub fn run() {
             let state = handle.state::<AppState>();
             state.set_settings(settings);
             state.set_registered_shortcuts(bound);
+            // After the settings are in force, because this is the one thing
+            // in the application that reads a setting to decide whether it may
+            // happen at all: it does nothing unless the user has turned it on.
+            updater::check_at_launch(&handle);
             Ok(())
         })
         .build(tauri::generate_context!())

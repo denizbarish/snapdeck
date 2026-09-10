@@ -829,29 +829,41 @@ pub fn close_editor(app: AppHandle) {
     editor::close_focused_editor(&app);
 }
 
-/// What the settings window renders: the settings, and what the keyboard
-/// actually has.
+/// What the settings window renders: the settings, what the keyboard actually
+/// has, and why those two disagree when they do.
 ///
-/// Two values rather than one, because they answer different questions and the
-/// window needs both. `settings` is what the file says and what the next save
-/// writes back; `bound_shortcuts` is what the platform accepted, which is
+/// Three values rather than one, because they answer different questions and the
+/// window needs all of them. `settings` is what the file says and what the next
+/// save writes back; `bound_shortcuts` is what the platform accepted, which is
 /// `None` when nothing is bound at all and a different set when a stored
 /// combination had been taken by another application. Folding the second into
 /// the first is what let the window claim three working keys over an empty
 /// keyboard, and what let the next save write the fallback over the user's own
 /// choice.
+///
+/// `shortcut_problem` is the third question, and only a save can answer it:
+/// *why* the shortcuts in this answer are not the ones the save asked for. The
+/// window can see that they differ, but the platform's reason for refusing them
+/// exists for one moment on the Rust side and nowhere else. `None` from
+/// `get_settings`, which is a read and has attempted nothing.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     settings: Settings,
     bound_shortcuts: Option<Shortcuts>,
+    shortcut_problem: Option<String>,
 }
 
 impl SettingsView {
-    fn new(settings: Settings, bound_shortcuts: Option<Shortcuts>) -> Self {
+    fn new(
+        settings: Settings,
+        bound_shortcuts: Option<Shortcuts>,
+        shortcut_problem: Option<String>,
+    ) -> Self {
         Self {
             settings,
             bound_shortcuts,
+            shortcut_problem,
         }
     }
 }
@@ -864,16 +876,34 @@ impl SettingsView {
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> SettingsView {
     let state = app.state::<AppState>();
-    SettingsView::new(state.settings(), state.registered_shortcuts())
+    SettingsView::new(state.settings(), state.registered_shortcuts(), None)
 }
 
-/// Puts new settings into force and writes them down, or changes nothing at
-/// all.
+/// Puts new settings into force and writes them down.
 ///
-/// All three steps or none, in the order that makes that possible: the refusals
-/// that cost nothing come first, then the change that has to be undone if a
-/// later one fails, and the file last. What comes back is the settings that are
-/// now in force, so the window renders the truth rather than what it asked for.
+/// Everything the user typed is refused together or written together, with one
+/// deliberate exception: a shortcut the platform will not register.
+///
+/// The exception is the whole reason this reads the way it does. A combination
+/// another application holds cannot be registered however often it is retried,
+/// and it stays in the settings file until the user picks a different one. When
+/// a refused rebind failed the save, that stored combination held the entire
+/// window hostage: somebody who wanted to change their save folder was told to
+/// resolve a keyboard conflict inside an application that is not theirs, and
+/// until they did, nothing on the form could be saved at all. So a refused
+/// rebind now costs exactly the shortcuts. The rest of the form is written, the
+/// shortcuts already on disk are written back unchanged rather than overwritten
+/// with a set that is not in force, and the reason travels back in
+/// `shortcut_problem` for the window to show.
+///
+/// What is *not* an exception: a save folder that cannot be written, a filename
+/// template that does not produce a filename, and a login item the system
+/// refused. Each of those is a thing the user asked for that this application
+/// can neither honour nor half-honour, and each is fixable on the form in front
+/// of them.
+///
+/// What comes back is the settings that are now in force, so the window renders
+/// the truth rather than what it asked for.
 ///
 /// Synchronous on purpose. It runs on the main thread, which is where the
 /// shortcut manager wants to be reached from anyway, and the only file it
@@ -897,20 +927,20 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<SettingsView,
     }
     check_filename_template(&settings.filename_template, settings.default_format)?;
     // Registers the new shortcuts, or leaves the ones that were bound in force
-    // and says why; the login item goes with them. What comes back first is
-    // what is bound now, and it is recorded before the outcome is read: a
-    // rollback can leave a different set bound than the one that went in, and
-    // this is the only place that learns it.
-    let (bound, outcome) = settings::apply(&app, registered.as_ref(), &previous, &settings);
-    state.set_registered_shortcuts(bound.clone());
-    outcome?;
+    // and says why; the login item goes with them. What is bound is recorded
+    // before the outcome is read: a rollback can leave a different set bound
+    // than the one that went in, and this is the only place that learns it.
+    let applied = settings::apply(&app, registered.as_ref(), &previous, &settings);
+    state.set_registered_shortcuts(applied.bound.clone());
+    applied.outcome?;
+    let settings = settings_to_store(&previous, settings, applied.shortcuts_refused.is_some());
     if let Err(err) = settings::save(&app, &settings) {
         // Nothing was written, so nothing may be left in force: an application
         // whose shortcuts disagree with its own settings file is a state the
         // user cannot explain and the next launch would undo behind their back.
-        let (reverted, revert) = settings::apply(&app, bound.as_ref(), &settings, &previous);
-        state.set_registered_shortcuts(reverted);
-        if let Err(revert_err) = revert {
+        let reverted = settings::apply(&app, applied.bound.as_ref(), &settings, &previous);
+        state.set_registered_shortcuts(reverted.bound);
+        if let Err(revert_err) = reverted.outcome {
             return Err(format!(
                 "{err}. Your previous settings could not be put back either ({revert_err}); restart Snapdeck."
             ));
@@ -918,7 +948,38 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<SettingsView,
         return Err(err);
     }
     state.set_settings(settings.clone());
-    Ok(SettingsView::new(settings, bound))
+    Ok(SettingsView::new(
+        settings,
+        applied.bound,
+        applied.shortcuts_refused,
+    ))
+}
+
+/// What a save actually writes down, given what the form asked for and whether
+/// the platform took the shortcuts.
+///
+/// Everything except the shortcuts is what the user typed. The shortcuts are
+/// what is already on disk whenever the rebind was refused, and this is the one
+/// line that decides it.
+///
+/// Two wrong answers were both tried on the way here. Writing the *requested*
+/// shortcuts would record a combination that is not in force and never was, so
+/// the file would claim a key the keyboard does not have. Writing the *bound*
+/// ones would be worse: it replaces the user's own choice with a fallback they
+/// never made, and then there is nothing left in the file to put back into force
+/// once the other application lets go of the combination.
+fn settings_to_store(
+    previous: &Settings,
+    requested: Settings,
+    shortcuts_refused: bool,
+) -> Settings {
+    if !shortcuts_refused {
+        return requested;
+    }
+    Settings {
+        shortcuts: previous.shortcuts.clone(),
+        ..requested
+    }
 }
 
 /// Asks the user for a save folder and proves it can be written to.
@@ -1009,7 +1070,7 @@ mod tests {
     #[test]
     fn a_set_that_did_not_register_is_reported_as_not_bound() {
         let settings = Settings::default();
-        let view = SettingsView::new(settings.clone(), None);
+        let view = SettingsView::new(settings.clone(), None, None);
         assert_eq!(view.settings, settings, "the file's own values are kept");
         assert_eq!(view.bound_shortcuts, None);
 
@@ -1025,11 +1086,110 @@ mod tests {
     #[test]
     fn a_registered_set_is_reported_alongside_the_settings() {
         let settings = Settings::default();
-        let view = SettingsView::new(settings.clone(), Some(settings.shortcuts.clone()));
+        let view = SettingsView::new(settings.clone(), Some(settings.shortcuts.clone()), None);
         let json = serde_json::to_string(&view).expect("render");
         assert!(json.contains("\"boundShortcuts\""), "{json}");
         assert!(json.contains("\"settings\""), "{json}");
         assert_eq!(view.bound_shortcuts, Some(settings.shortcuts));
+    }
+
+    /// The answer a partly-saved change comes back as. The reason the platform
+    /// gave is the half the window cannot work out for itself, so it has to
+    /// travel, and it has to travel under the name the window reads.
+    #[test]
+    fn a_refused_rebind_sends_its_reason_to_the_window() {
+        let settings = Settings::default();
+        let view = SettingsView::new(
+            settings.clone(),
+            Some(settings.shortcuts.clone()),
+            Some("the region shortcut is already taken".to_string()),
+        );
+        let json = serde_json::to_string(&view).expect("render");
+        assert!(json.contains("\"shortcutProblem\""), "{json}");
+        assert!(json.contains("already taken"), "{json}");
+    }
+
+    /// A read has attempted nothing, so it has no reason to report, and the
+    /// window must not be left showing the reason a previous save gave.
+    #[test]
+    fn a_plain_read_carries_no_reason() {
+        let view = SettingsView::new(Settings::default(), None, None);
+        let json = serde_json::to_string(&view).expect("render");
+        assert!(json.contains("\"shortcutProblem\":null"), "{json}");
+    }
+
+    fn stored() -> Settings {
+        Settings {
+            shortcuts: Shortcuts {
+                capture_region: "CmdOrCtrl+Alt+Shift+KeyR".to_string(),
+                ..Settings::default().shortcuts
+            },
+            ..Settings::default()
+        }
+    }
+
+    /// The usual save: what the user typed is what is written.
+    #[test]
+    fn an_accepted_save_writes_what_the_form_asked_for() {
+        let requested = Settings {
+            save_directory: Some(PathBuf::from("/Volumes/Shots")),
+            shortcuts: Settings::default().shortcuts,
+            ..stored()
+        };
+        assert_eq!(
+            settings_to_store(&stored(), requested.clone(), false),
+            requested
+        );
+    }
+
+    /// The case Task 3 exists to fix. Somebody whose stored combination another
+    /// application holds changes only their save folder: the folder is written,
+    /// and the shortcut in the file is untouched, so it is still there to be put
+    /// back into force when the combination comes free.
+    #[test]
+    fn a_refused_rebind_costs_the_shortcuts_and_nothing_else() {
+        let previous = stored();
+        let requested = Settings {
+            save_directory: Some(PathBuf::from("/Volumes/Shots")),
+            ..previous.clone()
+        };
+
+        let written = settings_to_store(&previous, requested, true);
+
+        assert_eq!(
+            written.save_directory,
+            Some(PathBuf::from("/Volumes/Shots")),
+            "the folder is the whole reason the user pressed Save"
+        );
+        assert_eq!(
+            written.shortcuts, previous.shortcuts,
+            "the stored combination has to be left exactly as it is on disk"
+        );
+    }
+
+    /// And a shortcut the user changed in the same save that was refused: the
+    /// requested combination is not written either, because it is not in force.
+    /// The file keeps saying what it said, which is what the user can come back
+    /// and change.
+    #[test]
+    fn a_refused_new_combination_is_not_written_down() {
+        let previous = stored();
+        let requested = Settings {
+            shortcuts: Shortcuts {
+                capture_region: "CmdOrCtrl+Shift+Digit3".to_string(),
+                ..previous.shortcuts.clone()
+            },
+            open_editor_after_capture: !previous.open_editor_after_capture,
+            ..previous.clone()
+        };
+
+        let written = settings_to_store(&previous, requested.clone(), true);
+
+        assert_eq!(written.shortcuts, previous.shortcuts);
+        assert_eq!(
+            written.open_editor_after_capture, requested.open_editor_after_capture,
+            "the rest of the same save still counts"
+        );
     }
 
     #[test]

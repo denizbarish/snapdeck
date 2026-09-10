@@ -2,8 +2,8 @@
 
 A release is cut by pushing a `v*` tag. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 builds the app on `macos-latest`, signs it if it can, and opens a **draft** GitHub release with the
-DMG, an `.app.tar.gz` and their SHA-256 checksums. Nothing becomes public until a human presses
-Publish.
+DMG, an `.app.tar.gz`, their SHA-256 checksums and the signed `latest.json` that installed copies
+update from. Nothing becomes public until a human presses Publish.
 
 ## Cutting a release
 
@@ -21,7 +21,10 @@ Publish.
 
 4. Watch the run: `gh run watch` or the Actions tab.
 5. Open the draft release. Check the artifact names, the checksums and the signing line in the
-   notes, then Publish.
+   notes. Check that `latest.json` is there and that its `version` and `url` match the release; the
+   run logs it with the signature elided. Then Publish.
+6. Publishing is what makes the release reachable at `releases/latest`, which is both the README's
+   install link and the updater's endpoint. Until then, installed copies see nothing.
 
 ### If it goes wrong
 
@@ -72,6 +75,33 @@ throwaway tag instead and delete it and its draft release afterwards.
 
 ## Secrets
 
+The workflow reads two unrelated sets of secrets: the Apple Developer ID credentials, which decide
+whether Gatekeeper knows who built the app, and the updater signing key, which decides whether an
+installed copy will accept a download as coming from this project. They are independent. A release
+can have either, both or neither.
+
+### Apple Developer ID
+
+> [!WARNING]
+> **Before you add these six secrets, change how they reach the build.**
+>
+> The `Provide the Apple Developer ID credentials` step writes all six into `$GITHUB_ENV`. That
+> file is not scoped to a step: everything after it in the job inherits the variables, including
+> `actions/upload-artifact` and any other third-party action the job runs or later gains. The
+> certificate and its password would be in the environment of code this project does not control.
+> Today the secrets do not exist, so the step never runs and the variables are never written, which
+> is the only reason this is written down rather than fixed.
+>
+> The fix is narrow and mechanical: duplicate `Build the app` into two steps guarded by
+> `if: env.SIGNING == 'true'` and `if: env.SIGNING != 'true'`, put the six `secrets.APPLE_*`
+> in the signed step's own `env:`, and delete the `$GITHUB_ENV` step. A step's `env:` block does not
+> outlive the step. **Do this on the day the secrets are added, in the same change**, not after the
+> first release that used them: a secret that has already been through an untrusted process has to
+> be rotated, not narrowed.
+>
+> The ad-hoc step below writes only `APPLE_SIGNING_IDENTITY=-` to `$GITHUB_ENV`, which is not a
+> secret and can stay where it is.
+
 Signing and notarization are optional. When the six secrets below are all set, the workflow hands
 them to `tauri build`, which signs the bundle with the certificate and sends it to Apple for
 notarization. When any of them is missing, that step is skipped, the workflow signs the bundle
@@ -93,6 +123,91 @@ treats the six as one unit and skips them together.
 The workflow does not decide what the notes say from which secrets were set. After the build it
 reads the signature off the bundle with `codesign` and reports what Gatekeeper will actually see, so
 a signing step that silently did nothing cannot be reported as a signed release.
+
+### The updater signing key
+
+| Secret | What it does |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | The minisign private key, as written by `pnpm tauri signer generate`. The workflow signs the `.app.tar.gz` with it and puts the signature in `latest.json`. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password that key was generated with. |
+
+Both or neither: the key in use carries a password, and a signing step that runs without it fails in
+the middle of a release rather than before it. When either is missing the workflow writes no
+`latest.json`, logs a warning that says so, and publishes the release anyway. That release is one
+nobody can update to: every installed copy asks `releases/latest/download/latest.json`, gets a 404,
+and reports that it could not check.
+
+**The private key is not in this repository and must never be.** It exists as that secret and as
+whatever backup the maintainer keeps. The matching public key is `plugins.updater.pubkey` in
+`apps/desktop/src-tauri/tauri.conf.json`, ships inside every build, and is what makes the check work
+on a machine that has never seen this repository.
+
+Losing the private key is not recoverable in place. A new key means a new `pubkey` in
+`tauri.conf.json`, and every copy already installed carries the old one: those installations can
+still check for updates, but they will refuse every download signed with the new key, and their
+users have to download a release by hand once. Rotating the key is therefore a thing to do
+deliberately and to say in the release notes, not a thing to do because the old one was mislaid.
+
+To generate a key, if there is ever a reason to:
+
+```bash
+pnpm tauri signer generate -w /path/outside/this/repo/snapdeck.key
+```
+
+It writes the private key to that path and the public key beside it as `.pub`. Put the private key
+and its password into the two secrets above, put the contents of the `.pub` file into
+`plugins.updater.pubkey`, and keep a backup of both somewhere that is not a build machine.
+
+## The update manifest
+
+`Check for Updates…` in the app reads one file: `latest.json`, published as an asset of the latest
+non-prerelease GitHub release. The `Sign the update archive and write the manifest` step writes it,
+and **nothing writes it by hand**. That is the point of the step rather than a style preference: the
+signature it carries is taken over the exact `.app.tar.gz` being uploaded in the same run, the URL
+names that same asset, and the version is the one the version job already proved the tag,
+`tauri.conf.json` and `Cargo.toml` agree on. There is no moment at which the manifest and the
+release can come to describe different builds.
+
+```json
+{
+  "version": "0.2.0",
+  "notes": "…",
+  "pub_date": "2026-01-01T00:00:00Z",
+  "platforms": {
+    "darwin-aarch64": { "signature": "…", "url": "https://github.com/…/Snapdeck_0.2.0_aarch64.app.tar.gz" }
+  }
+}
+```
+
+Three things about it are worth knowing.
+
+The platform key is mapped from the bundle's own filename, not passed through. Tauri names an Intel
+bundle `_x64` while the updater looks for `darwin-x86_64`, so the two vocabularies agree on Apple
+silicon and disagree on Intel. An architecture the mapping does not recognise fails the step rather
+than publishing a manifest no installed copy can match itself against.
+
+The `notes` are the release notes minus the **Install** and **Checksums** sections. Those two are
+for somebody downloading a DMG by hand: the updater does the installing itself, and it verifies the
+download with the signature rather than with a checksum a person compares by eye.
+
+The signature is inline. The `.sig` file the signer leaves next to the archive is deleted rather
+than published, because two copies of one signature is one more thing that can disagree.
+
+Because the release is a **draft** until a human publishes it, `latest.json` is not reachable at
+`releases/latest/download/latest.json` until then. No installed copy sees a release before it is
+published, which is the intended order.
+
+## Pre-releases
+
+A tag with a pre-release part, `v0.2.0-rc.1`, is published with `--prerelease`. Two things point at
+GitHub's idea of "latest" and neither should ever reach a release candidate: the README's install
+link, and the updater endpoint every installed copy asks. The flag is set explicitly either way, so
+re-running a build cannot leave a previous tag's flag on the release.
+
+The app refuses one more time on its own account. `updater::is_upgrade` will not offer a
+pre-release to a build that is not itself a pre-release, however the two versions sort. That is
+deliberate belt and braces: the `--prerelease` flag depends on a tag being spelled the way this
+paragraph assumes, and on nobody publishing a manifest by hand.
 
 ## Ad-hoc signing
 
@@ -147,8 +262,9 @@ Two consequences worth knowing:
 | Asset | What it is |
 | --- | --- |
 | `Snapdeck_<version>_aarch64.dmg` | The disk image, which is what the README tells users to download. |
-| `Snapdeck_<version>_aarch64.app.tar.gz` | The `.app` on its own, for anyone scripting an install. |
+| `Snapdeck_<version>_aarch64.app.tar.gz` | The `.app` on its own. It is what an in-app update downloads, and what anyone scripting an install would use. |
 | `SHA256SUMS.txt` | The checksums of the two, in `shasum -a 256 -c` format. |
+| `latest.json` | The update manifest, when the updater key is set. See [The update manifest](#the-update-manifest). |
 
 The architecture in those names is whatever `macos-latest` builds, currently Apple silicon. The
 workflow reads it off the DMG that Tauri produced rather than assuming it, so a runner change shows

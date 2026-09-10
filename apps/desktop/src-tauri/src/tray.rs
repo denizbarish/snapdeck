@@ -149,13 +149,19 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     // The ellipsis is the platform's own promise that the item opens something
     // rather than doing something, which is what Apple's own menus mean by it.
     let settings = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
+    // The visible half of the update story, and the reason the automatic check
+    // can stay off by default: an update is always one menu item away, so
+    // nobody has to leave a network call switched on to get one. The ellipsis
+    // is honest here too, since the check ends in a dialog either way.
+    let check_for_updates =
+        MenuItemBuilder::with_id("check_for_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Snapdeck").build(app)?;
     let menu = MenuBuilder::new(app)
         .items(&[&region, &window, &display])
         .separator()
         .items(&[&last_failure, &open_log])
         .separator()
-        .items(&[&settings, &quit])
+        .items(&[&check_for_updates, &settings, &quit])
         .build()?;
 
     let tray = TrayIconBuilder::with_id("main")
@@ -168,6 +174,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "capture_window" => request_capture(app, "window"),
             "capture_display" => request_capture(app, "display"),
             "open_log" => reveal_log(app),
+            "check_for_updates" => crate::updater::check_on_request(app),
             "settings" => crate::settings_window::open_settings(app),
             "quit" => app.exit(0),
             _ => {}

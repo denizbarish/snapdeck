@@ -43,6 +43,16 @@ image = { workspace = true, features = ["jpeg"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The frozen frame's absolute path travels in the overlay URL's query string.
 percent-encoding = "2"
+# Updates from GitHub Releases, over a signed manifest. `default-features` is
+# left on for `rustls-tls` and `system-proxy`; `zip` comes with them and is the
+# only part this build cannot use, since a macOS update arrives as a `.tar.gz`
+# and the feature is Windows-only in the plugin's own `cfg`.
+tauri-plugin-updater = "2.11.0"
+# `semver::Version` is the type the updater's version comparator is written
+# against, and the plugin does not re-export it. The comparison rule is
+# `updater::is_upgrade`, which is the one place this application decides what
+# counts as an update.
+semver = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The overlay window has to be lifted above the menu bar and allowed over a

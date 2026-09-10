@@ -47,19 +47,26 @@ export type Settings = {
   shortcuts: Shortcuts
   launchAtLogin: boolean
   openEditorAfterCapture: boolean
+  checkForUpdatesAtLaunch: boolean
 }
 
 /**
- * Mirrors `commands::SettingsView`: the settings, and what the keyboard
- * actually has.
+ * Mirrors `commands::SettingsView`: the settings, what the keyboard actually
+ * has, and why those two disagree when they do.
  *
  * `boundShortcuts` is `null` when nothing is registered at all, which is a
  * state the window has to be able to render rather than one it can treat as
  * "no answer yet".
+ *
+ * `shortcutProblem` is the platform's own reason for refusing a rebind, and
+ * only a save produces one. The window can see that the form and the keyboard
+ * disagree; it cannot see *why*, and "why" is the half that tells the user
+ * whether this is theirs to fix.
  */
 export type SettingsView = {
   settings: Settings
   boundShortcuts: Shortcuts | null
+  shortcutProblem: string | null
 }
 
 /** The capture modes, in the order the tray menu lists them. */
@@ -89,6 +96,18 @@ type Notice = { kind: 'ok' | 'error'; text: string }
  * The same sentence covers a shortcut the user has just recorded and not yet
  * saved, which is also not in force, and is also worth saying.
  *
+ * `problem` is the reason the last save gave, and it takes over when there is
+ * one. It is more specific than anything this function can work out on its own,
+ * it already names what is bound instead, and it answers the question the
+ * derived sentence cannot: whether the combination is refused because another
+ * application holds it, which is not something the user can fix from here. The
+ * rest of that save went through, so it says so, because a warning over a form
+ * that has just been saved otherwise reads as a save that failed. It is written
+ * about the save that produced it rather than about the form as it stands, so
+ * that editing something else afterwards cannot make it untrue; the recorder
+ * clears it, because a reason for one combination has no business sitting over
+ * another.
+ *
  * Compared as strings, deliberately. `boundShortcuts` is the very value Rust
  * registered, so anything different came from this form; the question here is
  * "is this the set I was handed", not "is this the same key", which only the
@@ -97,7 +116,14 @@ type Notice = { kind: 'ok' | 'error'; text: string }
  * Exported to be tested: it is the sentence that decides whether the user finds
  * out their keyboard is empty.
  */
-export function shortcutNotice(shown: Shortcuts, bound: Shortcuts | null): string | null {
+export function shortcutNotice(
+  shown: Shortcuts,
+  bound: Shortcuts | null,
+  problem: string | null,
+): string | null {
+  if (problem !== null) {
+    return `${problem} Your other settings were saved, and this shortcut is still the one in your settings: pick another combination here, or quit whatever is holding this one and save again.`
+  }
   if (bound === null) {
     return 'No capture shortcut is bound right now. Save to put these into force, or use the menu bar item to take a capture.'
   }
@@ -111,6 +137,9 @@ export function SettingsWindow(): JSX.Element {
   // What the platform has registered, which is a different question from what
   // the form holds; `null` is a real answer and means nothing is bound.
   const [boundShortcuts, setBoundShortcuts] = useState<Shortcuts | null>(null)
+  // Why the last save did not change the shortcuts, which is a thing only Rust
+  // can say and only a save can produce.
+  const [shortcutProblem, setShortcutProblem] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [saving, setSaving] = useState(false)
   const [recording, setRecording] = useState<keyof Shortcuts | null>(null)
@@ -131,6 +160,7 @@ export function SettingsWindow(): JSX.Element {
   const applyView = useCallback((view: SettingsView) => {
     setSettings(view.settings)
     setBoundShortcuts(view.boundShortcuts)
+    setShortcutProblem(view.shortcutProblem)
   }, [])
 
   useEffect(() => {
@@ -171,6 +201,9 @@ export function SettingsWindow(): JSX.Element {
       )
       setRecording(null)
       setNotice(null)
+      // The reason belonged to the combination that was just replaced. Leaving
+      // it up would put an explanation of one shortcut over another one.
+      setShortcutProblem(null)
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
@@ -203,7 +236,16 @@ export function SettingsWindow(): JSX.Element {
       // platform actually accepted.
       const inForce = await invoke<SettingsView>('save_settings', { settings })
       applyView(inForce)
-      setNotice({ kind: 'ok', text: 'Saved. The new settings are in force now.' })
+      setNotice({
+        kind: 'ok',
+        // A save whose shortcuts were refused is still a save, and saying only
+        // "Saved" over a warning the user has to scroll up to read would be the
+        // half of the truth that costs them nothing to miss.
+        text:
+          inForce.shortcutProblem === null
+            ? 'Saved. The new settings are in force now.'
+            : 'Saved, apart from the shortcuts. The reason is above.',
+      })
     } catch (error: unknown) {
       setNotice({ kind: 'error', text: String(error) })
       // Nothing was changed, so the form has to go back to showing what is
@@ -219,7 +261,7 @@ export function SettingsWindow(): JSX.Element {
     }
   }, [applyView, settings])
 
-  const unbound = settings ? shortcutNotice(settings.shortcuts, boundShortcuts) : null
+  const unbound = settings ? shortcutNotice(settings.shortcuts, boundShortcuts, shortcutProblem) : null
 
   if (!settings) {
     return (
@@ -329,6 +371,25 @@ export function SettingsWindow(): JSX.Element {
           label="Launch Snapdeck at login"
           checked={settings.launchAtLogin}
           onChange={(launchAtLogin) => update({ launchAtLogin })}
+        />
+      </Section>
+
+      {/*
+        A section of its own, and the hint is the reason. This is the only
+        switch in the window that decides whether Snapdeck talks to the network
+        at all, so it does not belong among preferences about where files go.
+        It is off until it is turned on: Check for Updates… in the menu bar is
+        always there, so nobody has to leave a connection switched on to get an
+        update.
+      */}
+      <Section
+        title="Updates"
+        hint="Snapdeck makes no other network connection. You can always check by hand from the menu bar."
+      >
+        <Check
+          label="Check for updates when Snapdeck starts"
+          checked={settings.checkForUpdatesAtLaunch}
+          onChange={(checkForUpdatesAtLaunch) => update({ checkForUpdatesAtLaunch })}
         />
       </Section>
 

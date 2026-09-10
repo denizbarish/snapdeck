@@ -84,6 +84,12 @@ pub struct Settings {
     pub shortcuts: Shortcuts,
     pub launch_at_login: bool,
     pub open_editor_after_capture: bool,
+    /// Whether to ask the release endpoint for a newer version at launch.
+    ///
+    /// The only setting in here that decides whether this application talks to
+    /// the network at all, which is why it is a setting rather than a
+    /// behaviour. See `updater`.
+    pub check_for_updates_at_launch: bool,
 }
 
 /// Reads a `shortcuts` object, filling any binding it does not name from the
@@ -152,6 +158,12 @@ impl Default for Settings {
             },
             launch_at_login: false,
             open_editor_after_capture: true,
+            // Off, and the one default in here that is a promise rather than a
+            // preference: Snapdeck makes no network connection the user did not
+            // ask for, and a check that runs because nobody turned it off is
+            // one they did not ask for. `Check for Updates…` in the menu bar
+            // works whatever this says.
+            check_for_updates_at_launch: false,
         }
     }
 }
@@ -219,35 +231,98 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-/// Puts `next` into force, or leaves what was in force alone and says why.
+/// What `apply` did, and what it could not do.
 ///
-/// All or nothing. A half-applied change is the failure this exists to prevent:
-/// the user would be left with some of what they asked for, no message, and no
-/// way to work out which half. The shortcuts go first because they are the part
-/// that can leave the application in a state the user cannot explain, and the
-/// login item is put back the same way when it is the half that fails.
+/// Three answers rather than one, because the shortcuts are not like the rest of
+/// the form and pretending they are is what made a save impossible to complete.
+pub struct Applied {
+    /// What the platform has bound once `apply` returns.
+    ///
+    /// The caller has to record this whether the save succeeded or not: a
+    /// rollback can leave a different set bound than the one that went in, and
+    /// nothing else is in a position to notice.
+    pub bound: Option<Shortcuts>,
+    /// Why the bindings are not the ones `next` asked for, or `None` when they
+    /// are.
+    ///
+    /// The caller's cue to write the *stored* shortcuts back rather than the
+    /// requested ones, and to say so; see `commands::save_settings`.
+    pub shortcuts_refused: Option<String>,
+    /// Whether the rest of the change went into force.
+    pub outcome: Result<(), String>,
+}
+
+/// Puts `next` into force, and says which parts of it could not be.
+///
+/// The login item is all or nothing: it is either on or off, this application
+/// is the one that decides, and a failure there means nothing may be written.
+///
+/// The shortcuts are not, and treating them as though they were is the trap this
+/// signature exists to get out of. A combination another application holds
+/// cannot be registered no matter how many times it is tried, and it stays in
+/// the settings file waiting to be changed. When a refusal was fatal, every
+/// later save was refused with it: somebody whose stored shortcut had been taken
+/// by an application they do not control could not change their save folder,
+/// their filename template or anything else until they resolved a conflict that
+/// was not theirs to resolve. So a refused rebind is now reported rather than
+/// thrown: `shortcuts_refused` carries the reason, the previous bindings are
+/// back in force by the time it is set, and the caller keeps the stored
+/// shortcuts and writes the rest.
 ///
 /// `registered` is what the platform has actually accepted, which is not the
-/// same question as what `previous` says; see `shortcuts::rebind`. The first
-/// half of the answer is what is bound once this returns, which the caller has
-/// to record whether this succeeded or not: a rollback can leave a different
-/// set bound than the one that went in, and nothing else is in a position to
-/// notice.
+/// same question as what `previous` says; see `shortcuts::rebind`.
 pub fn apply(
     app: &AppHandle,
     registered: Option<&Shortcuts>,
     previous: &Settings,
     next: &Settings,
-) -> (Option<Shortcuts>, Result<(), String>) {
-    let (bound, outcome) = crate::shortcuts::rebind(app, registered, &next.shortcuts);
-    if let Err(err) = outcome {
-        return (bound, Err(err));
-    }
+) -> Applied {
+    apply_with(
+        |from, to| crate::shortcuts::rebind(app, from, to),
+        |enabled| set_launch_at_login(app, enabled),
+        || crate::shortcuts::unregister_shortcuts(app),
+        registered,
+        previous,
+        next,
+    )
+}
+
+/// The decisions inside `apply`, with the two side effects injected.
+///
+/// Split out for the reason `shortcuts::rebind_with` is: neither case worth
+/// testing can be arranged through the live platform. A combination macOS will
+/// refuse is not something a test can set up, and a login item that fails to be
+/// written needs a system that refuses to write it.
+fn apply_with<R, L, U>(
+    mut rebind: R,
+    mut set_login: L,
+    mut unregister: U,
+    registered: Option<&Shortcuts>,
+    previous: &Settings,
+    next: &Settings,
+) -> Applied
+where
+    R: FnMut(Option<&Shortcuts>, &Shortcuts) -> (Option<Shortcuts>, Result<(), String>),
+    L: FnMut(bool) -> Result<(), String>,
+    U: FnMut() -> Result<(), String>,
+{
+    let (bound, outcome) = rebind(registered, &next.shortcuts);
+    // `rebind` has already put back whatever it could, so this is a reason to
+    // report and not a state to recover from.
+    let shortcuts_refused = outcome.err();
     if next.launch_at_login == previous.launch_at_login {
-        return (bound, Ok(()));
+        return Applied {
+            bound,
+            shortcuts_refused,
+            outcome: Ok(()),
+        };
     }
-    let Err(err) = set_launch_at_login(app, next.launch_at_login) else {
-        return (bound, Ok(()));
+    let Err(err) = set_login(next.launch_at_login) else {
+        return Applied {
+            bound,
+            shortcuts_refused,
+            outcome: Ok(()),
+        };
     };
     // Nothing is written when this returns an error, so the running application
     // has to go back to the bindings it had before this call. Back to
@@ -257,25 +332,35 @@ pub fn apply(
     let Some(restore_to) = registered else {
         // There were no bindings before this, so putting things back means
         // taking down the ones that were just registered.
-        return match crate::shortcuts::unregister_shortcuts(app) {
-            Ok(()) => (None, Err(err)),
-            Err(restore_err) => (
+        return match unregister() {
+            Ok(()) => Applied {
+                bound: None,
+                shortcuts_refused,
+                outcome: Err(err),
+            },
+            Err(restore_err) => Applied {
                 bound,
-                Err(format!(
+                shortcuts_refused,
+                outcome: Err(format!(
                     "{err}. The shortcuts registered along the way could not be taken back down either ({restore_err})."
                 )),
-            ),
+            },
         };
     };
-    let (restored, restore) = crate::shortcuts::rebind(app, bound.as_ref(), restore_to);
+    let (restored, restore) = rebind(bound.as_ref(), restore_to);
     match restore {
-        Ok(()) => (restored, Err(err)),
-        Err(restore_err) => (
-            restored,
-            Err(format!(
+        Ok(()) => Applied {
+            bound: restored,
+            shortcuts_refused,
+            outcome: Err(err),
+        },
+        Err(restore_err) => Applied {
+            bound: restored,
+            shortcuts_refused,
+            outcome: Err(format!(
                 "{err}. The previous shortcuts could not be put back either ({restore_err})."
             )),
-        ),
+        },
     }
 }
 
@@ -461,11 +546,13 @@ mod tests {
     /// changed later. `assert_eq!(commands::TEMPLATE, settings.template)` would
     /// pass right up until the moment it stopped mattering.
     ///
-    /// All ten, not the seven with an obvious reason to state one. `editor.rs`,
-    /// `overlay.rs` and `report.rs` have no such reason today, which is not a
-    /// reason to leave them unread: the list is a rule about the crate, and a
-    /// rule with three holes in it is where the next copy goes.
-    const SOURCES: [(&str, &str); 10] = [
+    /// All eleven, not the seven with an obvious reason to state one.
+    /// `editor.rs`, `overlay.rs` and `report.rs` have no such reason today,
+    /// which is not a reason to leave them unread: the list is a rule about the
+    /// crate, and a rule with three holes in it is where the next copy goes.
+    /// Every module added to the crate joins it, which is why `updater.rs` is
+    /// here.
+    const SOURCES: [(&str, &str); 11] = [
         ("commands.rs", include_str!("commands.rs")),
         ("editor.rs", include_str!("editor.rs")),
         ("lib.rs", include_str!("lib.rs")),
@@ -476,6 +563,7 @@ mod tests {
         ("shortcuts.rs", include_str!("shortcuts.rs")),
         ("state.rs", include_str!("state.rs")),
         ("tray.rs", include_str!("tray.rs")),
+        ("updater.rs", include_str!("updater.rs")),
     ];
 
     /// The settings window's own source, which is the other side that could
@@ -530,6 +618,10 @@ mod tests {
         assert_eq!(settings.default_format, Settings::default().default_format);
         assert_eq!(settings.save_directory, None);
         assert!(settings.open_editor_after_capture);
+        // The one default that is a promise: a file written before this setting
+        // existed must not turn a network check on for somebody who never asked
+        // for one.
+        assert!(!settings.check_for_updates_at_launch);
     }
 
     /// A menu bar app that will not launch has no way to tell the user why, so
@@ -601,6 +693,7 @@ mod tests {
             },
             launch_at_login: true,
             open_editor_after_capture: false,
+            check_for_updates_at_launch: true,
         };
         let json = serde_json::to_string(&written).expect("render");
         let (read_back, complaint) = settings_from_json(&json);
@@ -621,6 +714,7 @@ mod tests {
             "shortcuts",
             "launchAtLogin",
             "openEditorAfterCapture",
+            "checkForUpdatesAtLaunch",
             "captureRegion",
         ] {
             assert!(
@@ -736,6 +830,163 @@ mod tests {
             std::env::temp_dir().join(format!("snapdeck-{}-{unique}-{name}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("create the temporary directory");
         directory
+    }
+
+    /// A rebind that never fails, for the cases that are not about the
+    /// shortcuts.
+    fn accepts(_: Option<&Shortcuts>, to: &Shortcuts) -> (Option<Shortcuts>, Result<(), String>) {
+        (Some(to.clone()), Ok(()))
+    }
+
+    /// A rebind the platform refuses, which leaves what was already bound in
+    /// force. That second half is what `shortcuts::rebind` guarantees and what
+    /// makes a refusal survivable at all.
+    fn refuses(from: Option<&Shortcuts>, _: &Shortcuts) -> (Option<Shortcuts>, Result<(), String>) {
+        (
+            from.cloned(),
+            Err(
+                "the region shortcut is already taken. Your previous shortcuts are still in force."
+                    .to_string(),
+            ),
+        )
+    }
+
+    fn folder_changed(previous: &Settings) -> Settings {
+        Settings {
+            save_directory: Some(PathBuf::from("/Volumes/Shots")),
+            ..previous.clone()
+        }
+    }
+
+    /// The trap this whole signature exists to get out of, in one test. A
+    /// stored combination another application holds cannot be registered, and
+    /// it must not therefore refuse a save that has nothing to do with it: the
+    /// save folder change goes through, and the reason the keyboard did not
+    /// change comes back to be shown.
+    #[test]
+    fn a_save_that_only_changes_the_folder_survives_a_shortcut_another_app_holds() {
+        let previous = Settings::default();
+        let fallback = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+            ..previous.shortcuts.clone()
+        };
+
+        let applied = apply_with(
+            refuses,
+            |_| panic!("the login item did not change and must not be touched"),
+            || panic!("nothing was rolled back"),
+            Some(&fallback),
+            &previous,
+            &folder_changed(&previous),
+        );
+
+        applied
+            .outcome
+            .expect("a shortcut somebody else holds may not refuse the rest of the form");
+        let refusal = applied
+            .shortcuts_refused
+            .expect("and the user has to be told why the keyboard did not change");
+        assert!(refusal.contains("already taken"), "{refusal}");
+        assert_eq!(
+            applied.bound,
+            Some(fallback),
+            "what was working has to still be working"
+        );
+    }
+
+    /// The same refusal must not stop the rest of the form reaching the system
+    /// either: a login item toggled in the same save is still applied.
+    #[test]
+    fn a_refused_rebind_does_not_hold_back_the_login_item() {
+        let previous = Settings::default();
+        let next = Settings {
+            launch_at_login: !previous.launch_at_login,
+            ..folder_changed(&previous)
+        };
+        let mut asked_for = None;
+
+        let applied = apply_with(
+            refuses,
+            |enabled| {
+                asked_for = Some(enabled);
+                Ok(())
+            },
+            || panic!("nothing failed, so nothing is rolled back"),
+            Some(&previous.shortcuts),
+            &previous,
+            &next,
+        );
+
+        applied.outcome.expect("the login item was accepted");
+        assert!(applied.shortcuts_refused.is_some());
+        assert_eq!(asked_for, Some(next.launch_at_login));
+    }
+
+    /// The guarantee that did not change. A login item the system refuses is
+    /// not a partial save: nothing is written, and the bindings go back to what
+    /// they were before the call.
+    #[test]
+    fn a_refused_login_item_refuses_the_save_and_puts_the_bindings_back() {
+        let previous = Settings::default();
+        let next = Settings {
+            launch_at_login: !previous.launch_at_login,
+            shortcuts: Shortcuts {
+                capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+                ..previous.shortcuts.clone()
+            },
+            ..previous.clone()
+        };
+
+        let applied = apply_with(
+            accepts,
+            |_| Err("Snapdeck could not add its login item.".to_string()),
+            || panic!("there were bindings to go back to"),
+            Some(&previous.shortcuts),
+            &previous,
+            &next,
+        );
+
+        let err = applied
+            .outcome
+            .expect_err("a login item that cannot be written refuses the save");
+        assert!(err.contains("login item"), "{err}");
+        assert_eq!(
+            applied.bound,
+            Some(previous.shortcuts),
+            "the shortcuts this save registered have to come back off"
+        );
+        assert_eq!(applied.shortcuts_refused, None);
+    }
+
+    /// The same failure with nothing bound to go back to: the rollback is a
+    /// removal, not a restore, and the answer has to say the keyboard is empty.
+    #[test]
+    fn a_refused_login_item_with_nothing_bound_takes_the_new_bindings_down() {
+        let previous = Settings::default();
+        let next = Settings {
+            launch_at_login: !previous.launch_at_login,
+            ..previous.clone()
+        };
+        let mut unregistered = false;
+
+        let applied = apply_with(
+            accepts,
+            |_| Err("Snapdeck could not add its login item.".to_string()),
+            || {
+                unregistered = true;
+                Ok(())
+            },
+            None,
+            &previous,
+            &next,
+        );
+
+        applied.outcome.expect_err("the save is refused");
+        assert!(
+            unregistered,
+            "the bindings this save added have to come off"
+        );
+        assert_eq!(applied.bound, None);
     }
 
     /// The extension is what decides whether an edit replaces the capture or
