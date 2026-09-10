@@ -15,19 +15,14 @@ can be checked with `shasum -a 256 -c SHA256SUMS.txt`.
 
 1. Open the DMG and drag **Snapdeck** into Applications.
 2. **The first launch takes an extra step.** There is no Apple Developer ID for this project, so
-   releases are unsigned, and macOS will not open a downloaded app it cannot attribute to a
-   developer. Control-click (or right-click) Snapdeck in Applications, choose **Open**, and confirm.
-   On macOS 15 and later that menu is often refused as well, and the app is allowed instead from
-   System Settings > Privacy & Security, where a message about Snapdeck appears with an
-   **Open Anyway** button. If macOS refuses both ways, wording it as Snapdeck being damaged rather
-   than unverified, strip the quarantine flag yourself and open it normally:
+   releases are signed ad-hoc rather than by a named developer, and macOS will not open a downloaded
+   app it cannot attribute to one. On macOS 14, Control-click (or right-click) Snapdeck in
+   Applications, choose **Open**, and confirm. On macOS 15 and later that dialog offers no way
+   through: dismiss it, then open System Settings > Privacy & Security, where a message about
+   Snapdeck now has an **Open Anyway** button.
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Snapdeck.app
-   ```
-
-   Whichever of the three it takes, it is once per install: macOS remembers, and every later launch
-   is an ordinary double-click. Building from source avoids the step altogether.
+   Either way it is once per install: macOS remembers, and every later launch is an ordinary
+   double-click. Building from source avoids the step altogether.
 3. Snapdeck is a menu bar app. Nothing appears in the Dock and no window opens on launch: look for
    its icon in the menu bar.
 4. The first capture asks for Screen Recording permission. Grant it in System Settings > Privacy &

@@ -74,8 +74,8 @@ throwaway tag instead and delete it and its draft release afterwards.
 
 Signing and notarization are optional. When the six secrets below are all set, the workflow hands
 them to `tauri build`, which signs the bundle with the certificate and sends it to Apple for
-notarization. When any of them is missing, that step is skipped, the build produces an ad-hoc
-signed bundle, and the release notes say so. **The absence of these secrets is not an error.**
+notarization. When any of them is missing, that step is skipped, the workflow signs the bundle
+ad-hoc instead, and the release notes say so. **The absence of these secrets is not an error.**
 
 | Secret | What it does |
 | --- | --- |
@@ -94,32 +94,45 @@ The workflow does not decide what the notes say from which secrets were set. Aft
 reads the signature off the bundle with `codesign` and reports what Gatekeeper will actually see, so
 a signing step that silently did nothing cannot be reported as a signed release.
 
+## Ad-hoc signing
+
+When the Developer ID secrets are absent the workflow exports `APPLE_SIGNING_IDENTITY=-` before the
+build. `-` is codesign's ad-hoc identity: it needs no Apple account and costs nothing, and Tauri
+signs the `.app` with it and only then builds the DMG around it, so the DMG carries the sealed
+bundle. If the secrets are present, the real identity is already in the environment and the ad-hoc
+step does not run.
+
+This is not a substitute for a Developer ID. An ad-hoc signature names no developer and Gatekeeper
+still rejects it. What it does is seal the bundle's resources, and that seal is the difference
+between an app macOS can assess and one it cannot:
+
+| | Without | With |
+| --- | --- | --- |
+| `Contents/_CodeSignature` | absent | present |
+| `codesign --verify --deep --strict` | fails: `code has no resources but signature indicates they must be present` | passes |
+| `spctl --assess` | the same failure, so no verdict at all | `rejected`, the verdict an unnotarised app is supposed to get |
+| First launch of a download | often refused as **damaged**, which sends people to the Trash | refused as an **unidentified developer**, which is a dialog with a way through |
+
+The `Collect the bundles` step runs `codesign --verify --deep --strict` on the finished `.app` and
+fails the build if it does not pass, on both signing paths. It also logs `spctl --assess` without
+asserting on it, since a rejection is the correct outcome for an ad-hoc build and a pass is the
+correct outcome for a notarized one.
+
 ## What an unsigned release is like for a user
 
-The bundle carries only the ad-hoc signature the linker leaves on an Apple silicon binary. Nothing
-seals the bundle itself, so `codesign --verify` on the `.app` fails outright and `spctl` cannot
-assess it at all:
+The first launch of a downloaded copy is refused, because macOS cannot attribute the app to a
+developer. There are two ways through it, by macOS version:
 
-```
-$ codesign --verify --deep --strict Snapdeck.app
-Snapdeck.app: code has no resources but signature indicates they must be present
-```
-
-That is what `tauri build` produces without signing credentials, locally and in CI alike, and it
-means the first launch of a downloaded copy is refused. There are three ways through it, in the
-order to try them:
-
-1. Control-click (or right-click) the app in Applications and choose **Open**, then confirm.
-2. On macOS 15 and later that menu is often refused as well, and the app is allowed from System
-   Settings > Privacy & Security, where a message about Snapdeck appears with an **Open Anyway**
+1. **macOS 14.** Control-click (or right-click) the app in Applications and choose **Open**, then
+   confirm.
+2. **macOS 15 and later.** That dialog no longer offers a way through. Dismiss it, then open System
+   Settings > Privacy & Security, where a message about Snapdeck now carries an **Open Anyway**
    button.
-3. If macOS refuses both, which it words as the app being damaged rather than unverified, the
-   quarantine flag has to go: `xattr -dr com.apple.quarantine /Applications/Snapdeck.app`.
 
 It is once per install; macOS remembers.
 
-The app itself is the same either way. What signing changes is the first ten seconds of the first
-launch, and how much a stranger has to trust the download.
+The app itself is the same either way. What a Developer ID changes is the first ten seconds of the
+first launch, and how much a stranger has to trust the download.
 
 Two consequences worth knowing:
 

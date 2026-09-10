@@ -11,9 +11,11 @@ on:
         required: true
         type: string
 
-# The draft release and its assets are written with the job's own token.
+# Read-only by default, so the version job below gets nothing it does not need.
+# Only the build job, which writes the draft release and its assets, is granted
+# `contents: write`.
 permissions:
-  contents: write
+  contents: read
 
 # Two runs for the same tag would race each other over the same draft release.
 # Queue the second one rather than cancelling the first: a cancelled run can
@@ -105,6 +107,9 @@ jobs:
     # that needs a Metal SDK macos-14 does not ship. The app's own runtime
     # baseline is still macOS 14.0, set in `tauri.conf.json`.
     runs-on: macos-latest
+    # The draft release and its assets are written with the job's own token.
+    permissions:
+      contents: write
     env:
       TAG: ${{ needs.version.outputs.tag }}
       VERSION: ${{ needs.version.outputs.version }}
@@ -136,10 +141,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Runs only when every Developer ID secret is set. When they are not, the
-      # variables stay absent and `tauri build` produces the same ad-hoc signed
-      # bundle a developer gets locally, rather than failing: Tauri reads these
-      # with `var_os`, which cannot tell an empty variable from an unset one, so
-      # passing them through unconditionally would break every unsigned build.
+      # variables stay absent and the ad-hoc step below takes over rather than
+      # the build failing: Tauri reads these with `var_os`, which cannot tell an
+      # empty variable from an unset one, so passing them through
+      # unconditionally would break every unsigned build.
       - name: Provide the Apple Developer ID credentials
         if: env.SIGNING == 'true'
         env:
@@ -162,6 +167,25 @@ jobs:
             } >> "$GITHUB_ENV"
           done
 
+      # The other half of the same decision, for when there is no Developer ID.
+      # `-` is codesign's ad-hoc identity: it needs no Apple account, and it
+      # proves nothing about who built the app. What it does is seal the bundle,
+      # and a sealed bundle is what Gatekeeper needs before it can reach a
+      # verdict at all. Without it the bundle has no `Contents/_CodeSignature`,
+      # only the linker's signature on the executable, `codesign --verify` fails
+      # on the `.app`, and macOS refuses a downloaded copy as *damaged* rather
+      # than as coming from an unidentified developer, which sends people to the
+      # Trash instead of to Open Anyway.
+      #
+      # Set here rather than in `tauri.conf.json` so a local `pnpm tauri build`
+      # is unchanged, and through `$GITHUB_ENV` rather than the build step's own
+      # `env:`, which would override the real identity when the secrets exist.
+      # Tauri signs the `.app` and only then builds the DMG around it, so the
+      # published DMG carries the sealed bundle.
+      - name: Sign the app bundle ad-hoc
+        if: env.SIGNING != 'true'
+        run: echo 'APPLE_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+
       - name: Build the app
         run: pnpm tauri build
 
@@ -174,6 +198,18 @@ jobs:
           bundle=target/release/bundle
           app="$bundle/macos/Snapdeck.app"
           [ -d "$app" ] || { echo "::error::no app bundle at $app"; exit 1; }
+
+          # The seal, checked on the bundle that is about to be packaged rather
+          # than assumed from the step that was supposed to produce it. This
+          # holds for both signing paths and is a hard failure in both: an
+          # unsealed bundle is one macOS calls damaged, and shipping a DMG full
+          # of that is worse than not shipping.
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # What Gatekeeper makes of it. Recorded, not asserted: an ad-hoc build
+          # is rejected here on purpose, and a notarized one would pass, so
+          # neither outcome is an error for this workflow.
+          spctl --assess --type execute --verbose=4 "$app" || true
 
           dmgs=("$bundle"/dmg/*.dmg)
           if [ "${#dmgs[@]}" -ne 1 ]; then
@@ -196,8 +232,9 @@ jobs:
           ( cd dist && shasum -a 256 "$base.dmg" "$base.app.tar.gz" > SHA256SUMS.txt )
 
           # What Gatekeeper will see, read off the bundle rather than inferred
-          # from which secrets happened to be set. An ad-hoc signature, which is
-          # what the linker leaves on an Apple silicon build, has no authority.
+          # from which secrets happened to be set. The ad-hoc signature above
+          # seals the bundle but carries no authority, so only a Developer ID
+          # authority line counts as signed here.
           if codesign --display --verbose=2 "$app" 2>&1 | grep -q '^Authority=Developer ID Application'; then
             signed=true
           else
@@ -226,7 +263,7 @@ jobs:
             if [ "$SIGNED" = true ]; then
               echo "2. Open Snapdeck from Applications. This build is signed with an Apple Developer ID and notarized, so macOS opens it without a warning."
             else
-              echo "2. **This build is not signed with an Apple Developer ID**, so macOS will not open it on a double-click. Control-click (or right-click) Snapdeck in Applications, choose **Open**, and confirm. On macOS 15 and later it may have to be allowed from System Settings > Privacy & Security instead, under an **Open Anyway** button. If macOS refuses both ways, wording it as Snapdeck being damaged rather than unverified, strip the quarantine flag yourself with \`xattr -dr com.apple.quarantine /Applications/Snapdeck.app\`. It is once per install either way."
+              echo "2. **This build is not signed with an Apple Developer ID**, so macOS will not open it on a double-click. Control-click (or right-click) Snapdeck in Applications, choose **Open**, and confirm. On macOS 15 and later that dialog offers no way through: dismiss it, then open System Settings > Privacy & Security, where a message about Snapdeck now has an **Open Anyway** button. It is once per install either way; macOS remembers."
             fi
             echo "3. Snapdeck is a menu bar app: it has no Dock icon and opens no window on launch."
             echo "4. The first capture asks for Screen Recording permission. Grant it in System Settings > Privacy & Security > Screen & System Audio Recording, then **quit Snapdeck and open it again**. macOS decides what a process may capture when the process starts, so a running Snapdeck cannot see a permission granted after launch."
@@ -236,7 +273,7 @@ jobs:
             if [ "$SIGNED" = true ]; then
               echo "Signed with an Apple Developer ID certificate and notarized by Apple."
             else
-              echo "Unsigned: there is no Apple Developer ID for this project, so the bundle carries only the ad-hoc signature the linker leaves on its executable, and Gatekeeper cannot assess it. The app is identical either way; what differs is that macOS cannot attribute it to a developer, which is why the first launch needs the step above."
+              echo "Not signed with an Apple Developer ID and not notarized: there is no Apple Developer account for this project. The bundle is signed ad-hoc instead, which seals its contents so macOS can verify nothing was altered after the build and can name Snapdeck as coming from an unidentified developer rather than refusing it as damaged. An ad-hoc signature attributes the app to nobody, which is why the first launch needs the step above. Check the download against \`SHA256SUMS.txt\` if you want more than that."
             fi
             echo
             echo "## Checksums"
