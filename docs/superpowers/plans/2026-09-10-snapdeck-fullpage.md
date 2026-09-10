@@ -1442,3 +1442,60 @@ Ayrıca `measurePage` viewport yüksekliğini `documentElement.clientHeight`'tan
 `innerHeight`'a düşer): tarayıcının kabul ettiği en büyük kaydırma `scrollHeight - clientHeight`'tır
 ve `innerHeight` yatay kaydırma çubuğu kadar büyüktür, o farkla kurulan plan sessizce kırpılan bir
 kaydırma ister.
+
+### Güvenlik denetiminden gelen karar: köprü kendini de kanıtlar
+
+Task 2 ve 3 bittikten sonra köprünün tamamı (Rust sunucu, zod şeması, eklenti istemcisi, manifest
+izinleri) bağımsız bir güvenlik denetiminden geçti. Denetim tasarımın beş iddiasının beşini de
+doğruladı, ama **tasarımın kendisinde** bir eksik buldu: spec 7.2 yalnız istemciyi doğruluyor,
+sunucuyu doğrulayan hiçbir şey yok.
+
+**Senaryo (HIGH):** Kullanıcı yetkisiyle çalışan yerel bir süreç `127.0.0.1:51837`'yi Snapdeck'ten
+önce tutar. Eklenti bağlanır ve ilk çerçevede eşleştirme token'ını verir. Sahte sunucu `ready`
+çerçevesini uydurur, çünkü o çerçeve hiçbir sır taşımıyor ve şemadan geçer. Eklenti tam sayfa
+PNG'yi, sayfa adresini ve başlığını gönderir. Sahte sunucu `accepted` döner, eklenti rozeti
+temizler ve indirmeye düşmez. Kullanıcı başarılı bir yakalama görür, verinin nereye gittiğini
+öğrenmez. Kaybedilen şey tam olarak korunmaya çalışılan şeydir: kullanıcının oturum açmış
+sayfalarının görüntüsü.
+
+**Karar: karşılıklı kanıt.** Protokol şu şekilde genişler (sürüm hâlâ 1, çünkü hiçbir şey
+yayınlanmadı):
+
+- `hello` bir `nonce` taşır: eklentinin ürettiği 16 bayt rastgelelik, hex.
+- `ready` bir `proof` taşır: `HMAC-SHA256(key = token, message = nonce)`, hex. Anahtar token
+  dizesinin UTF-8 baytlarıdır (hex çözme belirsizliği olmasın diye).
+- Eklenti `proof`u kendi hesabıyla karşılaştırmadan `fullPage` **göndermez**. Uyuşmazsa oturum
+  kapanır, sayfa gönderilmez, indirmeye düşülür ve kullanıcıya sıradan bir "uygulama kapalı"
+  mesajı değil, portta başka bir şeyin olduğunu söyleyen ayrı bir uyarı gösterilir.
+
+Token'ı bilmeyen bir sahte sunucu `proof` üretemez, dolayısıyla senaryo kapanır. Bu, Native
+Messaging'e geçmeden alınabilecek en yüksek kazanç; Native Messaging bağlantıyı işletim sistemi
+seviyesinde belirli bir ikiliye bağlardı ama host manifest dosyası gerektirir ve spec 7.2 tek
+kurulum adımı için bilinçli olarak loopback'i seçti.
+
+Denetimin diğer bulguları ve kararları:
+
+- **MEDIUM-1, el sıkışma zaman aşımı okuma başına.** Upgrade'den sonra, kimlik doğrulamadan önce
+  Ping çerçeveleri damlatan bir eş saati sonsuza kadar sıfırlayabilir ve dört slotu tutabilir.
+  Toplam bir son tarih (`Instant`) ve kimlik doğrulanmadan önce gelen kontrol çerçevesi sayısına
+  tavan konur. (Tungstenite'ın kendi `AttackCheck`'i upgrade **öncesini** zaten sınırlıyor.)
+- **MEDIUM-2, kimlik doğrulamadan önce 64 MiB tamponlanıyor.** `hello` beklenirken soketin mesaj
+  sınırı birkaç KiB olur, token doğrulandıktan sonra tam sınıra çıkılır. `hello`'nun bütün alanları
+  şemada zaten kısa.
+- **MEDIUM-3, `MAX_PNG_BYTES` ve `MAX_IMAGE_PIXELS` tanımlı ama uygulanmıyor.** Sınırlar beyan
+  edildikleri yerde uygulanır: `png_base64` uzunluğu, `width * height`, `url` 2048, `title` 1024,
+  `request_id` uzunluk ve karakter kümesi, `device_pixel_ratio` sonlu ve makul aralık. zod
+  tarafına da `.max()` eklenir ki iki ayna aynı sözleşmeyi söylesin.
+- **LOW-1, `Host` başlığı denetlenmiyor.** DNS rebinding'i bugün `Origin` kapısı tutuyor (tarayıcı
+  `Origin`'i doldurur ve sayfa onu değiştiremez), ama tek kapı olmamalı: `Host` da doğrulanır.
+- **LOW-2, sunucudan gelen dizeler şemada sınırsız.** XSS yok (iki tüketici de metin sink'i), ama
+  iki yönlü olduğu söylenen bir sınırda asimetri kalmamalı: `.max()` eklenir.
+- **LOW-3, indirme dosya adı query string taşıyordu.** Düzeltildi (commit `a229132`): sıfırlama
+  token'ları ve imzalı parametreler dosya adına, indirme geçmişine ve o klasörü senkronlayan
+  servise gidiyordu.
+- **Kabul edilen riskler:** loopback'te `ws://` (TLS burada sertifika sorunu getirir, süreç
+  belleğini okuyabilen saldırgana karşı bir şey kazandırmaz); eklenti kimliğinin sabitlenmemesi
+  (Web Store yayını gelirse sabitlenir, geliştirme yüklemesi için kaçış bırakılır); token'ın düz
+  metin durması, **yalnız karşılıklı kanıt eklendikten sonra** kabul edilebilir.
+- CI'a `cargo audit` eklenmesi Task 13'e yazıldı: denetim elle `Cargo.lock` okuyarak yapıldı,
+  `tungstenite 0.30.0` bilinen advisory'lerden etkilenmiyor (RUSTSEC-2023-0065 0.20.1'de kapandı).
