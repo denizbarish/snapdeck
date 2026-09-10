@@ -70,6 +70,24 @@ grant is gone, is in scope.
 reporting; an advisory against a code path this project does not call is worth mentioning but is not
 urgent.
 
+## A known limit of the update channel
+
+The signature on an update covers the archive and nothing else. The version number, the release
+notes and the download URL published alongside it are not signed, which is why Snapdeck checks them
+itself: it refuses a release that is not newer than the highest version it has ever run, and it
+refuses to fetch the archive from any host but GitHub.
+
+One case survives that. Whoever controls what the update endpoint serves could publish a manifest
+claiming a high version number while pointing at an older archive this project genuinely signed.
+Snapdeck would verify the signature, because the archive really is ours, and install an older build
+than the one it claimed. Closing it properly means comparing the unpacked bundle's version against
+the manifest's claim, which lives inside the updater plugin's install path rather than in this
+repository.
+
+Reaching it requires control of the release endpoint, which means GitHub itself or an account with
+write access to this repository. We would rather write that down than let the word "signed" carry
+more than it earns. If you see a way to reach it without that level of access, report it.
+
 ## What is not a vulnerability
 
 These are known, deliberate and already written down. Reporting them is welcome but they will be

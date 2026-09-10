@@ -32,7 +32,8 @@ can be checked with `shasum -a 256 -c SHA256SUMS.txt`.
 ## Updates
 
 **Snapdeck makes no network connection you did not ask for.** Checking for an update is the only
-one it makes at all, and it is off until you turn it on.
+one it makes at all, it reaches only GitHub, the release manifest and the archive that manifest
+names, and it is off until you turn it on.
 
 - **Check for Updates…** in the menu bar asks the releases page whether there is a newer version.
   If there is, Snapdeck shows what it is and what the release says about it, and downloads nothing
@@ -41,10 +42,14 @@ one it makes at all, and it is off until you turn it on.
 - **Settings > Updates** has a checkbox for the same check at launch. It is **off by default**, and
   the menu item works whether or not you turn it on.
 
-Every update is signed. The archive Snapdeck downloads carries a signature made by this project's
-release workflow, checked against a public key built into the copy you are running. A download whose
-signature does not verify is thrown away rather than installed, and Snapdeck puts the reason in the
-menu bar and in its log instead of failing quietly.
+Every update is verified against a public key built into Snapdeck before it is unpacked, so an
+update server that has been taken over cannot install code this project did not build. A download
+whose signature does not verify is thrown away rather than installed, and Snapdeck puts the reason
+in the menu bar and in its log instead of failing quietly.
+
+It is worth being precise about the limit. Only the archive is signed, not the version number or
+the notes printed beside it, so Snapdeck also refuses any release that is not newer than the
+highest version it has ever run, and refuses to fetch the archive from any host but GitHub.
 
 One consequence of the app being signed ad-hoc rather than with an Apple Developer ID: **macOS asks
 for Screen Recording permission again after an update.** The permission is tied to the app's
