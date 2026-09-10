@@ -153,7 +153,7 @@ fn open_bridge(app: &tauri::AppHandle) {
         name: app.package_info().name.clone(),
         version: app.package_info().version.to_string(),
     };
-    let policy = std::sync::Arc::new(bridge::LaunchPolicy::new(token, info));
+    let policy = std::sync::Arc::new(bridge::intake::AppPolicy::new(app.clone(), token, info));
 
     match bridge::server::BridgeServer::start(
         bridge::protocol::BRIDGE_PORT,

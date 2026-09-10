@@ -54,6 +54,11 @@ tauri-plugin-updater = "2.11.0"
 getrandom = "0.4"
 # `BridgeError`, in the shape of `crates/frame/src/error.rs`.
 thiserror.workspace = true
+# The page arrives as base64 PNG inside a JSON frame, because that is what a
+# text protocol can carry. 0.22.1 was already in `Cargo.lock` by way of
+# `tauri-plugin-updater`, so this promotes a version the tree already resolves
+# to rather than adding one.
+base64 = "0.22"
 # `semver::Version` is the type the updater's version comparator is written
 # against, and the plugin does not re-export it. The comparison rule is
 # `updater::is_upgrade`, which is the one place this application decides what
@@ -80,7 +85,7 @@ objc2 = { version = "0.6", default-features = false, features = ["std"] }
 [dev-dependencies]
 # The refusal itself, tested rather than assumed. `tauri-plugin-updater` keeps
 # its `verify_signature` private, so the test calls what that function calls:
-# both crates are already in the tree as dependencies of the plugin, and the
-# versions here are the ones it already resolves to.
+# this crate and the base64 it decodes the signature with are both already in
+# the tree as dependencies of the plugin, and the version here is the one it
+# already resolves to.
 minisign-verify = "0.2"
-base64 = "0.22"

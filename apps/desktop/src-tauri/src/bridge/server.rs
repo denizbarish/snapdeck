@@ -25,7 +25,7 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::{header::ORIGIN, StatusCode};
@@ -45,12 +45,16 @@ use crate::bridge::session::{origin_is_allowed, run_session, BridgePolicy, Frame
 /// session while a capture is in flight.
 const MAX_SESSIONS: usize = 4;
 
-/// How long a connection may stay silent before it is given up on.
+/// How long a connection has to get from accepted to paired.
 ///
-/// It covers the HTTP handshake and the `hello` that has to follow it. After
-/// that the clock comes off: a paired extension is allowed to sit idle between
-/// two captures for as long as the user leaves the tab open.
+/// One deadline across the HTTP handshake and the `hello` that has to follow
+/// it, not a budget per read; see `DeadlineStream`. After that the clock comes
+/// off: a paired extension is allowed to sit idle between two captures for as
+/// long as the user leaves the tab open.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What is recorded when a peer runs out of handshake deadline.
+const HANDSHAKE_TOO_SLOW: &str = "the opening took longer than the bridge waits for it";
 
 /// What a handshake with the wrong `Origin` is told, as the body of the 403.
 const REFUSED_ORIGIN: &str = "the bridge only answers a Snapdeck browser extension";
@@ -232,18 +236,9 @@ fn accept_loop(
 
 /// Runs the handshake gate and then one session over the accepted socket.
 fn serve(stream: TcpStream, policy: &dyn BridgePolicy, limits: BridgeLimits) {
-    // A second handle on the same socket, because `WebSocket` takes the stream
-    // and does not lend it back, and the read timeout has to come off once the
-    // session is under way.
-    let Ok(control) = stream.try_clone() else {
-        return;
-    };
-    if stream
-        .set_read_timeout(Some(limits.handshake_timeout))
-        .is_err()
-    {
-        return;
-    }
+    // One deadline for the whole opening, taken before anything is read. See
+    // `DeadlineStream` for why this is not a timeout on each read.
+    let stream = DeadlineStream::until(stream, Instant::now() + limits.handshake_timeout);
 
     // Both limits, because a message arrives as frames: capping the message
     // alone would still let a single oversized frame be read into memory first.
@@ -260,10 +255,74 @@ fn serve(stream: TcpStream, policy: &dyn BridgePolicy, limits: BridgeLimits) {
 
     let mut frames = SocketFrames {
         socket,
-        control,
         past_first_frame: false,
     };
     run_session(&mut frames, policy);
+}
+
+/// The socket a session is opened over, with one deadline across everything
+/// read before that session is under way.
+///
+/// A timeout per read is not a bound on the opening. A peer that sends a byte
+/// at a time is never silent long enough to trip such a timeout and never
+/// finishes either, so it restarts the clock with every byte and holds a thread
+/// for as long as it cares to keep dripping. That is the classic slowloris, and
+/// the only thing that ends it is a clock that started once. `max_sessions`
+/// bounds how many threads can be held this way, which makes it survivable
+/// rather than acceptable: four connections should not be able to close the
+/// bridge for the rest of the run.
+///
+/// The deadline covers the HTTP handshake and the `hello` that has to follow
+/// it, and then comes off. A paired extension is allowed to sit idle between
+/// two captures for as long as the user leaves the tab open.
+struct DeadlineStream {
+    inner: TcpStream,
+    /// `None` once the session is under way and the peer may go quiet.
+    deadline: Option<Instant>,
+}
+
+impl DeadlineStream {
+    fn until(inner: TcpStream, deadline: Instant) -> Self {
+        Self {
+            inner,
+            deadline: Some(deadline),
+        }
+    }
+
+    /// Takes the clock off, for a session that has said who it is.
+    fn open_ended(&mut self) {
+        if self.deadline.take().is_some() {
+            let _ = self.inner.set_read_timeout(None);
+        }
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // A zero timeout means "block forever" to the socket, which is the
+            // opposite of what an expired deadline asks for.
+            if left.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    HANDSHAKE_TOO_SLOW,
+                ));
+            }
+            self.inner.set_read_timeout(Some(left))?;
+        }
+        self.inner.read(buffer)
+    }
+}
+
+impl std::io::Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// The first gate: who is allowed to open a WebSocket at all.
@@ -293,8 +352,7 @@ fn origin_gate(request: &Request, response: Response) -> Result<Response, ErrorR
 
 /// The session state machine's view of a real socket.
 struct SocketFrames {
-    socket: WebSocket<TcpStream>,
-    control: TcpStream,
+    socket: WebSocket<DeadlineStream>,
     past_first_frame: bool,
 }
 
@@ -309,7 +367,7 @@ impl Frames for SocketFrames {
                         // The clock was for the handshake and the `hello` that
                         // follows it. From here the session is the user's to
                         // leave open.
-                        let _ = self.control.set_read_timeout(None);
+                        self.socket.get_mut().open_ended();
                     }
                     return Ok(text.to_string());
                 }
@@ -345,7 +403,7 @@ impl Frames for SocketFrames {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::sync::Mutex as StdMutex;
 
     use tungstenite::client::IntoClientRequest;
@@ -747,4 +805,66 @@ mod tests {
             "the bridge ends a silent connection itself rather than waiting on it: {read:?}"
         );
     }
+
+    /// S21. Security. The other half of S20, and the one a timeout per read
+    /// does not cover: a peer that is never silent for long enough to trip the
+    /// clock, but never finishes either. A byte every so often restarts a
+    /// per-read timeout forever, so the bound has to be on the handshake as a
+    /// whole rather than on any one read of it.
+    #[test]
+    fn a_connection_that_drips_bytes_is_ended_at_the_handshake_deadline() {
+        let limits = BridgeLimits {
+            handshake_timeout: DRIP_DEADLINE,
+            ..BridgeLimits::default()
+        };
+        let (server, _policy) = started(limits);
+
+        let mut socket = TcpStream::connect(server.local_addr()).expect("the listener is up");
+        socket
+            .set_read_timeout(Some(DRIP_POLL))
+            .expect("a fresh socket takes a timeout");
+
+        // The opening of a handshake that is never finished, fed one byte at a
+        // time. Every byte is well inside the deadline on its own.
+        let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n";
+        let started_at = Instant::now();
+        let mut ended_after = None;
+        for byte in request.iter().take(DRIP_COUNT) {
+            // The write fails once the bridge has hung up, which is the outcome
+            // this test is waiting for rather than a problem with it.
+            let _ = socket.write_all(&[*byte]);
+            std::thread::sleep(DRIP_INTERVAL);
+            let mut buffer = [0u8; 1];
+            if matches!(socket.read(&mut buffer), Ok(0)) {
+                ended_after = Some(started_at.elapsed());
+                break;
+            }
+        }
+
+        let ended_after = ended_after.expect(
+            "a peer that keeps dripping must not be able to hold a session thread for as long as it likes",
+        );
+        assert!(
+            ended_after < DRIP_DEADLINE * DEADLINE_SLACK,
+            "and it has to end at the deadline rather than whenever the peer stops: {ended_after:?}"
+        );
+    }
+
+    /// The handshake budget the dripping test gives the bridge.
+    const DRIP_DEADLINE: Duration = Duration::from_millis(150);
+
+    /// How often the dripping peer sends a byte. Shorter than the deadline, so
+    /// a timeout that restarts with every read never fires.
+    const DRIP_INTERVAL: Duration = Duration::from_millis(60);
+
+    /// How many bytes it drips before giving up, which is `DRIP_COUNT` times
+    /// `DRIP_INTERVAL` of holding the thread: far past the deadline.
+    const DRIP_COUNT: usize = 20;
+
+    /// How long the dripping peer waits for the bridge to hang up between
+    /// bytes.
+    const DRIP_POLL: Duration = Duration::from_millis(20);
+
+    /// How far past the deadline a loaded machine is allowed to be.
+    const DEADLINE_SLACK: u32 = 4;
 }

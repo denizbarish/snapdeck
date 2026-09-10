@@ -9,47 +9,14 @@
 //! `protocol` is a mirror, not a source. The contract lives once, in
 //! `packages/protocol`, and the extension imports it; this side restates it in
 //! serde and is held to it by tests that read those TypeScript files.
+//!
+//! The four gates a page passes are one per module, in the order it meets
+//! them: `server` decides who may open a socket, `session` decides what they
+//! may say, `protocol` decides what shape it has to be in, and `intake`
+//! decides what the picture inside it becomes.
 
+pub mod intake;
 pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod token;
-
-use protocol::{AppInfo, FullPage};
-use session::BridgePolicy;
-
-/// The policy the bridge runs under until a delivered page has somewhere to go.
-///
-/// The listener is written and tested before the save path on purpose: it is
-/// the piece that decides who may speak at all, and it is the piece that is
-/// dangerous to get wrong. So a session can be opened and paired here, and a
-/// page it delivers is refused, because turning a delivered PNG into a saved
-/// capture is `bridge::intake`'s and the stored token is the settings window's.
-///
-/// The token is minted per run rather than stored, for the same reason: there
-/// is nowhere yet to show the user what to paste, and a token nobody can read
-/// is the honest state of a bridge that cannot yet save anything.
-pub struct LaunchPolicy {
-    token: String,
-    app: AppInfo,
-}
-
-impl LaunchPolicy {
-    pub fn new(token: String, app: AppInfo) -> Self {
-        Self { token, app }
-    }
-}
-
-impl BridgePolicy for LaunchPolicy {
-    fn token(&self) -> String {
-        self.token.clone()
-    }
-
-    fn app_info(&self) -> AppInfo {
-        self.app.clone()
-    }
-
-    fn deliver(&self, _message: &FullPage) -> Result<Option<String>, String> {
-        Err("this build cannot save a page delivered over the bridge yet".to_owned())
-    }
-}
