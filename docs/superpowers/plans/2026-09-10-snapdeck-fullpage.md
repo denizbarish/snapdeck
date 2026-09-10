@@ -1424,3 +1424,21 @@ döndürüyordu ve bu doğru, ama sınırı da atlıyordu; tek bir 20.000 x 20.0
 aşmasına rağmen kabul edilip 1,6 GB açıyordu. Tek kare hâlâ hizalanmıyor, ama artık ölçülüyor.
 Testi: `a_lone_frame_too_large_is_refused_as_well`, mutasyon kanıtı boyut bloğunu kısayolun arkasına
 geri almak.
+
+### Task 7, son adımın `sourceTop`'u ve planın hatası
+
+Plan son adım için `sourceTop = viewportHeight - height` diyordu. Uygulamada bunun kırpılmış
+sayfalarda yanlış olduğu bulundu: `truncated` durumunda son adımın `scrollY`'si
+`compositeHeight - viewportHeight` değil `(n-1) * viewportHeight`'tır, dolayısıyla o formül yanlış
+bandı yapıştırır. Ölçülmüş örnek: 4000/1000 CSS px, DPR 2, piksel bütçesi 5M, planın formülü
+`sourceTop` 750 verir, doğrusu 0.
+
+Yürürlükteki kural: `sourceTop = destTop - scrollY`. Kırpılmamış her girdide iki formül
+matematiksel olarak aynıdır (son adımda `scrollY = documentHeight - viewportHeight` ve
+`destTop = compositeHeight - height`, farkları `viewportHeight - height`), yalnız kırpma
+durumunda ayrışırlar. Test tablosu değişmedi.
+
+Ayrıca `measurePage` viewport yüksekliğini `documentElement.clientHeight`'tan okur (kutu yoksa
+`innerHeight`'a düşer): tarayıcının kabul ettiği en büyük kaydırma `scrollHeight - clientHeight`'tır
+ve `innerHeight` yatay kaydırma çubuğu kadar büyüktür, o farkla kurulan plan sessizce kırpılan bir
+kaydırma ister.
