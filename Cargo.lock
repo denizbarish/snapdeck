@@ -3473,6 +3473,15 @@ dependencies = [
  "core-graphics",
  "screencapturekit",
  "serde",
+ "snapdeck-frame",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "snapdeck-frame"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "thiserror 2.0.20",
 ]
 
@@ -3481,7 +3490,7 @@ name = "snapdeck-stitch"
 version = "0.1.0"
 dependencies = [
  "serde",
- "snapdeck-capture",
+ "snapdeck-frame",
  "thiserror 2.0.20",
 ]
 

@@ -1,12 +1,11 @@
 [package]
-name = "snapdeck-stitch"
+name = "snapdeck-frame"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Joins overlapping scroll frames into a single picture"
+description = "The picture types Snapdeck passes between capture, stitching and output"
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
-snapdeck-frame = { path = "../frame" }

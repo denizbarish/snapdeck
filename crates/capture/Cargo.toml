@@ -8,6 +8,7 @@ description = "Cross-platform screen capture abstraction for Snapdeck"
 
 [dependencies]
 serde.workspace = true
+snapdeck-frame = { path = "../frame" }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

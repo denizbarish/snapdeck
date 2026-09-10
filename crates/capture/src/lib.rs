@@ -1,14 +1,15 @@
 //! Platform-independent screen capture abstraction.
 
-pub mod error;
 pub mod mock;
-pub mod types;
+
+pub use snapdeck_frame::{error, types};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use error::CaptureError;
-pub use types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo};
+pub use snapdeck_frame::{
+    CaptureError, CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo,
+};
 
 /// Enumerates capture targets and produces frames from them.
 ///
