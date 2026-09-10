@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Snapdeck",
+  "description": "Capture a whole web page and hand it to the Snapdeck app.",
+  "version": "0.1.0",
+  "permissions": ["activeTab", "scripting", "storage", "downloads"],
+  "action": {
+    "default_title": "Capture full page"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
