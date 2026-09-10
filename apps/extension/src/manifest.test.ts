@@ -40,13 +40,16 @@ describe('manifest.json', () => {
   })
 })
 
+/** Every icon the manifest names, which the build copies out of `public`. */
+const ICONS = ['icons/16.png', 'icons/32.png', 'icons/48.png', 'icons/128.png']
+
 describe('missingManifestFiles', () => {
   it('reports a file the manifest names that the build did not produce', () => {
     // E5, first half.
-    expect(missingManifestFiles(manifest, ['content.js', 'options.html'])).toEqual([
+    expect(missingManifestFiles(manifest, ['content.js', 'options.html', ...ICONS])).toEqual([
       'background.js',
     ])
-    expect(missingManifestFiles(manifest, ['background.js', 'content.js'])).toEqual([
+    expect(missingManifestFiles(manifest, ['background.js', 'content.js', ...ICONS])).toEqual([
       'options.html',
     ])
   })
@@ -54,7 +57,26 @@ describe('missingManifestFiles', () => {
   it('reports nothing when the build produced every file the manifest names', () => {
     // E5, second half.
     expect(
-      missingManifestFiles(manifest, ['background.js', 'content.js', 'options.html']),
+      missingManifestFiles(manifest, [
+        'background.js',
+        'content.js',
+        'options.html',
+        ...ICONS,
+      ]),
     ).toEqual([])
+  })
+
+  it('names an icon the build did not produce', () => {
+    // An icon is not needed for the extension to work, which is exactly why a
+    // renamed one is not noticed until it is installed and wearing Chrome's
+    // grey square.
+    const produced = ['background.js', 'options.html', 'options.js', 'content.js']
+
+    expect(missingManifestFiles(manifest as Manifest, produced)).toEqual([
+      'icons/16.png',
+      'icons/32.png',
+      'icons/48.png',
+      'icons/128.png',
+    ])
   })
 })

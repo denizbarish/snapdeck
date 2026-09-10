@@ -23,7 +23,10 @@ export default defineConfig({
       },
       output: {
         entryFileNames: '[name].js',
-        chunkFileNames: '[name].js',
+        // Shared code goes in a folder of its own. Named at the top level it
+        // takes the name of whichever module Rollup happened to hoist it out
+        // of, which reads like an entry point and can collide with a real one.
+        chunkFileNames: 'chunks/[name].js',
         assetFileNames: '[name][extname]',
       },
     },

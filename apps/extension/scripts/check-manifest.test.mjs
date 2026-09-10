@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,9 +32,13 @@ afterEach(() => {
 function fakeDist(files) {
   dist = mkdtempSync(join(tmpdir(), 'snapdeck-check-manifest-'))
   copyFileSync(join(root, 'public', 'manifest.json'), join(dist, 'manifest.json'))
-  for (const file of files) writeFileSync(join(dist, file), '')
+  mkdirSync(join(dist, 'icons'), { recursive: true })
+  for (const file of [...files, ...ICONS]) writeFileSync(join(dist, file), '')
   return dist
 }
+
+/** Named by the manifest, and copied rather than built, so always present. */
+const ICONS = ['icons/16.png', 'icons/32.png', 'icons/48.png', 'icons/128.png']
 
 function check(directory) {
   return spawnSync(process.execPath, [script, directory], { cwd: root, encoding: 'utf8' })
