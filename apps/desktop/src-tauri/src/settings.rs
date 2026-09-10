@@ -268,6 +268,10 @@ pub fn load(app: &AppHandle) -> Settings {
 /// Refuses a save directory that cannot be written to, which is the whole
 /// difference between a setting and a promise: the picker proves it once, and
 /// this proves it again, because the volume it named may have gone away since.
+/// Read and written by its owner, and by nobody else on the machine.
+#[cfg(unix)]
+const OWNER_ONLY: u32 = 0o600;
+
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     if let Some(directory) = &settings.save_directory {
         ensure_writable(directory)?;
@@ -281,7 +285,42 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
         .map_err(|err| format!("failed to create {}: {err}", directory.display()))?;
     let json = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("failed to render the settings: {err}"))?;
-    std::fs::write(&path, json).map_err(|err| format!("failed to write {}: {err}", path.display()))
+    write_privately(&path, json.as_bytes())
+}
+
+/// Writes a file only its owner can read.
+///
+/// The settings hold the bridge's pairing token, and the default mode leaves it
+/// readable by every account on the machine.
+///
+/// Both halves are needed and the tests only prove the second. `mode` applies
+/// when this call creates the file, which is what keeps a new file from
+/// existing under the wider mode while the bytes are written; it does nothing
+/// to a file that is already there, and a settings file written by an older
+/// build is already there, holding a token.
+fn write_privately(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(OWNER_ONLY);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    #[cfg(unix)]
+    {
+        // An existing file keeps the mode it already had: `mode` only applies to
+        // a file this call creates. A settings file written by an older build
+        // is still holding a token now.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(OWNER_ONLY));
+    }
+    file.write_all(bytes)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
 /// What `apply` did, and what it could not do.
@@ -790,6 +829,58 @@ mod tests {
             );
         }
         assert!(json.contains("\"png\""), "the format is lower case: {json}");
+    }
+
+    /// The settings hold the bridge's pairing token. On a Mac with more than
+    /// one account, the default mode hands that secret to everyone with a
+    /// login.
+    #[test]
+    fn the_settings_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "snapdeck-settings-mode-{}-{}",
+            std::process::id(),
+            NEXT_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create the fixture");
+        let path = directory.join("settings.json");
+
+        write_privately(&path, b"{}").expect("write the settings");
+
+        let mode = std::fs::metadata(&path)
+            .expect("read the mode")
+            .permissions()
+            .mode();
+        std::fs::remove_dir_all(&directory).expect("clean up");
+        assert_eq!(mode & 0o777, OWNER_ONLY);
+    }
+
+    /// A file written by an older build carries the wider mode, and the token
+    /// went into it on the next save.
+    #[test]
+    fn an_existing_settings_file_is_narrowed_when_it_is_written_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "snapdeck-settings-widen-{}-{}",
+            std::process::id(),
+            NEXT_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create the fixture");
+        let path = directory.join("settings.json");
+        std::fs::write(&path, b"{}").expect("write the fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("widen the fixture");
+
+        write_privately(&path, b"{}").expect("write the settings");
+
+        let mode = std::fs::metadata(&path)
+            .expect("read the mode")
+            .permissions()
+            .mode();
+        std::fs::remove_dir_all(&directory).expect("clean up");
+        assert_eq!(mode & 0o777, OWNER_ONLY);
     }
 
     #[test]
