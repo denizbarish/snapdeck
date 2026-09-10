@@ -551,16 +551,23 @@ mod tests {
     /// changed later. `assert_eq!(commands::TEMPLATE, settings.template)` would
     /// pass right up until the moment it stopped mattering.
     ///
-    /// All twelve, not the seven with an obvious reason to state one.
+    /// All thirteen, not the seven with an obvious reason to state one.
     /// `editor.rs`, `overlay.rs` and `report.rs` have no such reason today,
     /// which is not a reason to leave them unread: the list is a rule about the
     /// crate, and a rule with three holes in it is where the next copy goes.
     /// Every module added to the crate joins it, which is why `updater.rs` and
     /// `update_history.rs` are here.
-    const SOURCES: [(&str, &str); 12] = [
+    ///
+    /// `main.rs` too, and it is the one that had been left out. It is the
+    /// binary's own root rather than a module of this library, which is exactly
+    /// why it is easy to forget and exactly why it is worth reading: a constant
+    /// put there would be outside every other check in this file. It is four
+    /// lines today and this keeps it that way.
+    const SOURCES: [(&str, &str); 13] = [
         ("commands.rs", include_str!("commands.rs")),
         ("editor.rs", include_str!("editor.rs")),
         ("lib.rs", include_str!("lib.rs")),
+        ("main.rs", include_str!("main.rs")),
         ("output.rs", include_str!("output.rs")),
         ("overlay.rs", include_str!("overlay.rs")),
         ("report.rs", include_str!("report.rs")),
@@ -1006,6 +1013,35 @@ mod tests {
         assert!(
             editor.contains("'image/jpeg': 'jpg'"),
             "the editor no longer writes JPEG as .jpg, so a JPEG capture would grow a second file on the first save"
+        );
+    }
+
+    /// `default_format` decides what a capture is written in, and the editor
+    /// has to open on that same format or Save stops meaning what it says.
+    ///
+    /// The failure is worse than an extra file. With `Jpeg` stored, the capture
+    /// is `X.jpg`; an editor that opened on PNG saves to `X.png`, which
+    /// `resolve_save_target` accepts because only the extension differs, and
+    /// `X.jpg` stays on disk. A user who redacted a secret and saved has then
+    /// produced a second file and kept the unredacted first one, which is the
+    /// opposite of what they asked for.
+    ///
+    /// Read from the source for the reason the extensions are: this is one
+    /// decision written in two languages, and the only thing that can keep them
+    /// together is one of them reading the other. The opening format must be
+    /// derived from the capture's own path, and there must be no second default
+    /// in the editor package for it to drift back towards.
+    #[test]
+    fn the_editor_opens_on_the_format_the_capture_is_already_in() {
+        let window = include_str!("../../src/editor/EditorWindow.tsx");
+        assert!(
+            window.contains("initialFormat={formatForPath(path)}"),
+            "the editor window no longer opens on the capture's own format, so a save of a capture in the other format would leave the original beside it"
+        );
+        let editor = include_str!("../../../../packages/editor/src/Editor.tsx");
+        assert!(
+            !editor.contains("DEFAULT_FORMAT"),
+            "the editor package states an opening format of its own again; the format a capture is in is the host's answer, not the component's"
         );
     }
 }

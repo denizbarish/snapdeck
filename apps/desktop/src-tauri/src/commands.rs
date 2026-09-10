@@ -614,7 +614,12 @@ static NEXT_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// cannot follow a link planted at the name. `sync_all` before the rename,
 /// because publishing a file the filesystem has not written yet is how an
 /// atomic rename still ends in an empty capture after a power cut.
-fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
+///
+/// Visible to the crate because a capture is not the only file where losing the
+/// old contents to a half-written new one has a cost: `update_history` writes
+/// the highest version this installation has ever run, and a torn write there
+/// silently lowers the floor a manifest has to clear.
+pub(crate) fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = target
         .parent()
         .ok_or_else(|| format!("{} has no directory", target.display()))?;

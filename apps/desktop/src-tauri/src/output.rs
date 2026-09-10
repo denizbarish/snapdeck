@@ -147,8 +147,29 @@ const MAX_FILE_NAME_BYTES: usize = 255;
 /// `save_capture_without_overwriting` would try. A template that fits now and
 /// fails on the ten-thousandth capture of the same second is the same bug
 /// arriving later.
+///
+/// Both ends, not only the long one. A template that renders to nothing is
+/// short enough for any filesystem and is still unusable: the capture is written
+/// as `.png`, which macOS reads as a hidden file with no extension at all, and
+/// `commands::resolve_save_target` refuses every save on it because the
+/// extension is not one the editor writes. The editor then opens on a capture it
+/// can never save, which is exactly the shape of failure this function exists to
+/// keep out of the settings window.
 pub fn check_filename_template(template: &str, format: SaveFormat) -> Result<(), String> {
-    let widest = render_filename(template, OffsetDateTimeParts::now(), u32::MAX, u32::MAX);
+    let now = OffsetDateTimeParts::now();
+    // The first capture's own name, and the narrowest substitution, which is
+    // the mirror of the length check below. The collision suffix would put a
+    // space and a digit in front of the dot, so measuring the tenth attempt
+    // would hide an empty template from this; the sizes go in at zero because a
+    // token that renders shortest is the one most likely to leave nothing.
+    let first = suffixed_file_name(&render_filename(template, now, 0, 0), 1, format.extension());
+    if Path::new(&first).extension().is_none() {
+        return Err(format!(
+            "That file name has no name in front of its extension: it comes out as {first:?}, which macOS reads as a hidden file rather than as a picture, and the editor would refuse to save over it. Put something in the template."
+        ));
+    }
+
+    let widest = render_filename(template, now, u32::MAX, u32::MAX);
     let name = suffixed_file_name(&widest, MAX_NAME_ATTEMPTS, format.extension());
     if name.len() <= MAX_FILE_NAME_BYTES {
         return Ok(());
@@ -464,6 +485,42 @@ mod tests {
         );
         check_filename_template(&template, SaveFormat::Png)
             .expect_err("a template that fits only while the numbers are short is not usable");
+    }
+
+    /// The other end of the same rule, and the one the length check could not
+    /// see.
+    ///
+    /// An empty template renders to nothing, the capture is written as `.png`,
+    /// and `Path::extension` answers `None` for that name because macOS reads it
+    /// as a hidden file rather than as a picture. `resolve_save_target` then
+    /// refuses every save on that capture, so the editor opens on a file it can
+    /// never write back: a setting the window accepted and that does not work,
+    /// which is the thing this check exists to prevent.
+    #[test]
+    fn a_template_that_renders_to_nothing_is_refused() {
+        for format in [SaveFormat::Png, SaveFormat::Jpeg] {
+            let name = suffixed_file_name("", 1, format.extension());
+            assert!(
+                Path::new(&name).extension().is_none(),
+                "{name} is the capture the editor could not save, and this test is about that name"
+            );
+            let err = check_filename_template("", format).expect_err(
+                "a template with nothing in it produces a capture that cannot be saved",
+            );
+            assert!(
+                err.contains(&name),
+                "the user has to be shown the name it comes out as: {err}"
+            );
+        }
+    }
+
+    /// And the narrowest substitution is still a name: a template that is one
+    /// size token renders to a number, not to nothing, so it must not be caught
+    /// by the check above.
+    #[test]
+    fn a_template_that_is_only_a_size_token_is_still_a_name() {
+        check_filename_template("{width}", SaveFormat::Png)
+            .expect("a size token renders to at least one character");
     }
 
     /// And the other half: the default template, and a plain one, have to be

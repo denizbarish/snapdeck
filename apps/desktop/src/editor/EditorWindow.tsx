@@ -50,6 +50,36 @@ const EXTENSIONS: Record<ExportType, string> = {
 }
 
 /**
+ * The format the capture at `path` is already stored in, or undefined for a
+ * name no format claims.
+ *
+ * This is what the editor opens on, and the reason it has to be asked rather
+ * than assumed. The capture is written in whatever `Settings.default_format`
+ * says, and `savePathFor` turns a save in the other format into a different
+ * path: an editor that opened on PNG over a JPEG capture would write
+ * `X.png` beside `X.jpg` on the very first Save and leave the JPEG untouched,
+ * so a redaction the user made to destroy the original would instead produce a
+ * second file and keep it. Opening on the capture's own format makes Save
+ * replace the file the editor was opened on, which is what it says it does.
+ *
+ * The reverse of `EXTENSIONS` rather than a second mapping written out again,
+ * so the format that picks the extension and the extension that picks the
+ * format cannot drift apart.
+ *
+ * Undefined rather than a format of its own for an extension nothing here
+ * writes: no capture Rust wrote can have one, and the editor's own first
+ * format is the single place that answer belongs.
+ */
+export function formatForPath(path: string): ExportType | undefined {
+  const name = path.slice(path.lastIndexOf('/') + 1)
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return undefined
+  const extension = name.slice(dot + 1).toLowerCase()
+  const entries = Object.entries(EXTENSIONS) as [ExportType, string][]
+  return entries.find(([, candidate]) => candidate === extension)?.[0]
+}
+
+/**
  * Where a picture of this type is saved.
  *
  * The same path for the format the capture is already in, which is what makes
@@ -161,6 +191,11 @@ export function EditorWindow({ path, width, height }: EditorWindowProps): JSX.El
       image={image}
       width={width}
       height={height}
+      // The capture's own format, so Save updates the file this window was
+      // opened on rather than leaving a second one beside it. Rust chose the
+      // format and put the path it produced in this window's URL, so the path
+      // is the answer and there is nothing else to ask.
+      initialFormat={formatForPath(path)}
       // Rejections are deliberately left to propagate. The editor's own
       // delivery wrapper catches them and shows the user that the picture was
       // not saved, which is the surface closest to the button they pressed and

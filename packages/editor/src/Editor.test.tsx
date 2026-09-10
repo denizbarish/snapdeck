@@ -105,7 +105,7 @@ let delivered: Delivered = {
   savedAs: null,
 }
 
-async function mountEditor(): Promise<void> {
+async function mountEditor(initialFormat?: 'image/png' | 'image/jpeg'): Promise<void> {
   container = document.createElement('div')
   container.style.position = 'fixed'
   container.style.left = '0px'
@@ -134,6 +134,7 @@ async function mountEditor(): Promise<void> {
       image={image}
       width={SOURCE.width}
       height={SOURCE.height}
+      initialFormat={initialFormat}
       onExport={(blob, type) => {
         if (own.failNext) {
           own.failNext = false
@@ -935,6 +936,25 @@ describe('the save format', () => {
     await waitForDelivery(() => expect(delivered.saved).toHaveLength(2))
     expect(delivered.types[1]).toBe('image/jpeg')
     expect((delivered.saved[1] as Blob).type).toBe('image/jpeg')
+  })
+
+  // The host is the only side that knows what the file on disk already is, and
+  // the format Save opens on has to be that one: saving in the other format
+  // writes a second file and leaves the first, unedited, where it was. This is
+  // the whole of what `initialFormat` buys, so it is asserted at the encoder as
+  // well as at the button.
+  it('opens on the format the host says the picture is already in', async () => {
+    root?.unmount()
+    container?.remove()
+    await mountEditor('image/jpeg')
+
+    expect(byTestId('format-jpeg').getAttribute('aria-pressed')).toBe('true')
+    expect(byTestId('format-png').getAttribute('aria-pressed')).toBe('false')
+
+    await userEvent.click(byTestId('save'))
+    await waitForDelivery(() => expect(delivered.saved).toHaveLength(1))
+    expect(delivered.types[0]).toBe('image/jpeg')
+    expect((delivered.saved[0] as Blob).type).toBe('image/jpeg')
   })
 
   // A clipboard image is pixels handed to the next application, not a file, so

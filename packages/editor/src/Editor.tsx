@@ -80,22 +80,41 @@ export type EditorProps = {
   onExport(blob: Blob, type: ExportType): void | string | Promise<void | string>
   onCopy(blob: Blob): void | Promise<void>
   onClose(): void
+  /**
+   * The format Save opens on, when the host knows one.
+   *
+   * The host's answer rather than the editor's, because the question is about a
+   * file this component has never seen. Save in the format the picture is
+   * already stored in updates that file; Save in the other one writes a second
+   * file and leaves the first exactly where it was. An editor that opened on a
+   * format of its own would therefore turn every save of a picture in the other
+   * format into a copy, and leave the original, unedited and unredacted, on
+   * disk beside it.
+   *
+   * Optional because a host may genuinely have no file behind the picture. The
+   * first entry of `FORMATS` is then what Save opens on, for the reason that
+   * list gives.
+   */
+  initialFormat?: ExportType
 }
 
 /**
- * The formats Save offers, in the order they appear, and the one it opens on.
+ * The formats Save offers, in the order they appear.
  *
- * PNG first and PNG by default: the capture on disk is already a PNG, so it is
- * the format in which Save updates the file the user has rather than leaving a
- * second one beside it, and it is lossless, which is what a screenshot of text
- * wants. JPEG is the deliberate choice, for the case where the picture is going
- * to somebody over a link that will not take twelve megabytes.
+ * PNG first, and first is what a host that names no format opens on: PNG is
+ * lossless, which is what a screenshot of text wants, and it is what a capture
+ * is written in unless the user has changed the setting. JPEG is the deliberate
+ * choice, for the case where the picture is going to somebody over a link that
+ * will not take twelve megabytes.
+ *
+ * A tuple rather than an array, so that "the first one" is a value the type
+ * system can hand out: this list is the only place the opening format is
+ * written down now, and `initialFormat` is how a host that knows better says so.
  */
-const FORMATS: { type: ExportType; label: string }[] = [
+const FORMATS = [
   { type: 'image/png', label: 'PNG' },
   { type: 'image/jpeg', label: 'JPEG' },
-]
-const DEFAULT_FORMAT: ExportType = 'image/png'
+] as const satisfies readonly { type: ExportType; label: string }[]
 
 /**
  * The quality JPEG is encoded at.
@@ -270,7 +289,15 @@ type NoticeSource = 'paint' | 'deliver'
 type NoticeTone = 'warning' | 'report'
 type Notice = { source: NoticeSource; tone: NoticeTone; message: string }
 
-export function Editor({ image, width, height, onExport, onCopy, onClose }: EditorProps): JSX.Element {
+export function Editor({
+  image,
+  width,
+  height,
+  onExport,
+  onCopy,
+  onClose,
+  initialFormat,
+}: EditorProps): JSX.Element {
   const historyRef = useRef<History | null>(null)
   if (historyRef.current === null) historyRef.current = new History(createDocument(width, height))
   const history = historyRef.current
@@ -282,8 +309,14 @@ export function Editor({ image, width, height, onExport, onCopy, onClose }: Edit
     strokeWidth: DEFAULT_STROKE,
     obscureMode: DEFAULT_OBSCURE_MODE,
   })
-  /** The format Save encodes in. Not a tool setting: it is about the file. */
-  const [format, setFormat] = useState<ExportType>(DEFAULT_FORMAT)
+  /**
+   * The format Save encodes in. Not a tool setting: it is about the file.
+   *
+   * Seeded from the host's answer once, not kept in step with it: this is a
+   * control the user drives from here on, and a prop that reached in later
+   * would undo their choice.
+   */
+  const [format, setFormat] = useState<ExportType>(initialFormat ?? FORMATS[0].type)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   /** The layer a drag is building or transforming, shown in place of the stored one. */
   const [draft, setDraft] = useState<Layer | null>(null)

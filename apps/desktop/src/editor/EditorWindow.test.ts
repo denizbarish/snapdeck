@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { savePathFor } from './EditorWindow'
+import { formatForPath, savePathFor } from './EditorWindow'
 
 const CAPTURE = '/Users/someone/Pictures/Snapdeck 2026-09-09 at 12.00.00.png'
 
@@ -48,5 +48,48 @@ describe('savePathFor', () => {
   // never asked for; keeping the original at least names the file they meant.
   it('keeps the original path for a format it has no extension for', () => {
     expect(savePathFor(CAPTURE, 'image/webp' as 'image/png')).toBe(CAPTURE)
+  })
+})
+
+/**
+ * The other half of the same decision, and the one that decides whether the
+ * original survives a save.
+ *
+ * `savePathFor` says where a format is written; this says which format the
+ * editor opens on. Get it wrong for a JPEG capture and the two disagree: the
+ * editor offers PNG, `savePathFor` turns the save into `X.png`, and `X.jpg`,
+ * the unedited capture, stays on disk beside it. That is the file a user who
+ * redacted a secret was trying to be rid of.
+ */
+describe('formatForPath', () => {
+  // The setting is `defaultFormat`, so a capture is written under either
+  // extension and the editor has to open on whichever one it was handed.
+  it('reads the format the capture was written in', () => {
+    expect(formatForPath(CAPTURE)).toBe('image/png')
+    expect(formatForPath('/Users/someone/Pictures/Snapdeck 2026-09-09 at 12.00.00.jpg')).toBe(
+      'image/jpeg',
+    )
+  })
+
+  // macOS file names are not case sensitive and a hand-renamed capture is
+  // still the capture the window was opened on.
+  it('does not mind the case of the extension', () => {
+    expect(formatForPath('/Users/someone/Pictures/capture.JPG')).toBe('image/jpeg')
+    expect(formatForPath('/Users/someone/Pictures/capture.PNG')).toBe('image/png')
+  })
+
+  // Only the last segment's own extension, for the reason `savePathFor` reads
+  // only that segment: a dotted directory above a file that has none must not
+  // be what decides the format.
+  it('reads only the file name, never a dotted directory', () => {
+    expect(formatForPath('/Users/someone/Screenshots.png/capture')).toBeUndefined()
+  })
+
+  // Undefined rather than a format of this module's own. No capture Rust wrote
+  // can land here, and the editor's own first format is the one place that
+  // fallback is written down.
+  it('names no format for an extension nothing here writes', () => {
+    expect(formatForPath('/Users/someone/Pictures/capture.webp')).toBeUndefined()
+    expect(formatForPath('/Users/someone/Pictures/capture')).toBeUndefined()
   })
 })

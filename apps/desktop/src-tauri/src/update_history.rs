@@ -14,9 +14,17 @@
 //! highest version this installation has ever run is written down, it only ever
 //! goes up, and every check compares a manifest against it rather than against
 //! whichever bundle happens to be on disk. An installation that has been 0.5.0
-//! never accepts 0.1.0 again, however it came to be running something older, so
-//! a rollback cannot be repeated, deepened, or re-established after the user
-//! reinstalls by hand.
+//! never accepts a manifest claiming less than 0.5.0 again, however it came to
+//! be running something older.
+//!
+//! Which is a claim about manifests, not about archives, and the difference is
+//! the whole of what this buys. The comparison is against the version a manifest
+//! *says* it is serving, so what the mark stops is the honest downgrade: an
+//! endpoint that offers 0.1.0 as 0.1.0 is refused, once and every time after.
+//! An endpoint that offers a genuinely signed 0.1.0 archive under a `99.0.0`
+//! entry clears any floor, because 99.0.0 beats it, and clears it again on the
+//! next check and the one after that. The mark does not make a rollback
+//! unrepeatable; it makes an unlabelled one the only kind worth trying.
 //!
 //! What it does not buy is stated where the promise is, in the `updater` module
 //! doc: a manifest that lies *upward* is not caught here. Nothing in a manifest
@@ -111,6 +119,17 @@ pub(crate) fn floor(stored: Option<&str>, current: &Version) -> Version {
     }
 }
 
+/// Replaces the mark, or leaves the one that is there.
+///
+/// `commands::write_atomically` rather than `std::fs::write`, which truncates:
+/// it opens the file with `O_TRUNC`, so the recorded mark is gone before the
+/// replacement is written and a crash, a full disk or a power cut in between
+/// leaves an empty or half-written file. `read` answers that with `None`, `floor`
+/// answers `None` with the running version, and the running version is the one
+/// number a rollback has already lowered. This is the one file in the
+/// application where losing the old contents has a security consequence rather
+/// than an inconvenient one, and a temporary file renamed into place is what
+/// makes the mark either the old one or the whole new one.
 fn write(path: &Path, mark: &str) -> Result<(), String> {
     let history = History {
         highest_installed_version: mark.to_string(),
@@ -122,7 +141,7 @@ fn write(path: &Path, mark: &str) -> Result<(), String> {
         .map_err(|err| format!("failed to create {}: {err}", directory.display()))?;
     let json = serde_json::to_string_pretty(&history)
         .map_err(|err| format!("failed to render the update history: {err}"))?;
-    std::fs::write(path, json).map_err(|err| format!("failed to write {}: {err}", path.display()))
+    crate::commands::write_atomically(path, json.as_bytes())
 }
 
 fn history_path(app: &AppHandle) -> Option<PathBuf> {

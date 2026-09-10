@@ -234,8 +234,16 @@ fn build_editor_window(
 /// incoming request to before matching it: a pictures folder the user has moved
 /// onto another volume is reached through a symlink, and the pattern has to be
 /// on the far side of it.
+///
+/// Asked of `AppState` first, because a path may already be in the scope from
+/// an editor that has since closed: the grant outlives the window, for the
+/// reason `release_editor` gives, and adding a second copy of it would say
+/// nothing new.
 fn allow_capture(app: &AppHandle, path: &Path) {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !app.state::<AppState>().grant_capture(&path) {
+        return;
+    }
     if let Err(err) = app.asset_protocol_scope().allow_file(&path) {
         // Not fatal here: the window is still worth opening, and the page says
         // plainly that it could not open the picture, which is the surface
@@ -247,32 +255,33 @@ fn allow_capture(app: &AppHandle, path: &Path) {
     }
 }
 
-/// Forgets an editor window that has been destroyed, and takes its capture back
-/// out of the asset scope.
+/// Forgets an editor window that has been destroyed.
 ///
-/// Only once no editor is left on that capture, which `forget_editor` decides
-/// under its own lock.
+/// The capture stays in the asset scope, and that is the whole of the change
+/// this function used to make. It asked the scope to forbid the capture once no
+/// editor was left on the picture, which is a one-way door: Tauri's scope has no
+/// way to undo a forbidden pattern, and a forbidden pattern takes absolute
+/// precedence over every later `allow_file`, so the path is unreadable for the
+/// life of the process.
 ///
-/// A forbidden path stays forbidden for the life of the process: Tauri's scope
-/// has no way to undo one, and a forbidden pattern beats an allowed one. That
-/// is safe here only because a capture path is opened once and never again:
-/// `save_png_without_overwriting` creates each capture under a name nothing
-/// else holds, and the editor is opened only on a file that call has just
-/// created. A future path that reopens an editor on an existing picture has to
-/// revisit this, or that picture will refuse to load.
+/// That was safe only while a capture path was opened once and never again. It
+/// is not: the filename template is the user's, so a template like `Screenshot`
+/// renders the same name every time, and the ordinary habit of pasting a
+/// capture and then deleting the file hands that name straight back to the next
+/// one. `save_capture_without_overwriting` then creates it, this module opens an
+/// editor on it, and the page says "Snapdeck could not open …" for every capture
+/// that lands on that name from then on. No file is lost, which is exactly what
+/// makes it hard to see: the capture is written and the clipboard is set, and
+/// only the window is broken.
+///
+/// So nothing is taken back out, and `AppState::grant_capture` is what keeps the
+/// scope from growing a duplicate entry per reuse. What the per-capture grant
+/// still buys is the thing it was added for: the webviews can read the captures
+/// this session has opened an editor on, one path at a time, rather than
+/// everything under `~/Pictures`, which is what a configured `$PICTURE/**` scope
+/// would have granted for the life of the application.
 fn release_editor(app: &AppHandle, label: &str) {
-    let Some(capture) = app.state::<AppState>().forget_editor(label) else {
-        return;
-    };
-    let capture = capture
-        .canonicalize()
-        .unwrap_or_else(|_| capture.to_path_buf());
-    if let Err(err) = app.asset_protocol_scope().forbid_file(&capture) {
-        eprintln!(
-            "snapdeck: {} could not be taken out of the asset scope: {err}",
-            capture.display()
-        );
-    }
+    app.state::<AppState>().forget_editor(label);
 }
 
 /// The window's inner size in points, from the capture's size in pixels.
@@ -445,6 +454,31 @@ mod tests {
         assert_eq!(
             fit_editor_window(900, 700, 0.0, ROOM, ROOM),
             fit_editor_window(900, 700, 1.0, ROOM, ROOM)
+        );
+    }
+
+    /// A capture path must never be forbidden in the asset scope.
+    ///
+    /// Verified in `tauri-2.11.5/src/scope/fs.rs`: a forbidden pattern takes
+    /// absolute precedence over every allowed one and there is no call that
+    /// removes it, so forbidding a path is permanent for the life of the
+    /// process. A capture path is reclaimable, because the filename template is
+    /// the user's, so forbidding one means the next capture on that name opens
+    /// an editor that cannot read its own picture.
+    ///
+    /// A source scan, because the property is the *absence* of a call and there
+    /// is no live `AppHandle` in a unit test to observe its effect through.
+    /// `state::a_capture_stays_granted_after_its_editor_has_gone` is the other
+    /// half: this says nothing revokes the grant, that says the grant outlives
+    /// the window that asked for it.
+    #[test]
+    fn nothing_here_takes_a_capture_back_out_of_the_asset_scope() {
+        // Spelled in two pieces so that this test is not itself the occurrence
+        // it is looking for.
+        const REVOKE: &str = concat!("forbid", "_file");
+        assert!(
+            !include_str!("editor.rs").contains(REVOKE),
+            "a forbidden path can never be allowed again, and a capture path can be taken again"
         );
     }
 

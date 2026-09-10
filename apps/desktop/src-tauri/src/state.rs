@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +57,20 @@ pub struct AppState {
     /// get back. Keyed by label because that is what a command knows about the
     /// window that invoked it.
     editors: Mutex<HashMap<String, EditorSession>>,
+    /// Every capture this process has put into the webviews' asset scope.
+    ///
+    /// The scope only ever grows, for the reason `editor::release_editor`
+    /// gives: Tauri's scope cannot undo a grant without forbidding the pattern,
+    /// and a forbidden pattern is permanent and beats every later grant. So a
+    /// capture that has been shown once stays readable, and this is the record
+    /// of which ones those are.
+    ///
+    /// It is what keeps a reused path working. The filename template is the
+    /// user's, so a template without `{time}` in it renders the same name every
+    /// time; delete the file after pasting it and the next capture takes that
+    /// name back. Asking here first means the second editor on that path finds
+    /// the grant already in place instead of adding a second copy of it.
+    granted_captures: Mutex<HashSet<PathBuf>>,
     /// The settings currently in force.
     ///
     /// Held here rather than read from disk on demand, because the two hottest
@@ -107,6 +121,7 @@ impl AppState {
             capture_in_flight: Arc::new(AtomicBool::new(false)),
             overlay_window_ids: Mutex::new(Vec::new()),
             editors: Mutex::new(HashMap::new()),
+            granted_captures: Mutex::new(HashSet::new()),
             settings: Mutex::new(Settings::default()),
             registered_shortcuts: Mutex::new(None),
             settings_window_id: Mutex::new(None),
@@ -206,21 +221,35 @@ impl AppState {
             .map(|session| session.capture.clone())
     }
 
-    /// Drops the editor at `label`, and answers whether its capture is now
-    /// closed everywhere.
+    /// Drops the editor at `label`.
     ///
-    /// `Some(capture)` only when no other editor is still open on the same
-    /// file, because the caller uses this to take the file back out of the
-    /// asset protocol scope and doing that under a window still showing it
-    /// would blank the picture. One locked operation rather than a removal
-    /// followed by a question, so a second window cannot appear in between.
-    pub fn forget_editor(&self, label: &str) -> Option<PathBuf> {
-        let mut editors = self.editors();
-        let session = editors.remove(label)?;
-        let still_open = editors
-            .values()
-            .any(|other| other.capture == session.capture);
-        (!still_open).then_some(session.capture)
+    /// The capture it was opened on is deliberately not answered with and is
+    /// not taken back out of the asset scope; `editor::release_editor` says why
+    /// there is nothing this can hand a caller to undo.
+    pub fn forget_editor(&self, label: &str) {
+        self.editors().remove(label);
+    }
+
+    /// Records that `capture` is about to be shown, and answers whether the
+    /// asset scope still has to be told about it.
+    ///
+    /// `true` the first time in the life of the process, `false` every time
+    /// after. The second answer is the one that matters: a capture whose name a
+    /// later capture has taken back is already in the scope, so there is
+    /// nothing to add, and nothing was ever removed for this to have to put
+    /// back. See `editor::allow_capture`.
+    pub fn grant_capture(&self, capture: &Path) -> bool {
+        self.granted_lock().insert(capture.to_path_buf())
+    }
+
+    /// The granted-captures lock, with poisoning treated as recoverable for the
+    /// reason `overlay_ids` gives: every user of it reads or inserts one whole
+    /// path, and propagating an unrelated panic would leave every later editor
+    /// unable to say whether its picture is readable.
+    fn granted_lock(&self) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+        self.granted_captures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The window-server ids of the open editors, for the window picker to
@@ -426,23 +455,57 @@ mod tests {
         assert_eq!(state.editor_capture("overlay-1"), None);
     }
 
-    /// Closing one editor must not take the other one's picture out of the
-    /// asset scope, and must take its own out once nothing shows it.
+    /// A closed editor stops being an editor: its save is refused from then on
+    /// and its window leaves the capture picker. Closing one must not do either
+    /// of those to the other window on the same picture.
     #[test]
-    fn a_capture_is_released_only_once_no_editor_is_left_on_it() {
+    fn forgetting_one_editor_leaves_the_other_on_the_same_capture_alone() {
         let state = AppState::new();
         let shared = PathBuf::from("/Pictures/a.png");
         state.register_editor("editor-0".into(), shared.clone(), Some(11));
         state.register_editor("editor-1".into(), shared.clone(), Some(22));
 
-        assert_eq!(
-            state.forget_editor("editor-0"),
-            None,
-            "the other editor is still showing this capture"
-        );
-        assert_eq!(state.forget_editor("editor-1"), Some(shared));
+        state.forget_editor("editor-0");
+        assert_eq!(state.editor_capture("editor-0"), None);
+        assert_eq!(state.editor_capture("editor-1"), Some(shared));
+        assert_eq!(state.editor_window_ids(), vec![22]);
+
+        state.forget_editor("editor-1");
         assert!(state.editor_window_ids().is_empty());
-        assert_eq!(state.forget_editor("editor-1"), None);
+        // Forgetting a label twice is what a `Destroyed` event arriving after a
+        // window has already been dropped looks like, and it must be quiet.
+        state.forget_editor("editor-1");
+    }
+
+    /// The invariant the asset scope depends on, and the bug it was written
+    /// for.
+    ///
+    /// A capture path is not opened once and never again. The filename template
+    /// is the user's, so `Screenshot` renders the same name every time, and the
+    /// ordinary paste-it-then-delete-it habit hands that name straight back to
+    /// the next capture. Tauri's scope cannot undo a grant, so the grant has to
+    /// survive the editor that asked for it: the second editor on that path
+    /// finds it already there, and its picture loads.
+    #[test]
+    fn a_capture_stays_granted_after_its_editor_has_gone() {
+        let state = AppState::new();
+        let reused = PathBuf::from("/Pictures/Screenshot.png");
+
+        assert!(
+            state.grant_capture(&reused),
+            "the first capture on this path has to be added to the scope"
+        );
+        state.register_editor("editor-0".into(), reused.clone(), Some(11));
+        state.forget_editor("editor-0");
+
+        assert!(
+            !state.grant_capture(&reused),
+            "the grant has to outlive the editor, or the capture that takes this name next would open on a picture the webview cannot read"
+        );
+        assert!(
+            state.grant_capture(Path::new("/Pictures/Screenshot 2.png")),
+            "a path nothing has shown yet is still a path the scope has to be told about"
+        );
     }
 
     /// The guard exists so that an unwinding worker still frees the slot.

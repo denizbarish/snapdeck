@@ -107,11 +107,21 @@ const NOTES_PROVENANCE: &str = "From the release notes published at the update s
 /// `https://github.com.evil.example/` has the right prefix and is not GitHub.
 const ALLOWED_UPDATE_HOSTS: [&str; 2] = ["github.com", "objects.githubusercontent.com"];
 
-/// What a second `Check for Updates…` is told while the first is still running.
+/// What is written down when a second `Check for Updates…` arrives while the
+/// first is still running.
 ///
-/// Not an error, and it is worded as an answer rather than as a failure: the
-/// menu bar item it lands in is the only surface this application has that needs
-/// no window, and the alternative was returning without saying anything at all.
+/// Not an error, and worded as an answer rather than as a failure. It goes to
+/// the log alone, and deliberately not through `report_failure`: that call
+/// raises the exclamation mark in the menu bar, which this application uses for
+/// one thing, a capture that went wrong, and which is cleared by the next
+/// capture. Marking a check that is merely still running would put a failure
+/// notice in front of a user who has had none, over the one event in this module
+/// that is not a failure at all.
+///
+/// The log alone rather than an alert, for the reason `offer` gives: the check
+/// holding the slot may have an alert on screen at this moment, and a second one
+/// raised behind it is not reliably drawn. The first check answers for both,
+/// which is what the sentence says.
 const ALREADY_CHECKING: &str =
     "Snapdeck is already checking for updates. That check has not answered yet; it will say what it found when it does.";
 
@@ -243,14 +253,12 @@ fn spawn_check(app: &AppHandle, answer: Answer) {
     // A second `Check for Updates…` while the first is still waiting on the
     // network would end in two dialogs about the same release.
     let Some(guard) = begin_check() else {
-        // Said out loud rather than dropped. A menu item that does nothing at
-        // all when clicked is indistinguishable from a broken one, and the
-        // guard is claimed for as long as a check waits on the network. The
-        // menu bar rather than an alert, for the reason `offer` gives: the
-        // check that is holding the slot may have an alert on screen right
-        // now, and a second one raised behind it is the failure this module is
-        // built to avoid.
-        report_failure(app, ALREADY_CHECKING);
+        // Written down rather than dropped, so a session where the menu item
+        // appeared to do nothing can be read back afterwards. Not through
+        // `report_failure`: see `ALREADY_CHECKING` for why this must not raise
+        // the menu bar's failure marker, and why it is not an alert either.
+        eprintln!("snapdeck: {ALREADY_CHECKING}");
+        crate::report::append_to_log(app, ALREADY_CHECKING);
         return;
     };
     let app = app.clone();
@@ -426,6 +434,16 @@ fn inspect_install_site(parent: &Path) -> InstallSite {
     InstallSite::Replaceable
 }
 
+/// The Mac's own Applications folder, where "move it there" is not advice.
+///
+/// `/Applications` is `root:admin` with mode 775, so `takes_a_write` fails there
+/// for every account that is not an administrator of the machine. That is an
+/// ordinary configuration, not a broken one: a managed Mac, or a second account
+/// on a family one. Telling such a user to move Snapdeck into the folder it is
+/// already installed in is the one instruction certain to get them nowhere,
+/// which is why this case gets a sentence of its own.
+const SYSTEM_APPLICATIONS: &str = "/Applications";
+
 /// What to tell the user about a folder Snapdeck cannot replace itself in.
 ///
 /// Split from the two probes above so that the wording is testable without a
@@ -433,6 +451,11 @@ fn inspect_install_site(parent: &Path) -> InstallSite {
 fn describe_install_site(site: InstallSite, parent: &Path) -> Option<String> {
     match site {
         InstallSite::Replaceable => None,
+        InstallSite::Unwritable if parent == Path::new(SYSTEM_APPLICATIONS) => Some(format!(
+            "Snapdeck found an update but will not install it from where it is running. Snapdeck is in {}, which is where it belongs, but this account cannot write there: {} is owned by the system and only an administrator of this Mac may change what is in it. Replacing Snapdeck there means deleting it with administrator privileges first, and if anything then goes wrong there is no copy left to go back to. Ask an administrator to install the update, or sign in as one and check again.",
+            parent.display(),
+            parent.display()
+        )),
         InstallSite::Unwritable => Some(format!(
             "Snapdeck found an update but will not install it from where it is running. {} cannot be written to, so replacing Snapdeck there means deleting it with administrator privileges first, and if anything then goes wrong there is no copy left to go back to. Move Snapdeck into your Applications folder and check again.",
             parent.display()
@@ -496,8 +519,14 @@ fn same_volume(one: &Path, other: &Path) -> bool {
 /// dialog would have been dismissed.
 async fn offer(app: &AppHandle, mut update: Update) {
     let title = format!("Snapdeck {} is available", update.version);
+    // The restart is named as something that costs work, because it does. It
+    // replaces the process, and every editor window goes with it: annotations
+    // that have not been saved are gone, without a second question, and this
+    // dialog is the only place the user can still decide otherwise. The
+    // captures themselves are never at risk, which is worth saying in the same
+    // breath so the warning is not read as a bigger one than it is.
     let body = format!(
-        "You are running {}. Snapdeck will download it, replace itself and restart.\n\nmacOS will ask for Screen Recording permission again afterwards: it ties that permission to the app's signature, and an update changes it. If macOS will not let Snapdeck replace itself where it is installed, it asks for an administrator password.\n\n{}",
+        "You are running {}. Snapdeck will download it, replace itself and restart.\n\nAny editor window open now is closed by that restart, and annotations you have not saved are lost with it. The captures themselves are already on disk and are not affected. Save what you want to keep first.\n\nmacOS will ask for Screen Recording permission again afterwards: it ties that permission to the app's signature, and an update changes it. If macOS will not let Snapdeck replace itself where it is installed, it asks for an administrator password.\n\n{}",
         update.current_version,
         release_notes(update.body.as_deref())
     );
@@ -949,6 +978,29 @@ mod tests {
                 "the check succeeded: {message}"
             );
         }
+    }
+
+    /// The one place "move it into Applications" is the wrong thing to say.
+    ///
+    /// `/Applications` is `root:admin rwxrwxr-x`, so the write probe fails for
+    /// any account that is not an administrator of the Mac, with Snapdeck
+    /// installed exactly where the Install section of the README puts it. The
+    /// message that fits every other unwritable folder is useless here, and the
+    /// user needs to be told the thing that is actually true: this is an
+    /// administrator's job.
+    #[test]
+    fn an_unwritable_applications_folder_is_not_told_to_move_itself_there() {
+        let message = describe_install_site(
+            InstallSite::Unwritable,
+            Path::new(super::SYSTEM_APPLICATIONS),
+        )
+        .expect("an unwritable install folder has to be refused");
+        assert!(
+            !message.contains("Move Snapdeck"),
+            "it is already there: {message}"
+        );
+        assert!(message.contains("/Applications"), "{message}");
+        assert!(message.contains("administrator"), "{message}");
     }
 
     /// The message for the volume case has to say what is actually at stake,

@@ -129,7 +129,7 @@ Every capture that produced a file opens in an editor window: the title bar carr
 name, and the picture is shown at its own size or fitted down if it does not fit the screen.
 
 The editor is an offer, not a step. By the time it appears the capture is already finished: the
-PNG is in `~/Pictures` and the image is on the clipboard. Closing the window without touching
+file is in `~/Pictures` and the image is on the clipboard. Closing the window without touching
 anything leaves both exactly as they were.
 
 Take a second capture and a second editor opens beside the first. The first keeps whatever you
@@ -154,13 +154,16 @@ the selected annotation. Width also sets the text size, the badge size and the r
 
 ### Saving
 
-`PNG` and `JPEG` beside `Save` choose the format, and `PNG` is where it starts.
+`PNG` and `JPEG` beside `Save` choose the format. The editor opens on the format the capture was
+taken in, which is PNG unless you have changed **Default format** in Settings.
 
-Saving as PNG writes the edited picture back over the capture in `~/Pictures`, under the same
-name, by writing a temporary file beside it and renaming it into place: a failed save leaves the
-picture you already had rather than half of a new one. Saving as JPEG cannot overwrite a PNG, so
-it writes a second file beside the capture, same name, `.jpg` instead of `.png`, and leaves the
-original untouched. Either way the status bar names the file that was written.
+Saving in the format the capture is already in writes the edited picture back over it in
+`~/Pictures`, under the same name, by writing a temporary file beside it and renaming it into
+place: a failed save leaves the picture you already had rather than half of a new one. Saving in
+the other format cannot overwrite that file, because the extension is part of the name, so it
+writes a second file beside the capture, same name, `.jpg` in place of `.png` or the other way
+about, and leaves the original untouched. Either way the status bar names the file that was
+written.
 
 JPEG is worth choosing when the picture has to travel and it is mostly photographic: a 2200 x 1500
 capture of a desktop measured 544 KB as a PNG and 393 KB as a JPEG. A small capture of flat
@@ -176,10 +179,10 @@ clipboard is always the lossless picture, whichever format the file was written 
 reason `Copy` is. Saving a document you have not touched leaves the clipboard alone, and so does
 `Close`.
 
-Saving as PNG replaces the capture by renaming a new file over it, which replaces the file itself
-rather than its contents. Finder tags, other extended attributes and the original creation date
-belong to the file that is replaced and do not survive the save; the name, the location and the
-pixels do.
+A save that replaces the capture does so by renaming a new file over it, which replaces the file
+itself rather than its contents. Finder tags, other extended attributes and the original creation
+date belong to the file that is replaced and do not survive the save; the name, the location and
+the pixels do.
 
 `Copy` puts the edited picture on the clipboard on its own, without writing anything. It is
 unaffected by the format buttons: a clipboard image is handed to the next application as pixels
@@ -249,10 +252,11 @@ edited one, which is why `Cmd+S` and then paste is safe. `Copy` does the same wi
 file. Closing the editor without doing either leaves the original capture on the clipboard, because
 that is where the capture put it.
 
-**Saving as JPEG.** A JPEG cannot overwrite a PNG, so that save writes a second file and leaves the
-capture where it is: the unredacted PNG stays in `~/Pictures` beside the redacted JPEG, under the
-same name. If the point of the redaction was that the original should not exist, save as PNG, which
-replaces the capture, or delete the PNG yourself.
+**Saving in the other format.** The extension is part of the file name, so a save in a format the
+capture is not already in writes a second file and leaves the capture where it is: the unredacted
+original stays in `~/Pictures` beside the redacted new file, under the same name. If the point of
+the redaction was that the original should not exist, save in the format the editor opened on,
+which is the capture's own and which replaces it, or delete the original yourself.
 
 ## Settings
 
@@ -283,6 +287,11 @@ is there.
 **Default format.** PNG or JPEG, PNG by default. A screenshot is the worst case for a lossy
 encoder: it is mostly hard edges, and most of those edges are letters. JPEG is there for when the
 file has to be small enough to send.
+
+It decides more than the size of the file. This is the format every capture is written in, so it is
+also the format the editor opens on and the one a Save replaces the capture in. With JPEG chosen it
+is saving as **PNG** that writes a second file and leaves the original beside it, which is the case
+to keep in mind when the point of an edit was to be rid of the original.
 
 **Open the editor after a capture.** On by default. Turn it off and a capture is written and
 copied without the editor appearing, which is the faster path when you already know you are not
@@ -372,12 +381,15 @@ MIT, see [LICENSE](LICENSE).
 - **Closing an editor throws away unsaved annotations without asking.** The capture itself is
   never at risk, since the file and the clipboard are finished before the editor opens, but
   `Esc`, the Close button and the title bar's red button all discard whatever has been drawn and
-  not saved.
+  not saved. Installing an update does the same, because it restarts Snapdeck; the update dialog
+  says so before you agree to it.
 - **One shortcut another app holds takes all three down.** The three bindings are registered as a
   set or not at all, so a combination macOS refuses, usually because another app already holds it,
-  leaves the keyboard empty rather than half working. The settings window says which one was
-  refused and shows what is actually bound, and the menu bar item captures in every mode either
-  way.
+  takes the other two with it rather than leaving them half working. Snapdeck does not stop there:
+  at launch it falls back to the built-in three and says so, and a rebind that is refused puts the
+  bindings you had back. The keyboard is left empty only when there is nothing left to fall back
+  on. The settings window says which combination was refused and shows what is actually bound, and
+  the menu bar item captures in every mode either way.
 - **No screen recording and no full-page capture.** Neither is built. Snapdeck takes still captures
   of what is on screen; it does not record video, and it does not scroll a webpage to capture the
   part of it that is not visible.
