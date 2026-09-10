@@ -3448,6 +3448,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "getrandom 0.4.3",
  "image",
  "minisign-verify",
  "objc2",
@@ -3464,6 +3465,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-updater",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

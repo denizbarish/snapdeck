@@ -48,6 +48,12 @@ percent-encoding = "2"
 # only part this build cannot use, since a macOS update arrives as a `.tar.gz`
 # and the feature is Windows-only in the plugin's own `cfg`.
 tauri-plugin-updater = "2.11.0"
+# The pairing token is 32 bytes straight from the system CSPRNG. One function
+# (`fill`); a seeded userspace generator would add nothing to a one-off secret,
+# and 0.4.3 is already in `Cargo.lock`.
+getrandom = "0.4"
+# `BridgeError`, in the shape of `crates/frame/src/error.rs`.
+thiserror.workspace = true
 # `semver::Version` is the type the updater's version comparator is written
 # against, and the plugin does not re-export it. The comparison rule is
 # `updater::is_upgrade`, which is the one place this application decides what

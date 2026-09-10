@@ -1,3 +1,4 @@
+pub mod bridge;
 mod commands;
 mod editor;
 mod output;
