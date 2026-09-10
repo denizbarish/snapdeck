@@ -107,7 +107,9 @@ The screen freezes and every display is covered by the selection overlay.
   whether or not anything is selected.
 
 Every capture is saved as a PNG under `~/Pictures`, named `Snapdeck <date> at <time>.png` in your
-own time zone, and is put on the clipboard at the same time, ready to paste. The region is
+own time zone, and is put on the clipboard at the same time, ready to paste. The folder, the
+filename template, the format and the three shortcuts are all settings; those are the defaults, and
+they are what the rest of this README describes. The region is
 captured again at the display's own pixel density rather than cropped out of the frozen frame, so
 on a Retina display the file is twice the size in pixels that you selected in points.
 
@@ -247,6 +249,55 @@ capture where it is: the unredacted PNG stays in `~/Pictures` beside the redacte
 same name. If the point of the redaction was that the original should not exist, save as PNG, which
 replaces the capture, or delete the PNG yourself.
 
+## Architecture
+
+Three parts, in one workspace, with the dependency arrow pointing one way.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ apps/desktop                                the Tauri shell     │
+│                                                                 │
+│  src-tauri (Rust)          │  src (React 19)                    │
+│  tray, global shortcuts,   │  overlay.html   the selection UI   │
+│  overlay windows, editor   │  editor.html    hosts <Editor/>    │
+│  windows, settings file,   │  settings.html  the settings form  │
+│  file writing, clipboard,  │                                    │
+│  updater, per-window ACL   │  each window gets only the ACL     │
+│  capabilities              │  capability it needs               │
+└───────────┬─────────────────────────────────┬───────────────────┘
+            │                                 │
+            ▼                                 ▼
+┌───────────────────────────┐   ┌─────────────────────────────────┐
+│ crates/capture            │   │ packages/editor                 │
+│ snapdeck-capture          │   │ @snapdeck/editor                │
+│                           │   │                                 │
+│ ScreenCapturer trait,     │   │ layer model, undo stack, hit    │
+│ frame and geometry types, │   │ testing, renderer, export       │
+│ a mock for tests, and the │   │ ── no React below this line ──  │
+│ macOS ScreenCaptureKit    │   │ <Editor/>, a React component    │
+│ implementation            │   │ that knows nothing of its host  │
+│                           │   │                                 │
+│ no Tauri, no windows,     │   │ no Tauri: saving and copying    │
+│ no files                  │   │ leave through props as a Blob   │
+└───────────────────────────┘   └─────────────────────────────────┘
+```
+
+**`crates/capture`** is the capture core. It defines what a screen capturer is and what a frame is,
+and the macOS implementation behind `cfg(target_os = "macos")` is the only one that exists. It hands
+back pixels and the scale factor they were captured at, and knows nothing about where they go.
+
+**`packages/editor`** is the annotation editor as a library, and it is free of Tauri on purpose.
+Everything below the `Editor` component is plain TypeScript over the canvas 2D API, so the same
+model, renderer and export could be driven by a browser extension. `Editor` itself takes its host
+through props: a save is a `Blob` leaving through a callback, not a file being written.
+
+**`apps/desktop`** is the only part that knows this is a Mac app. Rust owns the tray, the shortcuts,
+the overlay and editor windows, the settings file, the writing and the updater; the React side is
+three thin entry points around code that lives elsewhere.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) says which one to open for a given change, and how to build and
+test them.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
@@ -271,7 +322,12 @@ MIT, see [LICENSE](LICENSE).
   never at risk, since the file and the clipboard are finished before the editor opens, but
   `Esc`, the Close button and the title bar's red button all discard whatever has been drawn and
   not saved.
-- **A partly failed shortcut registration leaves some shortcuts dead.** Registration stops at the
-  first shortcut macOS refuses, usually because another app already holds it, and the ones after it
-  are never registered. The menu bar item captures in every mode either way.
+- **One shortcut another app holds takes all three down.** The three bindings are registered as a
+  set or not at all, so a combination macOS refuses, usually because another app already holds it,
+  leaves the keyboard empty rather than half working. The settings window says which one was
+  refused and shows what is actually bound, and the menu bar item captures in every mode either
+  way.
+- **No screen recording and no full-page capture.** Neither is built. Snapdeck takes still captures
+  of what is on screen; it does not record video, and it does not scroll a webpage to capture the
+  part of it that is not visible.
 

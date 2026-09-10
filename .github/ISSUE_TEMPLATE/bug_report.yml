@@ -1,0 +1,64 @@
+name: Bug report
+description: Something Snapdeck does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not for security problems. If a bug lets someone reach captured pixels, recover a redaction,
+        write outside the save folder or install an unsigned update, follow
+        [SECURITY.md](../blob/main/SECURITY.md) instead and do not post it here.
+
+  - type: input
+    id: version
+    attributes:
+      label: Snapdeck version
+      description: In the DMG's filename, in Get Info on Snapdeck.app, or in what "Check for Updates…" says when there is nothing newer.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Where the build came from
+      options:
+        - A release DMG
+        - A local build from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: What you did, in order. Include the capture mode and the shortcut if the bug is in a capture.
+      placeholder: |
+        1. Pressed Cmd+Shift+7
+        2. Dragged a region over a second display
+        3. Pressed Enter
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, a second display, an app holding one of the shortcuts, anything unusual about the setup. Do not attach captures with content you would not publish.
+    validations:
+      required: false
