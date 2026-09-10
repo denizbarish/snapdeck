@@ -10,7 +10,7 @@ mod state;
 mod tray;
 
 use settings::Settings;
-use shortcuts::register_shortcuts;
+use shortcuts::{register_shortcuts, Shortcuts};
 use state::AppState;
 use tauri::{Manager, RunEvent};
 use tauri_plugin_autostart::MacosLauncher;
@@ -39,11 +39,18 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    // The bindings in force, not the built-in ones. Reading the
-                    // defaults here was what made a rebind only half work: the
-                    // new combination registered, fired this handler, matched
-                    // nothing, and did exactly nothing.
-                    let shortcuts = app.state::<AppState>().settings().shortcuts;
+                    // The bindings actually registered, not the built-in ones
+                    // and not the settings file's. Reading the defaults here
+                    // was what made a rebind only half work: the new
+                    // combination registered, fired this handler, matched
+                    // nothing, and did exactly nothing. The settings are the
+                    // same trap one step further along: a stored combination
+                    // that could not be registered stays in the file for the
+                    // user to change, while something else is bound, and only
+                    // the thing that is bound can be the thing that fired.
+                    let Some(shortcuts) = app.state::<AppState>().registered_shortcuts() else {
+                        return;
+                    };
                     if let Some(mode) = shortcuts.mode_for_parsed(shortcut) {
                         tray::request_capture(app, mode);
                     }
@@ -67,7 +74,10 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             tray::build_tray(&handle)?;
-            handle.state::<AppState>().set_settings(adopt(&handle));
+            let (settings, bound) = adopt(&handle);
+            let state = handle.state::<AppState>();
+            state.set_settings(settings);
+            state.set_registered_shortcuts(bound);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -93,8 +103,8 @@ pub fn run() {
         });
 }
 
-/// Puts the stored settings into force at launch, and answers with what is
-/// actually in force rather than with what was on disk.
+/// Puts the stored settings into force at launch, and answers with both the
+/// settings and the bindings that were actually registered.
 ///
 /// Two things can disagree with the file by the time it is read.
 ///
@@ -104,28 +114,166 @@ pub fn run() {
 /// because a shortcut that silently became a different shortcut is worse than
 /// one that plainly stopped working.
 ///
+/// What it deliberately does not do is write the fallback into
+/// `settings.shortcuts`. That was a way to lose the user's choice without
+/// telling them: the settings then held the built-in bindings, the next save of
+/// any unrelated field wrote those over the stored combination, and the window
+/// meanwhile rendered them as though they were working. The file keeps saying
+/// what the user chose, the second half of this pair says what is bound, and
+/// the settings window is given both.
+///
 /// The login item may have been removed from outside this application. The
 /// system is the authority on whether it exists, so its answer is adopted here;
 /// a checkbox that insists it is ticked while the plist is gone is a lie the
 /// settings window has no way to catch.
-fn adopt(app: &tauri::AppHandle) -> Settings {
+fn adopt(app: &tauri::AppHandle) -> (Settings, Option<Shortcuts>) {
     let mut settings = settings::load(app);
-    if let Err(err) = register_shortcuts(app, &settings.shortcuts) {
-        let defaults = Settings::default();
-        settings.shortcuts = defaults.shortcuts;
-        match register_shortcuts(app, &settings.shortcuts) {
-            Ok(()) => report::report_failure(
-                app,
-                &format!("Snapdeck could not use your capture shortcuts ({err}), so it went back to the built-in ones. Open Settings to choose another combination."),
-            ),
-            Err(fallback_err) => report::report_failure(
-                app,
-                &format!("Snapdeck could not register any capture shortcut ({err}, and then {fallback_err}). Use the menu bar item to take a capture."),
-            ),
-        }
+    let (bound, complaint) = adopt_shortcuts(
+        |shortcuts| register_shortcuts(app, shortcuts),
+        &settings.shortcuts,
+        &Settings::default().shortcuts,
+    );
+    if let Some(complaint) = complaint {
+        report::report_failure(app, &complaint);
     }
     if let Some(enabled) = settings::launch_at_login_state(app) {
         settings.launch_at_login = enabled;
     }
-    settings
+    (settings, bound)
+}
+
+/// The decision inside `adopt`, with the registration injected.
+///
+/// Split out for the reason `shortcuts::rebind_with` is: the case worth testing,
+/// a stored combination the platform refuses, is not something a test can
+/// arrange through a live `GlobalShortcut`.
+///
+/// Answers with what is bound and with what the user is owed an explanation
+/// about. `None` for the first is a real answer: nothing is registered, and the
+/// settings window has to be able to say so rather than render three keys that
+/// do nothing.
+fn adopt_shortcuts<F>(
+    mut register: F,
+    stored: &Shortcuts,
+    defaults: &Shortcuts,
+) -> (Option<Shortcuts>, Option<String>)
+where
+    F: FnMut(&Shortcuts) -> Result<(), String>,
+{
+    let Err(err) = register(stored) else {
+        return (Some(stored.clone()), None);
+    };
+    // Already the built-in set, so there is no fallback left to try and no
+    // point in saying it was tried.
+    if stored == defaults {
+        return (
+            None,
+            Some(format!(
+                "Snapdeck could not register any capture shortcut ({err}). Use the menu bar item to take a capture."
+            )),
+        );
+    }
+    match register(defaults) {
+        Ok(()) => (
+            Some(defaults.clone()),
+            Some(format!(
+                "Snapdeck could not use your capture shortcuts ({err}), so the built-in ones are bound instead. Your choice is still in Settings; open it to pick another combination."
+            )),
+        ),
+        Err(fallback_err) => (
+            None,
+            Some(format!(
+                "Snapdeck could not register any capture shortcut ({err}, and then {fallback_err}). Use the menu bar item to take a capture."
+            )),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults() -> Shortcuts {
+        Settings::default().shortcuts
+    }
+
+    fn stored() -> Shortcuts {
+        Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+Shift+KeyR".to_string(),
+            ..defaults()
+        }
+    }
+
+    #[test]
+    fn a_stored_set_that_registers_is_what_is_bound() {
+        let (bound, complaint) = adopt_shortcuts(|_| Ok(()), &stored(), &defaults());
+        assert_eq!(bound, Some(stored()));
+        assert_eq!(complaint, None);
+    }
+
+    /// The launch-path failure this pair of tests exists for. The built-in set
+    /// takes over the keyboard, and the user's own choice stays exactly where
+    /// it was, so the next save cannot write the fallback over it.
+    #[test]
+    fn a_stored_set_the_platform_refuses_falls_back_without_becoming_the_setting() {
+        let stored = stored();
+        let (bound, complaint) = adopt_shortcuts(
+            |shortcuts| {
+                if *shortcuts == stored {
+                    Err("the region shortcut is already taken".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            &stored,
+            &defaults(),
+        );
+        assert_eq!(
+            bound,
+            Some(defaults()),
+            "the built-in bindings are what the keyboard has"
+        );
+        let complaint = complaint.expect("a shortcut that changed under the user has to be said");
+        assert!(complaint.contains("already taken"), "{complaint}");
+        assert!(
+            complaint.contains("still in Settings"),
+            "the user has to be told their choice was kept: {complaint}"
+        );
+    }
+
+    /// The false "in force" case. When nothing registers, nothing may claim to
+    /// be bound: `None` is what stops the settings window rendering three keys
+    /// that do nothing and answering a save with "the new settings are in force
+    /// now".
+    #[test]
+    fn nothing_is_claimed_as_bound_when_nothing_registers() {
+        let (bound, complaint) = adopt_shortcuts(
+            |_| Err("the manager is gone".to_string()),
+            &stored(),
+            &defaults(),
+        );
+        assert_eq!(bound, None);
+        let complaint = complaint.expect("an empty keyboard has to be said out loud");
+        assert!(
+            complaint.contains("Use the menu bar item"),
+            "and it has to name the way out: {complaint}"
+        );
+    }
+
+    /// A stored set that is already the built-in one has no fallback, and the
+    /// message must not pretend a second attempt happened.
+    #[test]
+    fn the_built_in_set_failing_is_reported_once() {
+        let (bound, complaint) = adopt_shortcuts(
+            |_| Err("the manager is gone".to_string()),
+            &defaults(),
+            &defaults(),
+        );
+        assert_eq!(bound, None);
+        let complaint = complaint.expect("an empty keyboard has to be said out loud");
+        assert!(
+            !complaint.contains("and then"),
+            "there was only one attempt: {complaint}"
+        );
+    }
 }

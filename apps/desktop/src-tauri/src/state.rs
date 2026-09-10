@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use snapdeck_capture::macos::MacCapturer;
 
 use crate::settings::Settings;
+use crate::shortcuts::Shortcuts;
 
 /// One open editor window, keyed by its label.
 ///
@@ -70,6 +71,33 @@ pub struct AppState {
     /// `lib::run`'s setup replaces it with what was on disk before the tray or
     /// any shortcut can read it.
     settings: Mutex<Settings>,
+    /// The bindings the platform has actually accepted, or `None` when nothing
+    /// is bound at all.
+    ///
+    /// A separate question from `settings.shortcuts`, and the reason this field
+    /// exists: the settings are what the file says and what the next save
+    /// writes back, while this is what the keyboard does. They disagree
+    /// whenever a stored combination cannot be registered, which is a thing
+    /// another application can cause between one launch and the next.
+    ///
+    /// Two things read it. The global shortcut handler matches a press against
+    /// it, because a press can only ever come from a binding that is registered,
+    /// and matching against the settings instead would leave a fallback
+    /// registration firing a handler that recognises nothing. And
+    /// `commands::get_settings` reports it to the settings window, so a binding
+    /// that is not in force is shown as not in force rather than as a working
+    /// key.
+    ///
+    /// Starts at `None` for the same reason `settings` starts at the defaults:
+    /// nothing has been registered yet at the moment this is built.
+    registered_shortcuts: Mutex<Option<Shortcuts>>,
+    /// The window server's id for the settings window while it is open.
+    ///
+    /// Recorded for the reason the editors' ids are: the settings window is an
+    /// ordinary window in the window list, so window mode would otherwise offer
+    /// the user a picture of the window they are choosing settings in, and offer
+    /// it first, because it is the frontmost window on screen while it is open.
+    settings_window_id: Mutex<Option<u32>>,
 }
 
 impl AppState {
@@ -80,6 +108,8 @@ impl AppState {
             overlay_window_ids: Mutex::new(Vec::new()),
             editors: Mutex::new(HashMap::new()),
             settings: Mutex::new(Settings::default()),
+            registered_shortcuts: Mutex::new(None),
+            settings_window_id: Mutex::new(None),
         }
     }
 
@@ -101,6 +131,50 @@ impl AppState {
     /// answer what its own save folder is.
     fn settings_lock(&self) -> std::sync::MutexGuard<'_, Settings> {
         self.settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The bindings actually registered, or `None` when nothing is bound.
+    pub fn registered_shortcuts(&self) -> Option<Shortcuts> {
+        self.registered_lock().clone()
+    }
+
+    /// Records what is bound after a registration attempt.
+    ///
+    /// `None` is a real answer and not an absence: it says the keyboard is
+    /// empty, which is what the settings window has to be able to show.
+    pub fn set_registered_shortcuts(&self, shortcuts: Option<Shortcuts>) {
+        *self.registered_lock() = shortcuts;
+    }
+
+    /// The registered-bindings lock, with poisoning treated as recoverable for
+    /// the reason `overlay_ids` gives: every user replaces or reads the whole
+    /// value, and propagating an unrelated panic would leave every capture
+    /// shortcut dead and the settings window unable to say so.
+    fn registered_lock(&self) -> std::sync::MutexGuard<'_, Option<Shortcuts>> {
+        self.registered_shortcuts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records the settings window's id, or forgets it once the window is gone.
+    pub fn set_settings_window_id(&self, id: Option<u32>) {
+        *self.settings_window_lock() = id;
+    }
+
+    /// The settings window's id while it is open, for the window picker to drop
+    /// along with the overlays' and the editors'.
+    pub fn settings_window_id(&self) -> Option<u32> {
+        *self.settings_window_lock()
+    }
+
+    /// The settings window's lock, with poisoning treated as recoverable for
+    /// the reason `overlay_ids` gives: the value is a whole `Option` that is
+    /// replaced or read, and propagating an unrelated panic would put the
+    /// settings window back into the capture picker for good.
+    fn settings_window_lock(&self) -> std::sync::MutexGuard<'_, Option<u32>> {
+        self.settings_window_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -311,6 +385,37 @@ mod tests {
         };
         state.set_settings(changed.clone());
         assert_eq!(state.settings(), changed);
+    }
+
+    /// Nothing is registered until something registers, and `None` has to stay
+    /// distinguishable from "the built-in ones": it is what the settings window
+    /// reads to say the keyboard is empty.
+    #[test]
+    fn nothing_is_bound_until_a_registration_says_so() {
+        let state = AppState::new();
+        assert_eq!(state.registered_shortcuts(), None);
+
+        let bound = Settings::default().shortcuts;
+        state.set_registered_shortcuts(Some(bound.clone()));
+        assert_eq!(state.registered_shortcuts(), Some(bound));
+
+        // A rebind that fails with nothing to fall back on says so, and must be
+        // able to.
+        state.set_registered_shortcuts(None);
+        assert_eq!(state.registered_shortcuts(), None);
+    }
+
+    /// The settings window is frontmost while it is open, so its id has to be
+    /// there for the picker to drop, and gone again once the window is, because
+    /// the window server hands the number to somebody else.
+    #[test]
+    fn the_settings_window_id_is_recorded_while_it_is_open_and_not_after() {
+        let state = AppState::new();
+        assert_eq!(state.settings_window_id(), None);
+        state.set_settings_window_id(Some(77));
+        assert_eq!(state.settings_window_id(), Some(77));
+        state.set_settings_window_id(None);
+        assert_eq!(state.settings_window_id(), None);
     }
 
     /// A window that is not an editor has no capture, which is what makes a

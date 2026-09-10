@@ -108,25 +108,61 @@ pub fn register_shortcuts(app: &AppHandle, shortcuts: &Shortcuts) -> Result<(), 
     manager.unregister_all().map_err(|e| e.to_string())?;
     for (index, shortcut) in parsed.iter().enumerate() {
         if let Err(err) = manager.register(*shortcut) {
-            let _ = manager.unregister_all();
-            return Err(format!(
+            let mut message = format!(
                 "the {} shortcut ({}) could not be registered: {err}",
                 Shortcuts::MODES[index],
                 shortcuts.bindings()[index]
-            ));
+            );
+            // Reported rather than swallowed. Every caller reads an error from
+            // here as "nothing is bound", and says so to the user; if the
+            // rollback itself failed then some of these keys are still live,
+            // and telling somebody their keyboard is empty when it is not is
+            // the one place the message has to be honest.
+            if let Err(cleanup_err) = manager.unregister_all() {
+                message.push_str(&format!(
+                    ". The bindings registered before it could not be taken back down either ({cleanup_err}), so some of them may still fire"
+                ));
+            }
+            return Err(message);
         }
     }
     Ok(())
 }
 
-/// Moves from `previous` to `next`, or stays on `previous` and says why.
+/// Takes every binding down, and says so when it cannot.
 ///
-/// The user is never left with a keyboard they cannot explain: either the new
-/// bindings are in force, or the old ones still are, and the error names which.
-pub fn rebind(app: &AppHandle, previous: &Shortcuts, next: &Shortcuts) -> Result<(), String> {
+/// The only way back to "nothing is bound" as a deliberate state, which is what
+/// a rollback needs when there were no bindings to restore.
+pub fn unregister_shortcuts(app: &AppHandle) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())
+}
+
+/// Moves from whatever is registered to `next`, or puts back what was
+/// registered and says why.
+///
+/// `registered` is what the platform has actually accepted, which is not always
+/// what the settings say: a stored binding another application had taken is
+/// still in the settings file, waiting for the user to change it, while
+/// something else is doing the work. Answering against that rather than against
+/// the previous *settings* is what makes an unchanged set still get a second
+/// attempt, instead of the application reporting success over a keyboard where
+/// nothing is bound.
+///
+/// The answer is a pair: what is bound now, which the caller has to record
+/// whether this succeeded or not, and why the user did not get what they asked
+/// for. The user is never left with a keyboard they cannot explain: either the
+/// new bindings are in force, or the ones that were in force still are, and the
+/// error names which.
+pub fn rebind(
+    app: &AppHandle,
+    registered: Option<&Shortcuts>,
+    next: &Shortcuts,
+) -> (Option<Shortcuts>, Result<(), String>) {
     rebind_with(
         |shortcuts| register_shortcuts(app, shortcuts),
-        previous,
+        registered,
         next,
     )
 }
@@ -138,23 +174,46 @@ pub fn rebind(app: &AppHandle, previous: &Shortcuts, next: &Shortcuts) -> Result
 /// `GlobalShortcut`: registering a combination the platform will refuse is not
 /// something a test can arrange, and reading back what is registered is not
 /// something the plugin offers.
-fn rebind_with<F>(mut register: F, previous: &Shortcuts, next: &Shortcuts) -> Result<(), String>
+fn rebind_with<F>(
+    mut register: F,
+    registered: Option<&Shortcuts>,
+    next: &Shortcuts,
+) -> (Option<Shortcuts>, Result<(), String>)
 where
     F: FnMut(&Shortcuts) -> Result<(), String>,
 {
-    // Nothing to do, and nothing to risk: re-registering an unchanged set would
-    // unregister the working bindings first, for no gain.
-    if next == previous {
-        return Ok(());
+    // Nothing to do, and nothing to risk: re-registering the set that is
+    // already bound would unregister working bindings first, for no gain. The
+    // test is against what is *bound*, not against what the previous settings
+    // said: a set that failed to register at launch is unchanged in the file
+    // and still deserves another attempt on the next save.
+    if registered == Some(next) {
+        return (registered.cloned(), Ok(()));
     }
     let Err(err) = register(next) else {
-        return Ok(());
+        return (Some(next.clone()), Ok(()));
+    };
+    let Some(previous) = registered else {
+        // Nothing was bound before this, so there is nothing to put back and no
+        // rollback to report; the keyboard is exactly as empty as it was.
+        return (
+            None,
+            Err(format!(
+                "{err}. No capture shortcut is bound; use the menu bar item until this is fixed."
+            )),
+        );
     };
     match register(previous) {
-        Ok(()) => Err(format!("{err}. Your previous shortcuts are still in force.")),
-        Err(restore_err) => Err(format!(
-            "{err}. The previous shortcuts could not be put back either ({restore_err}), so no capture shortcut is bound; use the menu bar item until this is fixed."
-        )),
+        Ok(()) => (
+            Some(previous.clone()),
+            Err(format!("{err}. Your previous shortcuts are still in force.")),
+        ),
+        Err(restore_err) => (
+            None,
+            Err(format!(
+                "{err}. The previous shortcuts could not be put back either ({restore_err}), so no capture shortcut is bound; use the menu bar item until this is fixed."
+            )),
+        ),
     }
 }
 
@@ -271,17 +330,26 @@ mod tests {
             in_force: Some(previous.clone()),
         };
 
-        let err = rebind_with(|shortcuts| registrar.register(shortcuts), &previous, &taken)
-            .expect_err("a combination the platform refuses must be refused here");
+        let (bound, outcome) = rebind_with(
+            |shortcuts| registrar.register(shortcuts),
+            Some(&previous),
+            &taken,
+        );
 
+        let err = outcome.expect_err("a combination the platform refuses must be refused here");
         assert!(
             err.contains("already taken"),
             "the reason is the user's: {err}"
         );
         assert_eq!(
             registrar.in_force,
-            Some(previous),
+            Some(previous.clone()),
             "the previous bindings must be in force again, not nothing"
+        );
+        assert_eq!(
+            bound,
+            Some(previous),
+            "and the caller has to be told that is what is bound"
         );
     }
 
@@ -297,29 +365,115 @@ mod tests {
             in_force: Some(previous.clone()),
         };
 
-        rebind_with(|shortcuts| registrar.register(shortcuts), &previous, &next)
-            .expect("a free combination must be accepted");
+        let (bound, outcome) = rebind_with(
+            |shortcuts| registrar.register(shortcuts),
+            Some(&previous),
+            &next,
+        );
 
-        assert_eq!(registrar.in_force, Some(next));
+        outcome.expect("a free combination must be accepted");
+        assert_eq!(registrar.in_force, Some(next.clone()));
+        assert_eq!(bound, Some(next));
     }
 
     /// Saving the settings window without touching the shortcuts must not take
     /// the working bindings down and put them back up, which is a window in
     /// which the user's key does nothing.
     #[test]
-    fn an_unchanged_set_is_not_re_registered() {
+    fn the_set_that_is_already_bound_is_not_re_registered() {
         let shortcuts = defaults();
         let mut calls = 0;
-        rebind_with(
+        let (bound, outcome) = rebind_with(
             |_| {
                 calls += 1;
                 Ok(())
             },
-            &shortcuts,
+            Some(&shortcuts),
             &shortcuts.clone(),
-        )
-        .expect("nothing changed");
+        );
+        outcome.expect("nothing changed");
         assert_eq!(calls, 0);
+        assert_eq!(bound, Some(shortcuts));
+    }
+
+    /// The launch-path bug this pair of tests exists for. A set that could not
+    /// be registered is still what the settings file says, so a later save that
+    /// changes something else entirely arrives with the shortcuts unchanged. It
+    /// must be *attempted* rather than waved through: short-circuiting on
+    /// "unchanged" alone answers `Ok` over a keyboard where these keys do
+    /// nothing.
+    #[test]
+    fn an_unchanged_set_that_is_not_bound_is_registered_again() {
+        let stored = defaults();
+        let fallback = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+            ..stored.clone()
+        };
+        let mut registrar = Registrar {
+            refuse: "nothing is refused".to_string(),
+            in_force: Some(fallback.clone()),
+        };
+
+        let (bound, outcome) = rebind_with(
+            |shortcuts| registrar.register(shortcuts),
+            Some(&fallback),
+            &stored,
+        );
+
+        outcome.expect("the combination is free now");
+        assert_eq!(
+            bound,
+            Some(stored.clone()),
+            "the second attempt is what puts the user's own choice back into force"
+        );
+        assert_eq!(registrar.in_force, Some(stored));
+    }
+
+    /// The same case when the retry fails again: the fallback that was working
+    /// has to still be working afterwards, and the caller has to be told which
+    /// set that is.
+    #[test]
+    fn a_failed_retry_of_an_unchanged_set_keeps_what_was_bound() {
+        let stored = defaults();
+        let fallback = Shortcuts {
+            capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
+            ..stored.clone()
+        };
+        let mut registrar = Registrar {
+            refuse: stored.capture_region.clone(),
+            in_force: Some(fallback.clone()),
+        };
+
+        let (bound, outcome) = rebind_with(
+            |shortcuts| registrar.register(shortcuts),
+            Some(&fallback),
+            &stored,
+        );
+
+        outcome.expect_err("the combination is still taken");
+        assert_eq!(bound, Some(fallback.clone()));
+        assert_eq!(registrar.in_force, Some(fallback));
+    }
+
+    /// Nothing bound and the new set refused: there is no previous set to put
+    /// back, and the message may not pretend there was one.
+    #[test]
+    fn a_refusal_with_nothing_bound_stays_at_nothing_bound() {
+        let (bound, outcome) = rebind_with(
+            |_| Err("the region shortcut is already taken".to_string()),
+            None,
+            &defaults(),
+        );
+        assert_eq!(bound, None);
+        let err = outcome.expect_err("the registration failed");
+        assert!(
+            err.contains("No capture shortcut is bound"),
+            "the user has to be told the keyboard is empty: {err}"
+        );
+        assert!(
+            !err.contains("previous"),
+            "there were no previous bindings to talk about: {err}"
+        );
     }
 
     /// The worst case, and the one the message has to be honest about: the new
@@ -331,8 +485,13 @@ mod tests {
             capture_region: "CmdOrCtrl+Alt+KeyR".to_string(),
             ..previous.clone()
         };
-        let err = rebind_with(|_| Err("the manager is gone".to_string()), &previous, &next)
-            .expect_err("both registrations failed");
+        let (bound, outcome) = rebind_with(
+            |_| Err("the manager is gone".to_string()),
+            Some(&previous),
+            &next,
+        );
+        assert_eq!(bound, None, "nothing survived, and the caller must know");
+        let err = outcome.expect_err("both registrations failed");
         assert!(
             err.contains("no capture shortcut is bound"),
             "the user has to be told the keyboard is empty: {err}"

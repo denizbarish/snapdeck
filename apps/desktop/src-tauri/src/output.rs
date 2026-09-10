@@ -79,6 +79,13 @@ pub fn save_png(frame: &Frame, path: &Path, compression: PngCompression) -> Resu
 /// not miss, and a screenshot is almost entirely that detail, hard edges between
 /// flat colours, every one of which is a glyph. The same number as the editor's,
 /// because it is the same picture leaving by a different door.
+///
+/// "The same as the editor's" is a claim, and
+/// `the_jpeg_quality_matches_the_one_the_editor_encodes_at` is what makes it a
+/// fact: it reads `packages/editor/src/Editor.tsx` and fails if the two have
+/// drifted. Without it, moving either number means an edit-and-save
+/// re-compresses at a quality the capture was never written at, and nothing
+/// anywhere says so.
 const JPEG_QUALITY: u8 = 92;
 
 /// Writes a frame under `directory` in `format`, adding a macOS-style ` 2`,
@@ -116,6 +123,39 @@ pub fn save_capture_without_overwriting(
     Err(format!(
         "failed to find a free name for {stem}.{extension} in {} after {MAX_NAME_ATTEMPTS} tries",
         directory.display()
+    ))
+}
+
+/// The longest a single path component may be on macOS, in bytes.
+///
+/// APFS and HFS+ both stop here, and the failure is per capture rather than per
+/// setting: a template that renders past it is accepted by the settings window
+/// and then fails every write from then on, with the error arriving as a failed
+/// capture rather than as a refused setting.
+const MAX_FILE_NAME_BYTES: usize = 255;
+
+/// Refuses a template that cannot produce a file name, and says by how much.
+///
+/// The save directory is proved by writing to it because a setting the user has
+/// been shown as accepted has to work. The template earns the same treatment,
+/// and for the same reason it is checked *here*: it is rendered with the very
+/// function a capture renders it with, so the rule cannot drift away from the
+/// thing it is a rule about.
+///
+/// The widest name the template can ever produce, not today's: the sizes go in
+/// at `u32::MAX`, and the collision suffix is the last one
+/// `save_capture_without_overwriting` would try. A template that fits now and
+/// fails on the ten-thousandth capture of the same second is the same bug
+/// arriving later.
+pub fn check_filename_template(template: &str, format: SaveFormat) -> Result<(), String> {
+    let widest = render_filename(template, OffsetDateTimeParts::now(), u32::MAX, u32::MAX);
+    let name = suffixed_file_name(&widest, MAX_NAME_ATTEMPTS, format.extension());
+    if name.len() <= MAX_FILE_NAME_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "That file name is too long: it comes out at {} bytes and macOS stops at {MAX_FILE_NAME_BYTES}. Every capture would fail to save.",
+        name.len()
     ))
 }
 
@@ -369,6 +409,76 @@ mod tests {
     fn strips_path_separators_from_the_result() {
         let name = render_filename("a/b{width}", parts(), 5, 5);
         assert_eq!(name, "a-b5");
+    }
+
+    /// The quality is one number about one picture, written in two languages
+    /// because the picture leaves by two doors: the capture is encoded here and
+    /// an edited save is encoded by `packages/editor`. Nothing but this ties
+    /// them together, so if either moves the other has to move with it.
+    ///
+    /// The TypeScript is read rather than mirrored, for the reason
+    /// `settings::the_extensions_match_the_ones_the_editor_writes` gives:
+    /// asserting a Rust constant against a second Rust constant would pass right
+    /// up until the moment it stopped mattering.
+    #[test]
+    fn the_jpeg_quality_matches_the_one_the_editor_encodes_at() {
+        let editor = include_str!("../../../../packages/editor/src/Editor.tsx");
+        // The editor's scale is 0 to 1, this one is 0 to 100, and the constant
+        // is derived here rather than typed so that changing `JPEG_QUALITY`
+        // moves the expectation with it.
+        let expected = format!(
+            "const JPEG_QUALITY = {:.2}",
+            f64::from(JPEG_QUALITY) / 100.0
+        );
+        assert!(
+            editor.contains(&expected),
+            "the editor no longer encodes JPEG at {JPEG_QUALITY}/100, so an edited save would re-compress the capture at a quality it was never written at; looked for {expected:?}"
+        );
+    }
+
+    /// A template that cannot produce a file name is refused where the user can
+    /// still do something about it, rather than at every capture from then on.
+    #[test]
+    fn a_template_that_renders_past_the_file_name_limit_is_refused() {
+        let long = "x".repeat(MAX_FILE_NAME_BYTES);
+        let err = check_filename_template(&long, SaveFormat::Png)
+            .expect_err("a name this long fails every write");
+        assert!(
+            err.contains(&MAX_FILE_NAME_BYTES.to_string()),
+            "the user has to be told the limit: {err}"
+        );
+    }
+
+    /// The widest substitution, not today's. Twelve token pairs are 192 bytes
+    /// of template and render to 84 for an 800x600 capture, so a check against
+    /// either of those numbers would wave this through; at `u32::MAX` the same
+    /// template renders to 252, and the collision suffix and the extension take
+    /// it past the limit.
+    #[test]
+    fn a_template_is_measured_at_its_widest_substitution() {
+        let template = "{width}x{height}".repeat(12);
+        assert!(template.len() < MAX_FILE_NAME_BYTES, "as text it fits");
+        assert!(
+            render_filename(&template, parts(), 800, 600).len() < MAX_FILE_NAME_BYTES,
+            "and at an ordinary capture's size it fits"
+        );
+        check_filename_template(&template, SaveFormat::Png)
+            .expect_err("a template that fits only while the numbers are short is not usable");
+    }
+
+    /// And the other half: the default template, and a plain one, have to be
+    /// accepted in both formats.
+    #[test]
+    fn a_workable_template_is_accepted_in_either_format() {
+        for format in [SaveFormat::Png, SaveFormat::Jpeg] {
+            check_filename_template(
+                &crate::settings::Settings::default().filename_template,
+                format,
+            )
+            .expect("the built-in template has to be usable");
+            check_filename_template("shot-{width}x{height}", format)
+                .expect("a short template with both size tokens has to be usable");
+        }
     }
 
     /// The three dates the calendar maths can get wrong on its own. Day numbers

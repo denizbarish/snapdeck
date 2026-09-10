@@ -37,10 +37,14 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     editor,
-    output::{render_filename, save_capture_without_overwriting, OffsetDateTimeParts},
+    output::{
+        check_filename_template, render_filename, save_capture_without_overwriting,
+        OffsetDateTimeParts,
+    },
     overlay,
     report::report_failure,
     settings::{self, Settings},
+    shortcuts::Shortcuts,
     state::AppState,
 };
 
@@ -195,8 +199,13 @@ fn collect_windows(app: &AppHandle, display_id: u32) -> Result<WindowListResult,
     // the window list, so window mode would otherwise offer the user a picture
     // of the editor they took the last capture in, and offer it first: it is
     // the frontmost window on screen.
+    //
+    // The settings window for exactly the same reason, and it is the worse of
+    // the two: it is open while the user is using it, so it is frontmost, so it
+    // is what window mode offers first.
     let mut ours = state.overlay_window_ids();
     ours.extend(state.editor_window_ids());
+    ours.extend(state.settings_window_id());
 
     let display = state
         .capturer
@@ -820,15 +829,42 @@ pub fn close_editor(app: AppHandle) {
     editor::close_focused_editor(&app);
 }
 
+/// What the settings window renders: the settings, and what the keyboard
+/// actually has.
+///
+/// Two values rather than one, because they answer different questions and the
+/// window needs both. `settings` is what the file says and what the next save
+/// writes back; `bound_shortcuts` is what the platform accepted, which is
+/// `None` when nothing is bound at all and a different set when a stored
+/// combination had been taken by another application. Folding the second into
+/// the first is what let the window claim three working keys over an empty
+/// keyboard, and what let the next save write the fallback over the user's own
+/// choice.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsView {
+    settings: Settings,
+    bound_shortcuts: Option<Shortcuts>,
+}
+
+impl SettingsView {
+    fn new(settings: Settings, bound_shortcuts: Option<Shortcuts>) -> Self {
+        Self {
+            settings,
+            bound_shortcuts,
+        }
+    }
+}
+
 /// The settings in force, which is what the settings window renders.
 ///
 /// Read from the running application rather than from the file, because the two
-/// can differ and the running one is the truthful answer: a stored binding that
-/// could not be registered was replaced at launch, and the login item is
-/// whatever the system says it is.
+/// can differ and the running one is the truthful answer: the login item is
+/// whatever the system says it is, and the bindings are whatever registered.
 #[tauri::command]
-pub fn get_settings(app: AppHandle) -> Settings {
-    app.state::<AppState>().settings()
+pub fn get_settings(app: AppHandle) -> SettingsView {
+    let state = app.state::<AppState>();
+    SettingsView::new(state.settings(), state.registered_shortcuts())
 }
 
 /// Puts new settings into force and writes them down, or changes nothing at
@@ -842,23 +878,39 @@ pub fn get_settings(app: AppHandle) -> Settings {
 /// Synchronous on purpose. It runs on the main thread, which is where the
 /// shortcut manager wants to be reached from anyway, and the only file it
 /// writes is a few hundred bytes.
+///
+/// A save always attempts the shortcuts, even when they are the same three the
+/// form loaded. What decides whether the manager is touched is whether they are
+/// the ones *bound*, which `shortcuts::rebind` settles: a set that could not be
+/// registered at launch is unchanged in the file and still needs another try,
+/// and answering `Ok` because nothing changed is how the window ended up
+/// reporting that settings were in force over a keyboard where they were not.
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+pub fn save_settings(app: AppHandle, settings: Settings) -> Result<SettingsView, String> {
     let state = app.state::<AppState>();
     let previous = state.settings();
-    // First, because it is the cheapest refusal and the one that must not have
-    // rebound a shortcut before it happens.
+    let registered = state.registered_shortcuts();
+    // First, because they are the refusals that cost nothing and the ones that
+    // must not have rebound a shortcut before they happen.
     if let Some(directory) = &settings.save_directory {
         settings::ensure_writable(directory)?;
     }
-    // Registers the new shortcuts, or leaves the previous ones in force and
-    // says why; the login item goes with them.
-    settings::apply(&app, &previous, &settings)?;
+    check_filename_template(&settings.filename_template, settings.default_format)?;
+    // Registers the new shortcuts, or leaves the ones that were bound in force
+    // and says why; the login item goes with them. What comes back first is
+    // what is bound now, and it is recorded before the outcome is read: a
+    // rollback can leave a different set bound than the one that went in, and
+    // this is the only place that learns it.
+    let (bound, outcome) = settings::apply(&app, registered.as_ref(), &previous, &settings);
+    state.set_registered_shortcuts(bound.clone());
+    outcome?;
     if let Err(err) = settings::save(&app, &settings) {
         // Nothing was written, so nothing may be left in force: an application
         // whose shortcuts disagree with its own settings file is a state the
         // user cannot explain and the next launch would undo behind their back.
-        if let Err(revert_err) = settings::apply(&app, &settings, &previous) {
+        let (reverted, revert) = settings::apply(&app, bound.as_ref(), &settings, &previous);
+        state.set_registered_shortcuts(reverted);
+        if let Err(revert_err) = revert {
             return Err(format!(
                 "{err}. Your previous settings could not be put back either ({revert_err}); restart Snapdeck."
             ));
@@ -866,7 +918,7 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, Str
         return Err(err);
     }
     state.set_settings(settings.clone());
-    Ok(settings)
+    Ok(SettingsView::new(settings, bound))
 }
 
 /// Asks the user for a save folder and proves it can be written to.
@@ -936,6 +988,48 @@ mod tests {
     fn the_overlays_own_windows_are_dropped() {
         let windows = vec![window(11), window(22), window(33)];
         assert_eq!(ids(&without_windows(windows, &[22])), vec![11, 33]);
+    }
+
+    /// The settings window is frontmost while it is open, so window mode offers
+    /// it first. Its id joins the overlays' and the editors' in the exclusion,
+    /// and this is the shape of that: whatever `collect_windows` collects, the
+    /// filter drops.
+    #[test]
+    fn the_settings_window_is_not_offered_as_a_capture_target() {
+        let windows = vec![window(11), window(22), window(33)];
+        // 22 is the settings window, 33 an editor: everything this application
+        // put on screen itself.
+        assert_eq!(ids(&without_windows(windows, &[22, 33])), vec![11]);
+    }
+
+    /// What the window is told about a set that could not be registered. The
+    /// settings still hold the user's own choice, which is what the next save
+    /// writes back, and `bound_shortcuts` says plainly that it is not what the
+    /// keyboard has.
+    #[test]
+    fn a_set_that_did_not_register_is_reported_as_not_bound() {
+        let settings = Settings::default();
+        let view = SettingsView::new(settings.clone(), None);
+        assert_eq!(view.settings, settings, "the file's own values are kept");
+        assert_eq!(view.bound_shortcuts, None);
+
+        let json = serde_json::to_string(&view).expect("render");
+        assert!(
+            json.contains("\"boundShortcuts\":null"),
+            "the window reads this to know the keys do nothing: {json}"
+        );
+    }
+
+    /// And the other half: a set that did register is reported as itself, in
+    /// the camel case the window reads.
+    #[test]
+    fn a_registered_set_is_reported_alongside_the_settings() {
+        let settings = Settings::default();
+        let view = SettingsView::new(settings.clone(), Some(settings.shortcuts.clone()));
+        let json = serde_json::to_string(&view).expect("render");
+        assert!(json.contains("\"boundShortcuts\""), "{json}");
+        assert!(json.contains("\"settings\""), "{json}");
+        assert_eq!(view.bound_shortcuts, Some(settings.shortcuts));
     }
 
     #[test]

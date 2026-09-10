@@ -8,10 +8,19 @@
  * The empty first frame is the honest one.
  *
  * A save is one transaction. Everything on the form goes to `save_settings`
- * together, and what comes back is what is actually in force, which is not
- * always what was asked for: a rebind the platform refuses leaves the previous
- * bindings and says so. Rendering the answer rather than the request is what
- * keeps the window from showing a shortcut that does not work.
+ * together, and it either happens or it does not: a rebind the platform refuses
+ * comes back as an `Err`, nothing is written, and the `catch` asks
+ * `get_settings` what is actually in force rather than leaving the refused
+ * request on screen.
+ *
+ * What is *in force* is two answers, not one. `boundShortcuts` is what the
+ * platform has actually registered, which is `null` when nothing is and a
+ * different set when a stored combination had been taken by another
+ * application; `settings.shortcuts` is what the file says and what the next
+ * save writes back. This window shows the second and tells the truth about the
+ * first, because the failure worth preventing here is a page that renders three
+ * shortcuts, reports them saved, and leaves the user pressing keys that do
+ * nothing.
  */
 
 import { invoke } from '@tauri-apps/api/core'
@@ -40,6 +49,19 @@ export type Settings = {
   openEditorAfterCapture: boolean
 }
 
+/**
+ * Mirrors `commands::SettingsView`: the settings, and what the keyboard
+ * actually has.
+ *
+ * `boundShortcuts` is `null` when nothing is registered at all, which is a
+ * state the window has to be able to render rather than one it can treat as
+ * "no answer yet".
+ */
+export type SettingsView = {
+  settings: Settings
+  boundShortcuts: Shortcuts | null
+}
+
 /** The capture modes, in the order the tray menu lists them. */
 const SHORTCUT_ROWS: { key: keyof Shortcuts; label: string }[] = [
   { key: 'captureRegion', label: 'Capture region' },
@@ -55,8 +77,40 @@ const FORMAT_ROWS: { value: SaveFormat; label: string; note: string }[] = [
 /** What a message under the form is: something that worked, or something that did not. */
 type Notice = { kind: 'ok' | 'error'; text: string }
 
+/**
+ * What to say about the gap between the shortcuts on the form and the ones the
+ * platform has actually registered, or `null` when there is no gap.
+ *
+ * The one thing the window may not do is stay quiet about it. A stored
+ * combination another application has taken is still in the settings file,
+ * waiting to be changed, while the built-in ones do the work; without this the
+ * page renders the stored ones as though pressing them did something.
+ *
+ * The same sentence covers a shortcut the user has just recorded and not yet
+ * saved, which is also not in force, and is also worth saying.
+ *
+ * Compared as strings, deliberately. `boundShortcuts` is the very value Rust
+ * registered, so anything different came from this form; the question here is
+ * "is this the set I was handed", not "is this the same key", which only the
+ * shortcut parser in Rust can answer.
+ *
+ * Exported to be tested: it is the sentence that decides whether the user finds
+ * out their keyboard is empty.
+ */
+export function shortcutNotice(shown: Shortcuts, bound: Shortcuts | null): string | null {
+  if (bound === null) {
+    return 'No capture shortcut is bound right now. Save to put these into force, or use the menu bar item to take a capture.'
+  }
+  if (SHORTCUT_ROWS.every(({ key }) => bound[key] === shown[key])) return null
+  const inForce = SHORTCUT_ROWS.map(({ key }) => formatBinding(bound[key])).join(', ')
+  return `These are not what is bound right now: ${inForce} are. Save to put them into force.`
+}
+
 export function SettingsWindow(): JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null)
+  // What the platform has registered, which is a different question from what
+  // the form holds; `null` is a real answer and means nothing is bound.
+  const [boundShortcuts, setBoundShortcuts] = useState<Shortcuts | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [saving, setSaving] = useState(false)
   const [recording, setRecording] = useState<keyof Shortcuts | null>(null)
@@ -74,11 +128,19 @@ export function SettingsWindow(): JSX.Element {
       })
   }, [])
 
+  const applyView = useCallback((view: SettingsView) => {
+    setSettings(view.settings)
+    setBoundShortcuts(view.boundShortcuts)
+  }, [])
+
   useEffect(() => {
     let abandoned = false
-    invoke<Settings>('get_settings')
+    invoke<SettingsView>('get_settings')
       .then((loaded) => {
-        if (!abandoned) setSettings(loaded)
+        if (!abandoned) {
+          setSettings(loaded.settings)
+          setBoundShortcuts(loaded.boundShortcuts)
+        }
       })
       .catch((error: unknown) => {
         if (!abandoned) {
@@ -137,16 +199,17 @@ export function SettingsWindow(): JSX.Element {
     setNotice(null)
     try {
       // What comes back is what is in force, which is the thing worth
-      // rendering: a refused rebind answers with the bindings that survived.
-      const inForce = await invoke<Settings>('save_settings', { settings })
-      setSettings(inForce)
+      // rendering: the settings that were written, and the bindings the
+      // platform actually accepted.
+      const inForce = await invoke<SettingsView>('save_settings', { settings })
+      applyView(inForce)
       setNotice({ kind: 'ok', text: 'Saved. The new settings are in force now.' })
     } catch (error: unknown) {
       setNotice({ kind: 'error', text: String(error) })
       // Nothing was changed, so the form has to go back to showing what is
       // actually in force rather than the request that was refused.
       try {
-        setSettings(await invoke<Settings>('get_settings'))
+        applyView(await invoke<SettingsView>('get_settings'))
       } catch {
         // Leave the form as it is: the error above is the one that matters,
         // and replacing it with a second one would only bury it.
@@ -154,7 +217,9 @@ export function SettingsWindow(): JSX.Element {
     } finally {
       setSaving(false)
     }
-  }, [settings])
+  }, [applyView, settings])
+
+  const unbound = settings ? shortcutNotice(settings.shortcuts, boundShortcuts) : null
 
   if (!settings) {
     return (
@@ -169,11 +234,21 @@ export function SettingsWindow(): JSX.Element {
   return (
     <main style={pageStyle}>
       <Section title="Shortcuts" hint="Click a shortcut, then press the combination you want. Escape cancels.">
+        {unbound && (
+          <p style={warningStyle} role="status">
+            {unbound}
+          </p>
+        )}
         {SHORTCUT_ROWS.map(({ key, label }) => (
           <Row key={key} label={label}>
             <button
               type="button"
               style={recording === key ? recordingButtonStyle : shortcutButtonStyle}
+              // The row's label is a `span`, not a `label`, for the reason
+              // `Row` gives, so the button has to carry its own name: without
+              // this a screen reader reads "⌘⇧7 button" and never says which
+              // capture mode it belongs to.
+              aria-label={`${label} shortcut`}
               aria-pressed={recording === key}
               onClick={() => setRecording(recording === key ? null : key)}
             >
@@ -190,13 +265,24 @@ export function SettingsWindow(): JSX.Element {
               {settings.saveDirectory ?? 'Your Pictures folder'}
             </span>
             <span style={buttonRowStyle}>
-              <button type="button" style={buttonStyle} onClick={chooseFolder}>
+              {/*
+                Named for a screen reader, which reads the button and not the
+                row: "Choose… button" and "Reset button" say nothing about what
+                is being chosen or reset.
+              */}
+              <button
+                type="button"
+                style={buttonStyle}
+                aria-label="Choose the folder captures are saved in"
+                onClick={chooseFolder}
+              >
                 Choose…
               </button>
               {settings.saveDirectory !== null && (
                 <button
                   type="button"
                   style={buttonStyle}
+                  aria-label="Save captures in your Pictures folder again"
                   onClick={() => update({ saveDirectory: null })}
                 >
                   Reset
@@ -324,10 +410,21 @@ function Check({
 
 const FONT = '13px -apple-system, system-ui, "Helvetica Neue", sans-serif'
 
+/**
+ * The window's background, declared once in `settings.html` and read here.
+ *
+ * It has to exist in the document as well as in this component: the window is
+ * built visible, so the first frame is painted before React has mounted, and
+ * without a background on `body` the user sees a white rectangle flash where a
+ * grey sheet is about to be. Writing the colour down twice is how the two
+ * halves drift apart, so the stylesheet owns the value and this reads it.
+ */
+const BACKGROUND = 'var(--settings-background)'
+
 const pageStyle: CSSProperties = {
   font: FONT,
   color: '#1d1d1f',
-  background: '#f5f5f7',
+  background: BACKGROUND,
   minHeight: '100%',
   boxSizing: 'border-box',
   padding: '18px 22px 0',
@@ -351,6 +448,19 @@ const sectionStyle: CSSProperties = {
 const headingStyle: CSSProperties = { font: FONT, fontWeight: 600, margin: 0 }
 const hintStyle: CSSProperties = { color: '#6e6e73', margin: 0, lineHeight: 1.4 }
 const rowHintStyle: CSSProperties = { color: '#6e6e73', display: 'block', fontSize: 11 }
+
+// Not the error red the footer uses: nothing has gone wrong with what the user
+// just did, and this sits above the controls whether or not they have touched
+// anything.
+const warningStyle: CSSProperties = {
+  color: '#8a5a00',
+  background: '#fff6e5',
+  border: '1px solid #f0dcb4',
+  borderRadius: 6,
+  padding: '6px 8px',
+  margin: 0,
+  lineHeight: 1.4,
+}
 
 const rowStyle: CSSProperties = {
   display: 'grid',
@@ -423,7 +533,7 @@ const buttonRowStyle: CSSProperties = { display: 'flex', gap: 6, flex: '0 0 auto
 const footerStyle: CSSProperties = {
   position: 'sticky',
   bottom: 0,
-  background: '#f5f5f7',
+  background: BACKGROUND,
   padding: '12px 0 16px',
   display: 'flex',
   alignItems: 'center',

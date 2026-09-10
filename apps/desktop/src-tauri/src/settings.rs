@@ -23,9 +23,9 @@
 //!
 //! A setting may not cost the user a capture. The save directory is the one that
 //! can go away between being chosen and being written to, an unplugged volume or
-//! a permission change, so `resolve_save_directory` proves it is writable and
-//! falls back to the pictures directory when it is not, saying so, rather than
-//! letting the capture fail.
+//! a permission change, so `resolve_save_directory` checks it and falls back to
+//! the pictures directory when it cannot be used, saying so, rather than letting
+//! the capture fail.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,9 +80,53 @@ pub struct Settings {
     pub save_directory: Option<PathBuf>,
     pub filename_template: String,
     pub default_format: SaveFormat,
+    #[serde(deserialize_with = "shortcuts_or_default")]
     pub shortcuts: Shortcuts,
     pub launch_at_login: bool,
     pub open_editor_after_capture: bool,
+}
+
+/// Reads a `shortcuts` object, filling any binding it does not name from the
+/// defaults.
+///
+/// The nested half of the container's own `default`. Without it, a `shortcuts`
+/// object with one binding missing is a parse error, and a parse error here is
+/// not local: `load` answers a bad file with `Settings::default()`, so one
+/// absent line costs the user their save folder, their template, their format
+/// and their login item as well. That is a punishment out of all proportion to
+/// a hand edit, and it contradicts the rule the container states, that anything
+/// a file is missing comes from one `Settings::default()`.
+///
+/// This does not recurse, which was the objection to giving `Shortcuts` a
+/// `Default` impl and is worth spelling out. `Settings::default` builds its
+/// `Shortcuts` from a struct literal and never asks serde for one, so nothing
+/// here re-enters this function. `Shortcuts` still has no `Default` of its own:
+/// the defaults are still written in exactly one place.
+///
+/// Unknown fields are still refused. A binding that is *absent* is a file from
+/// an older build or a hand edit that dropped a line, and filling it is the
+/// kind thing to do; a binding that is *misspelled* is a file that says
+/// something this cannot honour, and silently ignoring it would put a shortcut
+/// the user believes they set nowhere at all.
+fn shortcuts_or_default<'de, D>(deserializer: D) -> Result<Shortcuts, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct PartialShortcuts {
+        capture_region: Option<String>,
+        capture_window: Option<String>,
+        capture_display: Option<String>,
+    }
+
+    let partial = PartialShortcuts::deserialize(deserializer)?;
+    let defaults = Settings::default().shortcuts;
+    Ok(Shortcuts {
+        capture_region: partial.capture_region.unwrap_or(defaults.capture_region),
+        capture_window: partial.capture_window.unwrap_or(defaults.capture_window),
+        capture_display: partial.capture_display.unwrap_or(defaults.capture_display),
+    })
 }
 
 impl Default for Settings {
@@ -175,29 +219,64 @@ pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-/// Puts `next` into force, or leaves `previous` in force and says why.
+/// Puts `next` into force, or leaves what was in force alone and says why.
 ///
 /// All or nothing. A half-applied change is the failure this exists to prevent:
 /// the user would be left with some of what they asked for, no message, and no
 /// way to work out which half. The shortcuts go first because they are the part
 /// that can leave the application in a state the user cannot explain, and the
 /// login item is put back the same way when it is the half that fails.
-pub fn apply(app: &AppHandle, previous: &Settings, next: &Settings) -> Result<(), String> {
-    crate::shortcuts::rebind(app, &previous.shortcuts, &next.shortcuts)?;
+///
+/// `registered` is what the platform has actually accepted, which is not the
+/// same question as what `previous` says; see `shortcuts::rebind`. The first
+/// half of the answer is what is bound once this returns, which the caller has
+/// to record whether this succeeded or not: a rollback can leave a different
+/// set bound than the one that went in, and nothing else is in a position to
+/// notice.
+pub fn apply(
+    app: &AppHandle,
+    registered: Option<&Shortcuts>,
+    previous: &Settings,
+    next: &Settings,
+) -> (Option<Shortcuts>, Result<(), String>) {
+    let (bound, outcome) = crate::shortcuts::rebind(app, registered, &next.shortcuts);
+    if let Err(err) = outcome {
+        return (bound, Err(err));
+    }
     if next.launch_at_login == previous.launch_at_login {
-        return Ok(());
+        return (bound, Ok(()));
     }
     let Err(err) = set_launch_at_login(app, next.launch_at_login) else {
-        return Ok(());
+        return (bound, Ok(()));
     };
     // Nothing is written when this returns an error, so the running application
-    // has to go back to matching what is on disk.
-    if let Err(restore_err) = crate::shortcuts::rebind(app, &next.shortcuts, &previous.shortcuts) {
-        return Err(format!(
-            "{err}. The previous shortcuts could not be put back either ({restore_err})."
-        ));
+    // has to go back to the bindings it had before this call. Back to
+    // `registered` rather than to `previous.shortcuts`, because those two are
+    // the same thing only when the stored set was registerable in the first
+    // place.
+    let Some(restore_to) = registered else {
+        // There were no bindings before this, so putting things back means
+        // taking down the ones that were just registered.
+        return match crate::shortcuts::unregister_shortcuts(app) {
+            Ok(()) => (None, Err(err)),
+            Err(restore_err) => (
+                bound,
+                Err(format!(
+                    "{err}. The shortcuts registered along the way could not be taken back down either ({restore_err})."
+                )),
+            ),
+        };
+    };
+    let (restored, restore) = crate::shortcuts::rebind(app, bound.as_ref(), restore_to);
+    match restore {
+        Ok(()) => (restored, Err(err)),
+        Err(restore_err) => (
+            restored,
+            Err(format!(
+                "{err}. The previous shortcuts could not be put back either ({restore_err})."
+            )),
+        ),
     }
-    Err(err)
 }
 
 /// Turns the login item on or off, rather than only remembering that it should
@@ -225,12 +304,18 @@ pub fn launch_at_login_state(app: &AppHandle) -> Option<bool> {
     app.autolaunch().is_enabled().ok()
 }
 
-/// Proves that captures can be written to `directory`, by writing one.
+/// Proves that captures can be written to `directory`, by writing one, and
+/// creates the directory if it is not there yet.
 ///
 /// A real file, not a permissions bit: a read-only volume, an ACL, a full disk
 /// and a sandbox refusal all answer differently to a metadata read and
 /// identically to this. The probe is created exclusively, so it cannot collide
 /// with anything, and it is removed again whatever happens next.
+///
+/// For the two places a folder is *chosen*, the picker and the save, and for
+/// nowhere else. It is the expensive answer, and it has a side effect: a folder
+/// that is not there is created. That is right when the user has just named it
+/// and wrong on the capture path, which asks `is_writable` instead.
 pub fn ensure_writable(directory: &Path) -> Result<(), String> {
     std::fs::create_dir_all(directory)
         .map_err(|err| format!("{} cannot be created: {err}", directory.display()))?;
@@ -241,6 +326,32 @@ pub fn ensure_writable(directory: &Path) -> Result<(), String> {
         .open(&probe)
         .map_err(|err| format!("{} cannot be written to: {err}", directory.display()))?;
     let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Whether `directory` looks usable right now, changing nothing.
+///
+/// The capture path's question, and deliberately a weaker one than
+/// `ensure_writable` asks. Proving it the expensive way on every capture costs
+/// a `create_dir_all`, a `create_new` and an unlink while the user is waiting,
+/// which on iCloud Drive or a network mount is latency they feel, and the
+/// `create_dir_all` is worse than slow: a folder the user deleted would be
+/// silently put back under them, one capture at a time.
+///
+/// A metadata read can say yes and be wrong, on a folder somebody else owns
+/// with the traversal bits set. That is affordable exactly here and nowhere
+/// else: the write that follows fails, `capture_and_write` reports it, and the
+/// picture is on the clipboard either way. Being wrong the other way, on a
+/// folder that has genuinely gone away, is what the fallback is for.
+pub fn is_writable(directory: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(directory)
+        .map_err(|err| format!("{} cannot be used: {err}", directory.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a folder", directory.display()));
+    }
+    if metadata.permissions().readonly() {
+        return Err(format!("{} is read-only", directory.display()));
+    }
     Ok(())
 }
 
@@ -273,11 +384,9 @@ pub fn resolve_save_directory(app: &AppHandle, settings: &Settings) -> (PathBuf,
         // reported by the capture path, which is what already happens today.
         PathBuf::from(".")
     });
-    choose_save_directory(
-        settings.save_directory.as_deref(),
-        &fallback,
-        ensure_writable,
-    )
+    // `is_writable`, not `ensure_writable`: this runs on the capture path, and
+    // the folder was already proved the expensive way when it was chosen.
+    choose_save_directory(settings.save_directory.as_deref(), &fallback, is_writable)
 }
 
 /// The decision inside `resolve_save_directory`, with the probe injected.
@@ -343,22 +452,30 @@ fn complain(app: &AppHandle, message: &str) {
 mod tests {
     use super::*;
 
-    /// The rule the module exists to keep. Every module that could plausibly
-    /// hold a default of its own is read here, in the form it is compiled from,
-    /// and none of them may contain one.
+    /// The rule the module exists to keep. Every module of the crate except
+    /// this one is read here, in the form it is compiled from, and none of them
+    /// may contain a default.
     ///
     /// A source scan rather than an equality assertion, because the bug this is
     /// about is a *second* copy: two values that agree today, one of which is
     /// changed later. `assert_eq!(commands::TEMPLATE, settings.template)` would
     /// pass right up until the moment it stopped mattering.
-    const SOURCES: [(&str, &str); 7] = [
+    ///
+    /// All ten, not the seven with an obvious reason to state one. `editor.rs`,
+    /// `overlay.rs` and `report.rs` have no such reason today, which is not a
+    /// reason to leave them unread: the list is a rule about the crate, and a
+    /// rule with three holes in it is where the next copy goes.
+    const SOURCES: [(&str, &str); 10] = [
         ("commands.rs", include_str!("commands.rs")),
-        ("shortcuts.rs", include_str!("shortcuts.rs")),
-        ("output.rs", include_str!("output.rs")),
+        ("editor.rs", include_str!("editor.rs")),
         ("lib.rs", include_str!("lib.rs")),
-        ("tray.rs", include_str!("tray.rs")),
-        ("state.rs", include_str!("state.rs")),
+        ("output.rs", include_str!("output.rs")),
+        ("overlay.rs", include_str!("overlay.rs")),
+        ("report.rs", include_str!("report.rs")),
         ("settings_window.rs", include_str!("settings_window.rs")),
+        ("shortcuts.rs", include_str!("shortcuts.rs")),
+        ("state.rs", include_str!("state.rs")),
+        ("tray.rs", include_str!("tray.rs")),
     ];
 
     /// The settings window's own source, which is the other side that could
@@ -425,10 +542,11 @@ mod tests {
             "{",
             "not json at all",
             r#"{"filenameTemplate": 7}"#,
-            // A shortcut object missing a binding. `Shortcuts` has no `Default`
-            // of its own, by design, so half an object is not something this
-            // can silently complete; it is a file to complain about.
-            r#"{"shortcuts": {"captureRegion": "CmdOrCtrl+Shift+KeyA"}}"#,
+            // A misspelled binding. A file that says something this cannot
+            // honour, as opposed to one that leaves a binding out: filling it
+            // in silently would leave the user with a shortcut they believe
+            // they set and nothing bound to it.
+            r#"{"shortcuts": {"captureRegionn": "CmdOrCtrl+Shift+KeyA"}}"#,
         ] {
             let (settings, complaint) = settings_from_json(corrupt);
             assert_eq!(
@@ -441,6 +559,31 @@ mod tests {
                 "{corrupt:?} should have been logged, not swallowed"
             );
         }
+    }
+
+    /// A `shortcuts` object with a binding left out keeps the ones it does
+    /// name, and costs the user nothing else.
+    ///
+    /// The nested case of the rule the container already follows for every
+    /// top-level field. Before this, one absent line made the whole file
+    /// unreadable, which took the save folder, the template, the format and the
+    /// login item with it.
+    #[test]
+    fn a_shortcuts_object_missing_a_binding_keeps_the_rest_of_the_file() {
+        let (settings, complaint) = settings_from_json(
+            r#"{"saveDirectory": "/Volumes/Shots",
+                "shortcuts": {"captureRegion": "CmdOrCtrl+Shift+KeyA"}}"#,
+        );
+        assert_eq!(complaint, None);
+        assert_eq!(settings.shortcuts.capture_region, "CmdOrCtrl+Shift+KeyA");
+        let defaults = Settings::default().shortcuts;
+        assert_eq!(settings.shortcuts.capture_window, defaults.capture_window);
+        assert_eq!(settings.shortcuts.capture_display, defaults.capture_display);
+        assert_eq!(
+            settings.save_directory,
+            Some(PathBuf::from("/Volumes/Shots")),
+            "the rest of the file must survive one missing binding"
+        );
     }
 
     /// The other half of the same rule: a file that is fine must not be
@@ -554,6 +697,34 @@ mod tests {
 
         let err = answer.expect_err("a read-only directory must be refused");
         assert!(err.contains("refused"), "the error should name it: {err}");
+    }
+
+    /// The capture path's question, and the two things it must not do: create
+    /// the folder the user deleted, and say yes about a folder that is not
+    /// there.
+    #[test]
+    fn the_capture_path_check_creates_nothing_and_refuses_what_is_gone() {
+        let root = temp_dir("is-writable");
+        let present = root.join("present");
+        std::fs::create_dir_all(&present).expect("create the fixture");
+        is_writable(&present).expect("a directory that exists and is writable must be accepted");
+
+        let deleted = root.join("deleted");
+        let err = is_writable(&deleted).expect_err("a folder that is not there cannot be used");
+        assert!(err.contains("deleted"), "the error should name it: {err}");
+        assert!(
+            !deleted.exists(),
+            "the capture path must not put the user's deleted folder back"
+        );
+
+        // A file where a folder should be: the same shape as a folder replaced
+        // by a download of the same name.
+        let not_a_folder = root.join("file");
+        std::fs::write(&not_a_folder, b"").expect("create the fixture");
+        let err = is_writable(&not_a_folder).expect_err("a file is not a save folder");
+        assert!(err.contains("not a folder"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn temp_dir(name: &str) -> PathBuf {
