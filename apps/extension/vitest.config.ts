@@ -14,7 +14,19 @@ import { configDefaults, defineConfig } from 'vitest/config'
  * layout when an element stops being painted. A simulated DOM answers both out
  * of values the test itself wrote, so a pass there would prove nothing about
  * the page the content script is actually injected into.
+ *
+ * `composite` is the same kind for the same reason. Its claims are that a
+ * canvas is sized in device pixels, that a source rectangle really lands where
+ * it says and that a real 2D context copies pixels without resampling them.
+ * Only a browser has those answers.
  */
+
+/**
+ * The files the browser project owns, listed once so the node project can
+ * exclude exactly what the browser project includes.
+ */
+const BROWSER_TESTS = ['src/content/sticky.test.ts', 'src/background/composite.test.ts']
+
 export default defineConfig({
   test: {
     projects: [
@@ -28,13 +40,13 @@ export default defineConfig({
           // Extends the defaults rather than replacing them: written as a bare
           // list, this project would start collecting tests out of
           // `node_modules` and `dist`.
-          exclude: [...configDefaults.exclude, 'src/content/sticky.test.ts'],
+          exclude: [...configDefaults.exclude, ...BROWSER_TESTS],
         },
       },
       {
         test: {
           name: 'browser',
-          include: ['src/content/sticky.test.ts'],
+          include: BROWSER_TESTS,
           browser: {
             enabled: true,
             provider: 'playwright',
