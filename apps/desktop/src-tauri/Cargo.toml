@@ -29,6 +29,10 @@ tauri-plugin-dialog = "2.7.3"
 # System Events, which costs the user an Automation prompt for a checkbox.
 tauri-plugin-autostart = "2.5.1"
 snapdeck-capture = { path = "../../../crates/capture" }
+# The scrolling window's frames become one picture here. The crate knows only
+# pixels, which is what lets the desktop fallback be the second caller of it
+# without either caller learning anything about the other.
+snapdeck-stitch = { path = "../../../crates/stitch" }
 serde.workspace = true
 # The settings file. Already in the tree as a build dependency, which reads the
 # editor's `chrome.json`, and as a transitive dependency of `tauri`.
@@ -84,6 +88,11 @@ hmac = "0.12"
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The synthetic scroll the experimental scrolling capture posts between shots.
+# `highsierra` is what gates `CGEvent::new_scroll_event`, the wrapper over
+# `CGEventCreateScrollWheelEvent2`; the crate is already a workspace dependency
+# by way of `crates/capture`, so this adds a feature rather than a crate.
+core-graphics = { workspace = true, features = ["highsierra"] }
 # The overlay window has to be lifted above the menu bar and allowed over a
 # full-screen Space, neither of which Tauri's window builder exposes.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }

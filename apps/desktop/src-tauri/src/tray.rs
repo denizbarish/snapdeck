@@ -335,6 +335,15 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let region = MenuItemBuilder::with_id("capture_region", "Capture Region").build(app)?;
     let window = MenuItemBuilder::with_id("capture_window", "Capture Window").build(app)?;
     let display = MenuItemBuilder::with_id("capture_display", "Capture Full Screen").build(app)?;
+    // Labelled from the constant rather than from a string here, so that the
+    // word the feature is sold on cannot be changed in one place and left in
+    // the other: what this item promises is guesswork, and the user meets that
+    // promise nowhere else.
+    let scrolling_window = MenuItemBuilder::with_id(
+        "capture_scrolling_window",
+        crate::fullpage::FULLPAGE_MENU_LABEL,
+    )
+    .build(app)?;
     // Built with the placeholder already in it, so the submenu is never an
     // empty rectangle in the seconds before `recents::restore` fills it and
     // never becomes one if a later launch cannot read the file.
@@ -359,7 +368,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     // then the rest. Its own group, because it answers a different question
     // from the three items above it.
     let menu = MenuBuilder::new(app)
-        .items(&[&region, &window, &display])
+        .items(&[&region, &window, &display, &scrolling_window])
         .separator()
         .item(&recent_captures)
         .separator()
@@ -377,6 +386,10 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "capture_region" => request_capture(app, "region"),
             "capture_window" => request_capture(app, "window"),
             "capture_display" => request_capture(app, "display"),
+            // Not through `request_capture`: there is no overlay to open and
+            // nothing to select. It takes its own window and reports its own
+            // failures, and it returns before it has done either.
+            "capture_scrolling_window" => crate::fullpage::request_scrolling_capture(app),
             "open_log" => reveal_log(app),
             "check_for_updates" => crate::updater::check_on_request(app),
             "settings" => crate::settings_window::open_settings(app),

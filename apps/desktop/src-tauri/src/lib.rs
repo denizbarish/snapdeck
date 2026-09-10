@@ -1,6 +1,7 @@
 pub mod bridge;
 mod commands;
 mod editor;
+mod fullpage;
 mod output;
 mod overlay;
 mod recents;

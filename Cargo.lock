@@ -3557,6 +3557,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "core-graphics",
  "getrandom 0.4.3",
  "hmac",
  "image",
@@ -3569,6 +3570,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snapdeck-capture",
+ "snapdeck-stitch",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
