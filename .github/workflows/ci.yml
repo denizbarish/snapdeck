@@ -55,9 +55,82 @@ jobs:
       # draws on a canvas and the assertions measure the pixels it produced,
       # which a Node canvas shim cannot answer for. Vitest browser mode needs
       # the Chromium it drives to be present.
-      - run: pnpm --filter @snapdeck/editor exec playwright install --with-deps chromium
+      #
+      # The extension has a browser project of its own and for the same reason:
+      # `sticky` asks the engine for an element's used `position`, `composite`
+      # asks a real 2D context whether it resampled. It is named here rather
+      # than left to the editor's install because the two are only the same
+      # download by coincidence: both packages pin playwright 1.63.0 today, so
+      # both resolve chromium v1243 into the one shared `ms-playwright` cache,
+      # and the second install is a few seconds of finding it already there. The
+      # day one of them moves, that coincidence ends, and a browser project with
+      # no browser is not a failure this job should have to diagnose.
+      - run: pnpm --filter @snapdeck/editor --filter @snapdeck/extension exec playwright install --with-deps chromium
       - run: pnpm test
       # The bundle the app actually loads. Without it the Vite build, the two
       # HTML entry points and the TypeScript in them are unexercised on every
       # commit that does not happen to be built by hand.
       - run: pnpm build
+      # `pnpm build` is the desktop app and stops there: the root script is
+      # `--filter @snapdeck/desktop`. The extension builds differently - two
+      # Vite passes, one for the pages and one for the injected content script -
+      # and ends in `check-manifest`, which is the only thing anywhere that
+      # compares the hand-written `manifest.json` against the files the two
+      # passes actually produced. `pnpm lint` type-checks the extension's
+      # TypeScript already; what it cannot see is a renamed entry point or a
+      # second pass that did not run, and both of those are green everywhere
+      # else and broken at `Load unpacked`.
+      - run: pnpm --filter @snapdeck/extension build
+
+  # `cargo audit` reads `Cargo.lock` and nothing else: no toolchain, no
+  # compilation, no macOS SDK. Its own job rather than a step in `rust`, for two
+  # reasons. `rust` runs on macOS, which is the scarcest runner there is and
+  # already the long pole here because screencapturekit builds a Swift bridge;
+  # a check that reads a text file should not have to queue behind that. And two
+  # jobs answer two questions: an advisory published overnight turns this red
+  # without hiding a compile break, and a compile break does not hide an
+  # advisory.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A published binary checked against a digest written here, rather than
+      # `cargo install cargo-audit`, which compiles the tool from source on
+      # every run, or a third-party action, which would put another party in the
+      # supply chain of the tool whose entire job is the supply chain.
+      # (taiki-e/install-action, the usual way to get a prebuilt cargo tool,
+      # does not carry cargo-audit.) The tarball is 6.5 MB and unpacks to a
+      # single static binary.
+      #
+      # Both the version and the digest are pinned. A version alone would not
+      # be: a tag can be moved to point at a different artifact, and a digest is
+      # what makes that visible here rather than silent.
+      - name: Install cargo-audit
+        env:
+          CARGO_AUDIT_VERSION: 0.22.2
+          CARGO_AUDIT_SHA256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+        run: |
+          set -euo pipefail
+          archive="cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}.tgz"
+          cd "$RUNNER_TEMP"
+          curl --silent --show-error --fail --location --output "$archive" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/${archive}"
+          echo "${CARGO_AUDIT_SHA256}  ${archive}" | sha256sum --check --strict
+          tar xzf "$archive"
+          # Onto the path for the next step rather than into /usr/local/bin: the
+          # binary is used once, by this job, and nothing here needs root.
+          echo "$RUNNER_TEMP/cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}" >> "$GITHUB_PATH"
+      # Invoked directly rather than as `cargo audit`, so the job needs no Rust
+      # toolchain at all: the binary is a whole program that happens to also
+      # work as a cargo subcommand.
+      #
+      # Warnings are not denied. The lockfile carries seven today - six
+      # `unmaintained` crates and one `unsound` one, all of them arriving
+      # through Tauri's own tree (`proc-macro-error`, five `unic-*`, and
+      # `glib 0.18.5`, RUSTSEC-2024-0429) - and not one of them is something
+      # this repository can upgrade away. `--deny warnings` would make this job
+      # red on the day it was added and leave it red, and a check that is always
+      # red is a check nobody reads. A vulnerability is what has to stop a
+      # merge, and the default exit code is exactly that: zero today, non-zero
+      # the moment a crate in `Cargo.lock` has an advisory against it.
+      - run: cargo-audit audit

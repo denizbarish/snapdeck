@@ -123,6 +123,37 @@ holds the screen as it is then rather than the frozen frame you selected against
 content the two are the same picture; over a video, an animation or anything else that moves, the
 saved pixels are the ones from the instant you confirmed.
 
+## Full page
+
+A capture can only reach what is on screen, and a web page is usually taller than that. Snapdeck's
+Chrome extension is how the rest of it gets captured: press its toolbar button and it scrolls the
+page for you, photographs each viewport, joins the pictures into one PNG and hands that PNG to
+Snapdeck. What arrives is not a second kind of capture. It goes through the same save path a region
+capture does, so your Folder, File name and Format settings apply to it, the editor opens on it if
+you have asked for that, and it lands on the clipboard like everything else.
+
+The extension is not on the Chrome Web Store; you build it and load the folder.
+[docs/EXTENSION.md](docs/EXTENSION.md) is the whole of it: installing, pairing, what each permission
+is for, and what comes out wrong on a page that loads its images lazily.
+
+The two programs talk over a WebSocket bound to `127.0.0.1` and nowhere else, so there is no socket
+for another machine to reach. A browser fills in the `Origin` header and a page cannot forge it, so
+a script on an ordinary web page that opens that port is refused before a session exists. Past that
+gate the extension proves itself with a pairing token you copy out of Snapdeck's settings, and
+Snapdeck proves itself back: the extension sends a fresh challenge and will not send a page until
+the answer it gets is the one only something holding that token could compute. If the app is not
+running, or something else holds the port and cannot answer, the capture goes to your downloads
+folder rather than being lost or handed to a stranger, and the toolbar badge says which of the two
+happened.
+
+There is a second route that needs no browser, for the scrollable windows that are not web pages:
+Snapdeck photographs the frontmost window, posts a synthetic scroll, photographs it again, and joins
+the frames by finding where consecutive ones overlap. It is **experimental**, it says so in the menu
+bar, and it deserves the word. Where the extension is told by Chrome exactly how far the page moved,
+this one has to work it out from the pixels, and a window whose content repeats or does not move the
+way it was asked to comes out wrong. It tells you when it could not find an overlap; it cannot tell
+you when it found the wrong one.
+
 ## The editor
 
 Every capture that produced a file opens in an editor window: the title bar carries the file's
@@ -390,7 +421,5 @@ MIT, see [LICENSE](LICENSE).
   bindings you had back. The keyboard is left empty only when there is nothing left to fall back
   on. The settings window says which combination was refused and shows what is actually bound, and
   the menu bar item captures in every mode either way.
-- **No screen recording and no full-page capture.** Neither is built. Snapdeck takes still captures
-  of what is on screen; it does not record video, and it does not scroll a webpage to capture the
-  part of it that is not visible.
+- **No screen recording.** Snapdeck takes still captures; it does not record video.
 
