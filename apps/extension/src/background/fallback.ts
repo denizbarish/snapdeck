@@ -39,14 +39,18 @@ const BADGE_TEXT = '!'
  *
  * The host and the path both go in, because a name that carries only the host
  * turns a morning of captures into `snapdeck-example.com` twelve times over.
- * The query string goes in too: it is often the only thing that distinguishes
- * two pages of the same application.
+ *
+ * The query string stays out. It is where password reset tokens, signed URL
+ * parameters and session ids live, and a file name carries them into the
+ * download folder, the browser's download history and whatever syncs that
+ * folder to a server. Two captures of the same page are told apart by the
+ * timestamp instead.
  */
 function slugOf(url: string): string {
   let readable: string
   try {
     const parsed = new URL(url)
-    readable = `${parsed.hostname}${parsed.pathname}${parsed.search}`
+    readable = `${parsed.hostname}${parsed.pathname}`
   } catch {
     // `chrome://`, a `data:` URL, or anything else the parser will not take.
     // A capture that succeeded is not lost over the name of its source.

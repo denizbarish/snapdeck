@@ -37,6 +37,20 @@ describe('fallbackFilename', () => {
       expect(name.endsWith('.png')).toBe(true)
     }
   })
+
+  it('leaves the query string out of the name', () => {
+    // A reset link's token in the query string would end up in the file name,
+    // in the download folder and in the browser's download history. The
+    // timestamp already tells two captures of one page apart.
+    const name = fallbackFilename(
+      'https://app.example.com/reset?token=s3cret&user=someone@example.com',
+      new Date('2026-09-11T10:20:30Z'),
+    )
+
+    expect(name).not.toContain('s3cret')
+    expect(name).not.toContain('example.com-reset-token')
+    expect(name).toContain('app.example.com-reset')
+  })
 })
 
 describe('downloadInstead', () => {
@@ -68,4 +82,5 @@ describe('unreachableBadge', () => {
     expect(badge.title).toMatch(/Snapdeck/)
     expect(badge.title).toMatch(/not running/i)
   })
+
 })
