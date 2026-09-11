@@ -31,8 +31,8 @@ use crate::state::AppState;
 /// Scrolls the frontmost window, so the capture loop can be tested without a
 /// window server.
 pub trait ScrollDriver {
-    /// Scrolls by `lines`, positive meaning downwards.
-    fn scroll(&self, lines: i32) -> Result<(), String>;
+    /// Scrolls by `points`, positive meaning downwards.
+    fn scroll(&self, points: i32) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,13 +50,34 @@ pub struct FullPageRun {
     pub stopped: StopReason,
 }
 
-/// How far one step scrolls, in the wheel's own lines.
+/// How much of the window one step scrolls past.
 ///
-/// Small enough that consecutive pictures still share most of their content,
-/// which is the only thing `stitch` has to work with: it finds where two
-/// frames agree, so a step that clears the window leaves it nothing to find
-/// and the run comes back as a stack of unrelated pictures.
-const SCROLL_LINES: i32 = 10;
+/// `stitch` works by finding where two pictures agree, so a step that clears
+/// the window leaves it nothing to find and the run comes back as a stack of
+/// unrelated pictures. The step is a fraction of the window rather than a
+/// number of wheel lines because a line is not a length: it is whatever the
+/// application under the pointer decides it is, so ten of them can be a
+/// paragraph in one window and more than a screen in another. Measured against
+/// the window, the overlap is the same everywhere.
+const SCROLL_FRACTION: f32 = 0.7;
+
+/// How far to scroll after photographing `frame`, in points.
+///
+/// Points rather than pixels: a scroll event is in the coordinates the window
+/// server uses, and a frame is in the display's own pixels, which on a retina
+/// screen are twice as many.
+fn scroll_points_for(frame: &Frame) -> i32 {
+    let scale = if frame.scale_factor > 0.0 {
+        frame.scale_factor
+    } else {
+        1.0
+    };
+    let window_points = frame.height as f32 / scale;
+    // At least one point: a window shorter than the rounding would otherwise
+    // never move, and a run that never moves is `MAX_STEPS` copies of one
+    // picture.
+    ((window_points * SCROLL_FRACTION) as i32).max(1)
+}
 
 /// The most pictures one run will take.
 ///
@@ -81,7 +102,11 @@ where
         // window past its own top, and nothing in the finished picture would
         // show that the beginning of it is missing.
         if step > 0 {
-            if let Err(reason) = driver.scroll(SCROLL_LINES) {
+            // Measured from the picture just taken, so the overlap the stitcher
+            // needs is a property of this window rather than a guess that holds
+            // for some windows and not others.
+            let points = frames.last().map_or(1, scroll_points_for);
+            if let Err(reason) = driver.scroll(points) {
                 return FullPageRun {
                     frames,
                     stopped: StopReason::CaptureFailed(reason),
@@ -194,13 +219,13 @@ const NORMAL_WINDOW_LAYER: i32 = 0;
 struct WheelDriver;
 
 impl ScrollDriver for WheelDriver {
-    fn scroll(&self, lines: i32) -> Result<(), String> {
+    fn scroll(&self, points: i32) -> Result<(), String> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|()| "could not open an event source to scroll with".to_string())?;
         // Negated: a wheel reports positive when it is pushed away from the
         // user, which scrolls the content up. Downwards, which is what this
-        // trait means by a positive `lines`, is the other sign.
-        let event = CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 1, -lines, 0, 0)
+        // trait means by a positive `points`, is the other sign.
+        let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 1, -points, 0, 0)
             .map_err(|()| "could not build a scroll event".to_string())?;
         event.post(CGEventTapLocation::HID);
         Ok(())
@@ -390,7 +415,7 @@ mod tests {
     }
 
     /// Which kind of step each entry was, so a sequence can be asserted
-    /// without the assertion quietly restating `SCROLL_LINES`.
+    /// without the assertion quietly restating the scroll amount.
     fn kinds(log: &Log) -> Vec<&'static str> {
         log.borrow()
             .iter()
@@ -399,6 +424,69 @@ mod tests {
                 Step::Scroll(_) => "scroll",
             })
             .collect()
+    }
+
+    #[test]
+    fn a_step_is_shorter_than_the_window_it_photographed() {
+        // The property the whole fallback rests on: the next picture has to
+        // overlap the last one, because overlap is the only thing the stitcher
+        // has to work with. A step of a fixed number of wheel lines cannot
+        // promise this, since a line is whatever the window under the pointer
+        // says it is.
+        for (height, scale) in [(200, 1.0), (1600, 2.0), (2224, 2.0), (17, 1.0), (4000, 1.5)] {
+            let frame = frame_of(
+                vec![0; (height * height * 4) as usize / height as usize],
+                1,
+                height,
+                scale,
+            );
+            let points = scroll_points_for(&frame);
+            let window_points = (height as f32 / scale) as i32;
+            assert!(
+                points < window_points,
+                "a {height}px window at scale {scale} is {window_points} points and scrolled {points}"
+            );
+            assert!(
+                points >= 1,
+                "a {height}px window at scale {scale} scrolled {points}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retina_window_scrolls_in_points_rather_than_pixels() {
+        // 1600 pixels at scale 2 is an 800 point window, and 70% of it is 560.
+        // Scrolling 1120 would clear the window and leave nothing to stitch.
+        let frame = frame_of(vec![0; 4 * 1600 * 4], 4, 1600, 2.0);
+
+        assert_eq!(scroll_points_for(&frame), 560);
+    }
+
+    #[test]
+    fn the_step_is_measured_from_the_picture_just_taken() {
+        // Not from a constant, and not from the window before it: a window that
+        // changes size mid-run is still scrolled by its own height.
+        let log = log();
+        let driver = FakeDriver::new(&log);
+        let mut pictures = [picture(1), picture(2), picture(3)].into_iter();
+
+        run(
+            || pictures.next().ok_or_else(|| "no more".to_string()),
+            &driver,
+            3,
+        );
+
+        let scrolls: Vec<i32> = log
+            .borrow()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Scroll(points) => Some(*points),
+                Step::Capture => None,
+            })
+            .collect();
+        // picture() is 4 pixels tall at scale 2, so 2 points, and 70% of that
+        // rounds down to 1.
+        assert_eq!(scrolls, vec![1, 1]);
     }
 
     /// A picture whose every byte is `marker`, so two frames are the same
