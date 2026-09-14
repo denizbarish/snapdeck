@@ -1111,3 +1111,35 @@ Yürürlükteki kural: `contains(` üretim kodunda yalnız `resolve_region` içi
 kolunda geçer ve test bunu da çivilemiştir. Planın mutasyon kanıtı aynen geçerli: `capture` veya
 `record` içine böyle bir çağrı yapıştırmak V7'yi kırmızıya çevirir.
 
+### Task 9, gerçek donanım sonuçları
+
+Kurulu release paketi, 1710x1112 puntoluk Retina ekran, macOS 27, tam ekran kayıt. Kayıtların
+hiçbiri açılıp izlenmedi: kullanıcının canlı ekranını içerdikleri için yalnız sayıları okundu ve
+dosyalar hemen silindi.
+
+**İlk koşu yanıltıcıydı ve bunu ayırt etmek için yöntem değiştirildi.** İlk tam ekran testi "dosya
+yok" döndü, ama log'a da hiçbir satır düşmemişti: kayıt hata vermemiş, **hiç başlamamıştı**
+(uygulama açıldıktan hemen sonraki ilk menü tıklaması overlay'i açmamıştı). O koşudaki iptal
+testinin "temiz" sonucu da bu yüzden kanıt sayılmadı. İkinci ve üçüncü koşularda her test, gizli
+geçici dosya ile sıfır baytlık yer tutucunun ikisinin de oluştuğunu görerek kaydın gerçekten
+başladığını önce kanıtladı.
+
+| # | Ölçüm | Sonuç |
+|---|---|---|
+| 1 | Durdurma gecikmesi, menü tıklamasından dosyanın nihai adıyla görünmesine | 65 / 422 / 405 ms. İlk ölçülen 3,5 s, betiğin kendi menü beklemelerini içeriyordu. Eşik 2000 ms, altında |
+| 2 | Dosya boyutu hızı | Hareketli masaüstü 0,46-0,54 MB/s; durağan masaüstü 0,076-0,077 MB/s |
+| 3 | Kare hızı (AVFoundation `nominalFrameRate`) | 29,2-29,3 fps, 30 fps sınırının hemen altında |
+| 6 | Oynatılabilirlik | AVFoundation üç dosyayı da açtı, `isPlayable = true`; `moov` her dosyada var |
+| 8 | Kanıtlı başlangıçtan sonra iptal | 0 mp4, 0 geçici dosya, 0 yer tutucu |
+| 9 | Çökme süpürmesi | `kill -9` sonrası 1 geçici dosya + 1 yer tutucu; yeniden açılışta 0 + 0 |
+| 10 | Piksel boyutu | 3420x2224, ekranın 1710x1112 puntosunun tam iki katı |
+| 11 | Kayıt sürerken çıkış | Dosya nihai adıyla kaldı, 1.341.103 bayt, `moov` var, artık yok |
+| 13 | DMG boyutu | 5,7 MB (bu aşamadan önce 5,5 MB); yeni crate yok, fark kayıt kodunun kendisi |
+
+Koşulmayanlar ve sebepleri: **4 (bellek) ve 5 (CPU)** ayrı bir yük ölçümü istiyor ve bu turda
+yapılmadı. **7 (sıranın negatif kontrolü)** Task 3'te zaten ölçüldü ve sonucu yukarıda: bu macOS
+sürümünde yanlış sıra oynatılamaz dosya değil, kesilmiş kayıt üretiyor. **12 (macOS 14)** erişilebilir
+bir macOS 14 makine olmadığı için koşulmadı; kayıt öğelerinin orada devre dışı kurulması birim
+testleriyle (`record_items_enabled` doğruluk tablosu) kanıtlı, gerçek bir makinede görülmedi.
+**10'un bölge ve pencere kolları** koşulmadı; yalnız tam ekran ölçüldü.
+

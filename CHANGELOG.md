@@ -11,6 +11,30 @@ built, because a release nobody can read is not a release worth publishing. See
 Use `###` for the headings inside a section. A `##` heading ends the section, so a second one
 inside it would silently cut the notes short.
 
+## v0.3.0
+
+Screen recording. Apple silicon; the app runs on macOS 14 or later, and recording needs macOS 15.
+
+### Added
+
+- **Record Region, Record Window and Record Full Screen** in the menu bar. The same overlay a still
+  capture uses picks what to record, `Enter` starts it, the menu bar counts the seconds, and **Stop
+  Recording** saves an MP4 in your capture folder under your filename template and adds it to Recent
+  Captures. **Cancel Recording** leaves nothing on disk.
+- The movie is H.264 at up to 30 frames per second, at the display's own pixel density, with the
+  pointer visible. macOS writes it through ScreenCaptureKit, so recording adds nothing to the size
+  of the app.
+- A recording writes to a hidden file and only takes its real name once the movie is finalised. A
+  crash never leaves a half-written file under a real name, and the leftovers are cleared the next
+  time Snapdeck starts. Quitting while recording stops the recording first and keeps the file.
+
+### Known limitations
+
+- No sound: neither system audio nor the microphone.
+- No GIF output and no trimming.
+- No bitrate setting. Measured on a Retina MacBook, a full screen recording is about 0.08 MB per
+  second on a still desktop and about 0.5 MB per second with windows moving.
+
 ## v0.2.0
 
 Full-page capture: a browser extension that captures a whole page, and an experimental way to

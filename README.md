@@ -170,6 +170,39 @@ end of the document. The run waits and looks again several times before acceptin
 capture that fails, but a short result is the ordinary outcome on some windows rather than a rare
 one. The extension is the route that knows how far the page actually moved.
 
+## Recording
+
+Snapdeck records the screen to an MP4. The menu bar has **Record Region**, **Record Window** and
+**Record Full Screen**; the same overlay a still capture uses opens, you choose what to record, and
+`Enter` starts it. While it runs, the menu bar shows the elapsed time, and **Stop Recording** puts
+the movie in your capture folder under your filename template, where it also joins Recent Captures.
+**Cancel Recording** leaves nothing on disk.
+
+The movie is H.264 at up to 30 frames per second, at your display's own pixel density, with the
+pointer visible. It is written by macOS itself through ScreenCaptureKit, which is why recording adds
+nothing to the size of the app.
+
+**Recording needs macOS 15.** Snapdeck itself still runs on macOS 14, and on 14 the three Record
+items are shown disabled and say why.
+
+Measured on a MacBook with a 1710x1112 point Retina display, recording the full screen:
+
+| | |
+| --- | --- |
+| Output size | 3420x2224 pixels, twice the display's points |
+| Frame rate | 29.2 to 29.3 fps against a cap of 30 |
+| Stop to finished file | 65 to 422 ms |
+| File size, a mostly still desktop | about 0.08 MB per second |
+| File size, a desktop with windows moving | about 0.5 MB per second, so roughly 30 MB a minute |
+
+There is no bitrate setting, so the size depends on how much the screen changes. A recording is
+written to a hidden file in the capture folder and only takes its real name once the movie is
+finalised, so a crash never leaves a half-written file under a real name, and leftovers are cleared
+the next time Snapdeck starts. Quitting Snapdeck while recording stops the recording first and keeps
+the file.
+
+Not in this release: sound (neither system audio nor the microphone), GIF output and trimming.
+
 ## The editor
 
 Every capture that produced a file opens in an editor window: the title bar carries the file's
@@ -489,5 +522,6 @@ MIT, see [LICENSE](LICENSE).
   bindings you had back. The keyboard is left empty only when there is nothing left to fall back
   on. The settings window says which combination was refused and shows what is actually bound, and
   the menu bar item captures in every mode either way.
-- **No screen recording.** Snapdeck takes still captures; it does not record video.
+- **Recordings have no sound yet**, and there is no GIF output or trimming. Recording also needs
+  macOS 15, while the rest of Snapdeck runs on 14.
 
