@@ -259,6 +259,44 @@ ad-hoc instead, and the release notes say so. **The absence of these secrets is 
 | `APPLE_PASSWORD` | An app-specific password for that account, not the account password. |
 | `APPLE_TEAM_ID` | The ten-character team identifier notarization is filed under. |
 
+#### How to obtain them
+
+All six come from an Apple Developer Program membership, which is paid and annual. Without one
+there is nothing to set here and the ad-hoc path is the only path.
+
+1. **The certificate.** In Xcode, Settings > Accounts > Manage Certificates, add a *Developer ID
+   Application* certificate. In Keychain Access, find it under My Certificates, expand it to check
+   that the private key is there, then right-click and Export as a `.p12` with a password. That
+   password is `APPLE_CERTIFICATE_PASSWORD`. Encode the file for the secret:
+
+   ```
+   base64 -i DeveloperID.p12 | pbcopy
+   ```
+
+   Paste that as `APPLE_CERTIFICATE`, then delete the `.p12`: it carries the private key.
+
+2. **The identity.** The exact string to sign with:
+
+   ```
+   security find-identity -v -p codesigning
+   ```
+
+   Copy the quoted name, `Developer ID Application: Some Name (TEAMID)`, into
+   `APPLE_SIGNING_IDENTITY`. It has to be the certificate exported above; a mismatch fails the
+   build rather than producing an unsigned one.
+
+3. **The notarization account.** `APPLE_ID` is the Apple Account email on the membership.
+   `APPLE_PASSWORD` is an app-specific password for it, made at appleid.apple.com under Sign-In and
+   Security > App-Specific Passwords. The account password does not work and Apple's own tooling
+   refuses it.
+
+4. **The team.** `APPLE_TEAM_ID` is the ten-character identifier shown next to the membership at
+   developer.apple.com/account, and is the same one inside the parentheses of the signing identity.
+
+Set all six in the repository's Settings > Secrets and variables > Actions, then cut a tag as
+usual. The release notes will say the build is signed and notarized, and they will say it because
+the workflow read the signature off the finished bundle, not because these secrets exist.
+
 They are all or nothing. Signing without notarization still leaves a build Gatekeeper stops, and
 Tauri fails outright when it is given an Apple ID and password with no team ID, so the workflow
 treats the six as one unit and skips them together.
