@@ -1055,4 +1055,30 @@ Bu bölümün hiçbir maddesi CI'da koşmaz ve hiçbiri bir birim testinin yerin
 
 > Uygulayıcılar bu bölümü doldurur. Bir görev sırasında bu planın söylemediği bir karar verildiyse, kararın kendisi ve gerekçesi buraya tek paragraf olarak yazılır. Planla çelişen bir şey bulunduysa **uygulanmaz**, buraya yazılır ve rapor edilir.
 
-(boş)
+### Disk alanı ön kontrolü Aşama 1'e alınmadı
+
+Plan bunu açıkça sormuştu. Karar: **alınmıyor.** Hata yolu zaten var ve doğru davranıyor:
+`SCRecordingOutputDelegate::recording_did_fail` ateşlenir, `finish` iki dosyayı da toplar ve
+kullanıcıya sebebini söyler, yani disk dolduğunda kullanıcı bozuk bir dosyayla kalmaz. Tasarım
+7.2'nin üç eşikli politikası bunun üstüne bir iyileştirme, bir doğruluk kapısı değil; ve
+uygulanmadan önce gerçek bir kayıtta dosya boyutunun ne hızla büyüdüğünü ölçmek gerekiyor
+(Task 9, madde 2). O ölçüm elde olmadan seçilecek eşikler tahmindir.
+
+### Task 2, V7'nin kuralı daraltıldı: `largest_overlap_index` pencere kolunda da kalır
+
+Plan V7'yi "`largest_overlap_index(` çağrısı yalnız `resolve_region` içinde geçer" diye yazmıştı.
+Uygulamada bunun bir regresyon getirdiği bulundu ve kural düzeltildi.
+
+Bölge ile pencere aynı kurala tabi değil. Bir **bölge** iki display'e yayılamaz: ScreenCaptureKit
+o isteğe siyah şeritli, yanlış ölçekli bir kare döndürür, bu yüzden `resolve_region` onu reddeder.
+Bir **pencere** ise pekâlâ yayılabilir, kullanıcı onu sınıra sürükler, ve bugünkü davranış o
+pencereye çoğunluk display'in ölçeğini verir. Pencere kolunu `resolve_region`'a bağlamak, o
+pencerenin `Err` alıp `1.0`'a düşmesi demekti: karışık DPI bir kurulumda 2x yerine 1x çıktı, yani
+hiçbir testin yakalamadığı sessiz bir regresyon ve bu görevin kendi kuralının ("refactor
+`capture()`'ın davranışını değiştirmez") ihlali.
+
+Yürürlükteki kural: `contains(` üretim kodunda yalnız `resolve_region` içinde geçer;
+`largest_overlap_index(` ise `resolve_region` dışında **tam olarak bir kez**, `resolve`'un pencere
+kolunda geçer ve test bunu da çivilemiştir. Planın mutasyon kanıtı aynen geçerli: `capture` veya
+`record` içine böyle bir çağrı yapıştırmak V7'yi kırmızıya çevirir.
+

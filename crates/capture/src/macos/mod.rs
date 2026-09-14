@@ -227,6 +227,143 @@ fn sort_by_z_order(mut windows: Vec<WindowInfo>, z_order: &[u32]) -> Vec<WindowI
     windows
 }
 
+/// Which display a region is captured from, and where on it.
+///
+/// Separated from the content request for the reason `sort_by_z_order` is
+/// separated: this is the whole of the rule, and `SCShareableContent` is not
+/// something a unit test can arrange.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RegionPlan {
+    /// Index into the display list the region is captured from.
+    pub(crate) display: usize,
+    /// `sourceRect` in that display's own coordinate space.
+    pub(crate) source_rect: CGRect,
+}
+
+/// Decides which display a region belongs to and refuses the ones that belong
+/// to none or to two.
+///
+/// Pure. `displays` arrives in the order `SCShareableContent` gave, which is
+/// documented as no order at all, so the winner is decided by overlapping area
+/// and never by position in the list.
+pub(crate) fn resolve_region(region: Rect, displays: &[Rect]) -> Result<RegionPlan, CaptureError> {
+    // A zero-sized request never reaches ScreenCaptureKit, on either path.
+    if region.is_empty() {
+        return Err(CaptureError::Platform("empty region".to_string()));
+    }
+    // The region arrives in global points. Take it from the display it covers
+    // the most.
+    let display = largest_overlap_index(region, displays).ok_or_else(|| {
+        CaptureError::TargetNotFound("no display intersects the region".to_string())
+    })?;
+    let bounds = displays[display];
+    // A region has to lie inside a single display. The overlay opens one
+    // window per display and clamps the selection to that window, so the UI
+    // already guarantees it. Refuse anything wider instead of clamping:
+    // ScreenCaptureKit clips `sourceRect` to the display but still stretches
+    // the result to the requested output size, so a straddling region would
+    // come back partly black and mis-scaled and look like it worked.
+    if !contains(bounds, region) {
+        return Err(CaptureError::Platform(
+            "region is not contained in a single display".to_string(),
+        ));
+    }
+    Ok(RegionPlan {
+        display,
+        source_rect: source_rect_for(region, bounds),
+    })
+}
+
+/// What a capture target resolves to on this machine.
+///
+/// One function rather than one per call site, and that is the whole reason
+/// this exists: `capture` and `record` ask ScreenCaptureKit for the same
+/// thing, and a second copy of these rules written for the second caller
+/// drifts from this one on the first fix.
+struct Resolved {
+    filter: SCContentFilter,
+    /// Output size in pixels, at `scale`.
+    width: u32,
+    height: u32,
+    /// Pixels per point on the display the target sits on.
+    scale: f32,
+    /// `Some` only for a region, which is the only target that crops.
+    source_rect: Option<CGRect>,
+}
+
+/// Blocks on `SCShareableContent`; see the `ScreenCapturer` documentation.
+///
+/// Load-bearing for the permission contract, and the only place in the
+/// recording path that is: a missing screen recording grant fails here as
+/// `NoShareableContent`, which `map_err` turns into `PermissionDenied`. Do not
+/// cache it and do not skip it.
+fn resolve(target: CaptureTarget) -> Result<Resolved, CaptureError> {
+    let content = SCShareableContent::get().map_err(map_err)?;
+    match target {
+        CaptureTarget::Region(rect) => {
+            let displays = content.displays();
+            let display_bounds: Vec<Rect> = displays.iter().map(|d| to_rect(d.frame())).collect();
+            let plan = resolve_region(rect, &display_bounds)?;
+            let display = &displays[plan.display];
+            let scale = scale_factor_for(display.display_id());
+            Ok(Resolved {
+                filter: SCContentFilter::create()
+                    .with_display(display)
+                    .with_excluding_windows(&[])
+                    .build(),
+                width: pixels(rect.width, scale),
+                height: pixels(rect.height, scale),
+                scale,
+                source_rect: Some(plan.source_rect),
+            })
+        }
+        CaptureTarget::Display(id) => {
+            let display = content
+                .displays()
+                .into_iter()
+                .find(|d| d.display_id() == id)
+                .ok_or_else(|| CaptureError::TargetNotFound(format!("display {id}")))?;
+            let scale = scale_factor_for(id);
+            Ok(Resolved {
+                filter: SCContentFilter::create()
+                    .with_display(&display)
+                    .with_excluding_windows(&[])
+                    .build(),
+                width: pixels(f64::from(display.width()), scale),
+                height: pixels(f64::from(display.height()), scale),
+                scale,
+                source_rect: None,
+            })
+        }
+        CaptureTarget::Window(id) => {
+            let window = content
+                .windows()
+                .into_iter()
+                .find(|w| w.window_id() == id)
+                .ok_or_else(|| CaptureError::TargetNotFound(format!("window {id}")))?;
+            let bounds = to_rect(window.frame());
+            // A window straddling two displays takes the scale factor of the
+            // one it sits on the most, not of whichever display the list
+            // happens to name first. It is not sent through `resolve_region`:
+            // that refuses a straddling rectangle outright, which is right for
+            // a region and wrong for a window the user is free to drag across
+            // the seam.
+            let displays = content.displays();
+            let display_bounds: Vec<Rect> = displays.iter().map(|d| to_rect(d.frame())).collect();
+            let scale = largest_overlap_index(bounds, &display_bounds)
+                .map(|index| scale_factor_for(displays[index].display_id()))
+                .unwrap_or(1.0);
+            Ok(Resolved {
+                filter: SCContentFilter::create().with_window(&window).build(),
+                width: pixels(bounds.width, scale),
+                height: pixels(bounds.height, scale),
+                scale,
+                source_rect: None,
+            })
+        }
+    }
+}
+
 impl ScreenCapturer for MacCapturer {
     fn displays(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         // Load-bearing for the permission contract: see `map_err`. A missing
@@ -270,108 +407,21 @@ impl ScreenCapturer for MacCapturer {
     }
 
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError> {
-        match target {
-            CaptureTarget::Region(rect) => {
-                if rect.is_empty() {
-                    return Err(CaptureError::Platform("empty region".to_string()));
-                }
-                // Load-bearing for the permission contract: a missing screen
-                // recording grant fails here as `NoShareableContent`, which
-                // `map_err` turns into `PermissionDenied`. Every failure of
-                // `SCScreenshotManager::capture_image` collapses into the flat
-                // `SCError::ScreenshotError`, so a denial that first surfaced
-                // there would reach the caller as `CaptureError::Platform`. Do
-                // not cache or skip this call.
-                let content = SCShareableContent::get().map_err(map_err)?;
-                let displays = content.displays();
-                let display_bounds: Vec<Rect> =
-                    displays.iter().map(|d| to_rect(d.frame())).collect();
-                // The region arrives in global points. Capture it from the
-                // display it covers the most.
-                let index = largest_overlap_index(rect, &display_bounds).ok_or_else(|| {
-                    CaptureError::TargetNotFound("no display intersects the region".to_string())
-                })?;
-                let display = &displays[index];
-                let bounds = display_bounds[index];
-                // A region has to lie inside a single display. The overlay
-                // opens one window per display and clamps the selection to
-                // that window, so the UI already guarantees it. Refuse
-                // anything wider instead of clamping: ScreenCaptureKit clips
-                // `sourceRect` to the display but still stretches the result
-                // to the requested output size, so a straddling region would
-                // return a partly black, mis-scaled frame that looks like a
-                // successful capture.
-                if !contains(bounds, rect) {
-                    return Err(CaptureError::Platform(
-                        "region is not contained in a single display".to_string(),
-                    ));
-                }
-                let scale = scale_factor_for(display.display_id());
-                let filter = SCContentFilter::create()
-                    .with_display(display)
-                    .with_excluding_windows(&[])
-                    .build();
-                let config = SCStreamConfiguration::new()
-                    .with_source_rect(source_rect_for(rect, bounds))
-                    .with_width(pixels(rect.width, scale))
-                    .with_height(pixels(rect.height, scale))
-                    .with_shows_cursor(false);
-                let image =
-                    SCScreenshotManager::capture_image(&filter, &config).map_err(map_err)?;
-                frame_from_image(&image, scale)
-            }
-            CaptureTarget::Display(id) => {
-                // Load-bearing for the permission contract: see `map_err`. A
-                // missing grant has to fail here, never later.
-                let content = SCShareableContent::get().map_err(map_err)?;
-                let display = content
-                    .displays()
-                    .into_iter()
-                    .find(|d| d.display_id() == id)
-                    .ok_or_else(|| CaptureError::TargetNotFound(format!("display {id}")))?;
-                let scale = scale_factor_for(id);
-                let filter = SCContentFilter::create()
-                    .with_display(&display)
-                    .with_excluding_windows(&[])
-                    .build();
-                let config = SCStreamConfiguration::new()
-                    .with_width(pixels(f64::from(display.width()), scale))
-                    .with_height(pixels(f64::from(display.height()), scale))
-                    .with_shows_cursor(false);
-                let image =
-                    SCScreenshotManager::capture_image(&filter, &config).map_err(map_err)?;
-                frame_from_image(&image, scale)
-            }
-            CaptureTarget::Window(id) => {
-                // Load-bearing for the permission contract: see `map_err`. A
-                // missing grant has to fail here, never later.
-                let content = SCShareableContent::get().map_err(map_err)?;
-                let window = content
-                    .windows()
-                    .into_iter()
-                    .find(|w| w.window_id() == id)
-                    .ok_or_else(|| CaptureError::TargetNotFound(format!("window {id}")))?;
-                let bounds = to_rect(window.frame());
-                // Same reasoning as the region arm: a window straddling two
-                // displays takes the scale factor of the one it sits on the
-                // most, not of whichever display the list happens to name
-                // first.
-                let displays = content.displays();
-                let display_bounds: Vec<Rect> =
-                    displays.iter().map(|d| to_rect(d.frame())).collect();
-                let scale = largest_overlap_index(bounds, &display_bounds)
-                    .map(|index| scale_factor_for(displays[index].display_id()))
-                    .unwrap_or(1.0);
-                let filter = SCContentFilter::create().with_window(&window).build();
-                let config = SCStreamConfiguration::new()
-                    .with_width(pixels(bounds.width, scale))
-                    .with_height(pixels(bounds.height, scale))
-                    .with_shows_cursor(false);
-                let image =
-                    SCScreenshotManager::capture_image(&filter, &config).map_err(map_err)?;
-                frame_from_image(&image, scale)
-            }
-        }
+        let resolved = resolve(target)?;
+        let config = SCStreamConfiguration::new();
+        let config = match resolved.source_rect {
+            Some(source_rect) => config.with_source_rect(source_rect),
+            None => config,
+        };
+        // No pointer: in a still screenshot it is clutter. A recording says
+        // the opposite, and says it in its own configuration.
+        let config = config
+            .with_width(resolved.width)
+            .with_height(resolved.height)
+            .with_shows_cursor(false);
+        let image =
+            SCScreenshotManager::capture_image(&resolved.filter, &config).map_err(map_err)?;
+        frame_from_image(&image, resolved.scale)
     }
 }
 
@@ -620,5 +670,171 @@ mod tests {
         assert_eq!(pixels(100.5, 1.0), 101);
         // A sub-point length still asks for one pixel, never zero.
         assert_eq!(pixels(0.4, 1.0), 1);
+    }
+
+    /// This file's own source, so a test can hold a claim about *where* a rule
+    /// is written and not only about what it computes.
+    ///
+    /// The same pattern as `output`'s JPEG quality test and `fullpage`'s tray
+    /// label test: without a screen there is no other mechanical way to claim
+    /// that two paths share one rule.
+    const SOURCE: &str = include_str!("mod.rs");
+
+    /// Everything in this file that is not a test.
+    fn production_source() -> &'static str {
+        let end = SOURCE
+            .find("#[cfg(test)]")
+            .expect("the test module marker is in this file");
+        &SOURCE[..end]
+    }
+
+    /// The text of the item `marker` opens, from the marker to the next item at
+    /// the same nesting or the end of the enclosing block.
+    ///
+    /// Deliberately textual. It slices from the marker to whichever comes first
+    /// of a method opening at four spaces or a brace in the first column.
+    fn body_of(marker: &str) -> &'static str {
+        let start = SOURCE
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} is in this file"));
+        let rest = &SOURCE[start..];
+        // A method ends where the next one begins; a free function ends at the
+        // brace in the first column, which belongs to the body and is kept.
+        let next_method = rest.find("\n    fn ");
+        let closing_brace = rest.find("\n}");
+        let end = match (next_method, closing_brace) {
+            (Some(method), Some(brace)) if method < brace => method,
+            (_, Some(brace)) => brace + "\n}".len(),
+            (Some(method), None) => method,
+            (None, None) => rest.len(),
+        };
+        let body = &rest[..end];
+        // An empty or truncated slice would let every claim below pass without
+        // reading anything, so the slicing itself is asserted first.
+        assert!(
+            body.len() > marker.len() && body.ends_with('}'),
+            "{marker} did not slice to a body, got {body:?}"
+        );
+        body
+    }
+
+    /// How many times `name` is called in `source`, not counting the line that
+    /// defines it.
+    fn call_sites(source: &str, name: &str) -> usize {
+        let needle = format!("{name}(");
+        source
+            .match_indices(&needle)
+            .filter(|(at, _)| !source[..*at].ends_with("fn "))
+            .count()
+    }
+
+    #[test]
+    fn a_region_is_resolved_to_the_display_it_overlaps_the_most() {
+        // The first rectangle clips the region's left edge, the second covers
+        // the whole of it. Position in the list says the first one; overlapping
+        // area says the second, and the area is the rule.
+        let displays = [
+            rect(-1920.0, 0.0, 1970.0, 1080.0),
+            rect(0.0, 0.0, 1920.0, 1080.0),
+        ];
+        let plan = resolve_region(rect(0.0, 100.0, 100.0, 50.0), &displays)
+            .expect("the region lies inside the second display");
+        assert_eq!(plan.display, 1);
+    }
+
+    #[test]
+    fn a_region_reaching_across_two_displays_is_refused() {
+        let displays = [
+            rect(-1920.0, 0.0, 1920.0, 1080.0),
+            rect(0.0, 0.0, 1920.0, 1080.0),
+        ];
+        // Mostly on the second display, but its left edge is on the first.
+        // ScreenCaptureKit would clip `sourceRect` to one display and still
+        // stretch the result to the requested size, so a recording of this
+        // would come out half black and mis-scaled and look like it worked.
+        assert_eq!(
+            resolve_region(rect(-20.0, 100.0, 100.0, 50.0), &displays).unwrap_err(),
+            CaptureError::Platform("region is not contained in a single display".to_string())
+        );
+    }
+
+    #[test]
+    fn a_region_on_no_display_at_all_is_refused() {
+        let displays = [rect(0.0, 0.0, 1920.0, 1080.0)];
+        assert_eq!(
+            resolve_region(rect(5000.0, 5000.0, 10.0, 10.0), &displays).unwrap_err(),
+            CaptureError::TargetNotFound("no display intersects the region".to_string())
+        );
+    }
+
+    #[test]
+    fn the_resolved_source_rect_is_in_the_chosen_displays_own_space() {
+        // The display the region sits on is second in the list and carries a
+        // negative origin, which is exactly what has to be subtracted out.
+        let displays = [
+            rect(0.0, 0.0, 1920.0, 1080.0),
+            rect(-1920.0, 0.0, 1920.0, 1080.0),
+        ];
+        let plan = resolve_region(rect(-1620.0, 100.0, 100.0, 50.0), &displays)
+            .expect("the region lies inside the second display");
+        assert_eq!(plan.display, 1);
+        assert_eq!(
+            plan.source_rect,
+            CGRect {
+                origin: CGPoint { x: 300.0, y: 100.0 },
+                size: CGSize {
+                    width: 100.0,
+                    height: 50.0
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_region_never_reaches_screencapturekit() {
+        let displays = [rect(0.0, 0.0, 1920.0, 1080.0)];
+        assert_eq!(
+            resolve_region(rect(10.0, 10.0, 0.0, 50.0), &displays).unwrap_err(),
+            CaptureError::Platform("empty region".to_string())
+        );
+    }
+
+    #[test]
+    fn the_still_capture_goes_through_the_shared_resolution() {
+        let body = body_of("fn capture(");
+        assert!(
+            body.contains("resolve(target)?"),
+            "capture no longer resolves its target through the shared function"
+        );
+        assert!(
+            !body.contains("SCShareableContent"),
+            "capture asks for shareable content itself instead of going through resolve"
+        );
+    }
+
+    #[test]
+    fn the_region_rules_are_written_in_one_place() {
+        let elsewhere = production_source().replace(body_of("fn resolve_region("), "");
+        assert_eq!(
+            call_sites(&elsewhere, "contains"),
+            0,
+            "containment is decided somewhere other than resolve_region"
+        );
+        // The one remaining overlap lookup is the window arm's scale factor,
+        // which is not a region rule: a window is allowed to straddle two
+        // displays and takes the scale of the one it sits on the most, where a
+        // region in the same position is refused outright. See the report on
+        // this task; the plan's wording expects zero here.
+        assert_eq!(
+            call_sites(&elsewhere, "largest_overlap_index"),
+            1,
+            "the overlap rule is used outside resolve_region and the window scale lookup"
+        );
+        let outside_resolve = elsewhere.replace(body_of("fn resolve("), "");
+        assert_eq!(
+            call_sites(&outside_resolve, "largest_overlap_index"),
+            0,
+            "the overlap rule is used outside resolve_region and resolve"
+        );
     }
 }
