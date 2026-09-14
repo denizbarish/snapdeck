@@ -63,6 +63,17 @@ pub trait ScreenCapturer {
     /// why the v1 design's `stream()` became this: every existing
     /// implementation, `mock.rs` included, compiles unchanged, and a platform
     /// with no recording says so out loud instead of doing nothing quietly.
+    /// Whether this capturer can record at all on this machine.
+    ///
+    /// Asked before a recording is offered, so the answer can be a disabled
+    /// menu item rather than a failure the user runs into. A default of
+    /// `false` for the same reason `record` has one: a capturer that has not
+    /// said otherwise cannot, and the caller learns that without knowing which
+    /// framework would have been asked.
+    fn can_record(&self) -> bool {
+        false
+    }
+
     fn record(
         &self,
         target: CaptureTarget,
@@ -123,6 +134,13 @@ mod tests {
             layer: 0,
             is_on_screen: true,
         }
+    }
+
+    #[test]
+    fn a_capturer_that_did_not_override_record_says_it_cannot() {
+        // Asked before a recording is offered, so a machine that cannot record
+        // shows a disabled menu item instead of a failure someone runs into.
+        assert!(!MockCapturer::new(vec![display()], vec![window()], frame()).can_record());
     }
 
     #[test]

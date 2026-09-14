@@ -23,6 +23,15 @@ use crate::{
 };
 
 const OVERLAY_LABEL_PREFIX: &str = "overlay-";
+
+/// The action a confirmed selection takes: a still capture.
+pub const CAPTURE_ACTION: &str = "capture";
+/// The action a confirmed selection takes: a recording.
+///
+/// Shared with `overlay/action.ts`, which reads it back out of the URL and
+/// decides which command `Enter` invokes. Nothing between the two is checked by
+/// a compiler, so a test in this module holds them together.
+pub const RECORD_ACTION: &str = "record";
 /// The frozen frame's filename, written once here and never in TypeScript.
 const FROZEN_FRAME_PREFIX: &str = "frozen-";
 const FROZEN_FRAME_EXTENSION: &str = ".png";
@@ -98,10 +107,24 @@ pub fn frozen_frame_path(cache_dir: &Path, display_id: u32) -> PathBuf {
 /// The overlay's URL. The frozen frame's absolute path travels with it so the
 /// frontend only has to call `convertFileSrc`: no path IPC round trip, and the
 /// `frozen-<id>.png` template is written once, in Rust.
-pub fn overlay_url(display_id: u32, mode: &str, scale: f32, frame_path: &Path) -> String {
+///
+/// `mode` is the gesture the overlay offers and `action` is what a confirmed
+/// selection does with it. Two parameters rather than one, because the two
+/// questions are independent: every gesture can end in a still or in a
+/// recording. Both ride in the URL rather than arriving over IPC, so neither
+/// can change under an overlay that is already on screen.
+pub fn overlay_url(
+    display_id: u32,
+    mode: &str,
+    action: &str,
+    scale: f32,
+    frame_path: &Path,
+) -> String {
     let raw_path = frame_path.to_string_lossy();
     let path = utf8_percent_encode(&raw_path, PATH_QUERY_ENCODE_SET);
-    format!("overlay.html?display={display_id}&mode={mode}&scale={scale}&path={path}")
+    format!(
+        "overlay.html?display={display_id}&mode={mode}&action={action}&scale={scale}&path={path}"
+    )
 }
 
 /// Freezes every display and shows one full-screen overlay per display.
@@ -114,7 +137,7 @@ pub fn overlay_url(display_id: u32, mode: &str, scale: f32, frame_path: &Path) -
 /// Nothing is reported to the caller because there is no caller left by the
 /// time the work finishes. The one failure the user must see, a refused screen
 /// recording permission, is surfaced by `ensure_permission` instead.
-pub fn open_overlays(app: &AppHandle, mode: &str) {
+pub fn open_overlays(app: &AppHandle, mode: &str, action: &str) {
     // One capture at a time. Claimed before anything else happens, so a second
     // trigger arriving during the capture leaves the first one's overlays and
     // its half-written frozen frame alone. See `AppState::begin_capture`.
@@ -134,6 +157,7 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
 
     let app = app.clone();
     let mode = mode.to_string();
+    let action = action.to_string();
     std::thread::spawn(move || {
         // A panic here would otherwise be completely silent: nothing joins this
         // thread, and the user would see the same nothing as a refused
@@ -150,7 +174,7 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
         // windows to the main thread.
         let mut guard = Some(guard);
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_capture(&app, &mode, &mut guard);
+            run_capture(&app, &mode, &action, &mut guard);
         }));
         if let Err(payload) = outcome {
             report_failure(
@@ -182,7 +206,7 @@ pub fn open_overlays(app: &AppHandle, mode: &str) {
 /// new windows actually exist, because `run_on_main_thread` only queues the
 /// closure, and it has to stay claimed through an unwind, which is why the
 /// caller keeps the `Option` in a frame that does not unwind with this one.
-fn run_capture(app: &AppHandle, mode: &str, guard: &mut Option<CaptureGuard>) {
+fn run_capture(app: &AppHandle, mode: &str, action: &str, guard: &mut Option<CaptureGuard>) {
     if !ensure_permission(app) {
         return;
     }
@@ -209,9 +233,10 @@ fn run_capture(app: &AppHandle, mode: &str, guard: &mut Option<CaptureGuard>) {
 
     let handle = app.clone();
     let mode = mode.to_string();
+    let action = action.to_string();
     let guard = guard.take();
     if let Err(err) = app.run_on_main_thread(move || {
-        let windows = build_overlay_windows(&handle, &mode, &frozen);
+        let windows = build_overlay_windows(&handle, &mode, &action, &frozen);
         drop(guard);
         schedule_reveal_deadline(&handle, windows);
     }) {
@@ -410,6 +435,7 @@ fn capture_frozen_frames(app: &AppHandle) -> Result<Vec<(DisplayInfo, PathBuf)>,
 fn build_overlay_windows(
     app: &AppHandle,
     mode: &str,
+    action: &str,
     frozen: &[(DisplayInfo, PathBuf)],
 ) -> Vec<WebviewWindow> {
     let mut windows = Vec::with_capacity(frozen.len());
@@ -419,7 +445,7 @@ fn build_overlay_windows(
     let mut ids = Vec::with_capacity(frozen.len());
     let mut failed = false;
     for (display, path) in frozen {
-        match build_overlay_window(app, mode, display, path) {
+        match build_overlay_window(app, mode, action, display, path) {
             Ok(window) => {
                 raise_above_menu_bar(&window);
                 if let Some(id) = overlay_window_id(&window) {
@@ -526,10 +552,11 @@ fn close_hidden_overlays(app: &AppHandle, windows: &[WebviewWindow]) {
 fn build_overlay_window(
     app: &AppHandle,
     mode: &str,
+    action: &str,
     display: &DisplayInfo,
     frame_path: &Path,
 ) -> tauri::Result<WebviewWindow> {
-    let url = overlay_url(display.id, mode, display.scale_factor, frame_path);
+    let url = overlay_url(display.id, mode, action, display.scale_factor, frame_path);
     // Points, not pixels: `position` and `inner_size` take logical coordinates,
     // and `DisplayInfo::bounds` is already in the global point space, so the
     // frozen frame lines up with the live screen on Retina.
@@ -666,17 +693,43 @@ mod tests {
     }
 
     #[test]
-    fn overlay_url_carries_display_mode_scale_and_frame_path() {
-        let url = overlay_url(3, "region", 2.0, Path::new("/tmp/cache/frozen-3.png"));
+    fn overlay_url_carries_display_mode_action_scale_and_frame_path() {
+        let url = overlay_url(
+            3,
+            "region",
+            "record",
+            2.0,
+            Path::new("/tmp/cache/frozen-3.png"),
+        );
         assert_eq!(
             url,
-            "overlay.html?display=3&mode=region&scale=2&path=/tmp/cache/frozen-3.png"
+            "overlay.html?display=3&mode=region&action=record&scale=2&path=/tmp/cache/frozen-3.png"
+        );
+    }
+
+    /// The action is written in Rust, read in TypeScript, and nothing between
+    /// the two is a thing a compiler looks at: the overlay would simply take a
+    /// still where the user asked for a recording. So the expectation comes
+    /// from the other language's own source.
+    #[test]
+    fn the_record_action_is_the_one_the_overlay_reads() {
+        let action_ts = include_str!("../../src/overlay/action.ts");
+        let declaration = format!("RECORD_ACTION = '{RECORD_ACTION}'");
+        assert!(
+            action_ts.contains(&declaration),
+            "action.ts does not declare `{declaration}`"
         );
     }
 
     #[test]
     fn overlay_url_escapes_characters_that_would_end_the_query() {
-        let url = overlay_url(1, "region", 1.0, Path::new("/tmp/a b&c#d/frozen-1.png"));
+        let url = overlay_url(
+            1,
+            "region",
+            "capture",
+            1.0,
+            Path::new("/tmp/a b&c#d/frozen-1.png"),
+        );
         assert!(
             url.ends_with("&path=/tmp/a%20b%26c%23d/frozen-1.png"),
             "unexpected url: {url}"

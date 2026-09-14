@@ -5,7 +5,9 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use snapdeck_capture::ScreenCapturer as _;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder},
@@ -59,6 +61,29 @@ const NO_FAILURE_TEXT: &str = "No recent problems";
 /// in full in the tooltip, which does wrap, and in the log the next item opens.
 const MENU_MESSAGE_LIMIT: usize = 72;
 
+/// What the three recording items are called before the gate has had its say.
+///
+/// Named constants rather than literals at the call sites, for the reason
+/// `FULLPAGE_MENU_LABEL` is one: the test below holds the menu to building
+/// every one of these through `record_label`, and it can only name them if
+/// they have names.
+const RECORD_REGION_TEXT: &str = "Record Region";
+const RECORD_WINDOW_TEXT: &str = "Record Window";
+const RECORD_DISPLAY_TEXT: &str = "Record Full Screen";
+
+/// What a recording item's label carries on a machine that cannot record.
+///
+/// The version number is the whole of the message: "unavailable" tells the
+/// user nothing they can act on, and "requires macOS 15" tells them exactly
+/// what would fix it.
+const NEEDS_MACOS_15: &str = " (requires macOS 15)";
+
+/// The item that ends a recording and keeps the movie.
+const STOP_RECORDING_TEXT: &str = "Stop Recording";
+
+/// The item that ends a recording and keeps nothing.
+const CANCEL_RECORDING_TEXT: &str = "Cancel Recording";
+
 /// The submenu holding the captures the user has just taken.
 const RECENT_CAPTURES_TEXT: &str = "Recent Captures";
 
@@ -90,6 +115,16 @@ const RECENT_CAPTURE_ID_PREFIX: &str = "recent_capture_";
 /// list without the tray having handed anything to `recents`.
 struct RecentCaptures(Submenu<Wry>);
 
+/// The two items that only mean anything while a recording is running.
+///
+/// Managed for the reason `FailureSurface` is: `recording` turns them on from
+/// the worker thread that starts a recording and off from the one that ends
+/// it, and neither has been handed anything by this module.
+struct RecordingItems {
+    stop: MenuItem<Wry>,
+    cancel: MenuItem<Wry>,
+}
+
 /// The parts of the tray that a failed capture writes to.
 ///
 /// Managed rather than global so that the handles live exactly as long as the
@@ -110,7 +145,81 @@ pub fn request_capture(app: &AppHandle, mode: &str) {
     // being permanent: nothing else in the application knows that a capture
     // succeeded.
     clear_failure(app);
-    crate::overlay::open_overlays(app, mode);
+    crate::overlay::open_overlays(app, mode, crate::overlay::CAPTURE_ACTION);
+}
+
+/// Single entry point for every recording request from the tray.
+///
+/// The same overlay as a capture, over the same frozen screen, with the same
+/// gestures: only what `Enter` ends in differs, and that rides in the URL.
+///
+/// Clears the last failure for the reason `request_capture` does. The tray
+/// title goes quiet with it, so a recording already running loses its counter
+/// for at most one tick, which the counter puts straight back.
+pub fn request_recording(app: &AppHandle, mode: &str) {
+    clear_failure(app);
+    crate::overlay::open_overlays(app, mode, crate::overlay::RECORD_ACTION);
+}
+
+/// The elapsed time as the menu bar shows it.
+///
+/// `0:07` under a minute, `12:34` under an hour, `1:02:03` past one. Minutes
+/// are not padded below ten, because the menu bar charges for every character
+/// and a leading zero buys nothing; seconds are, because `1:7` is not a time.
+fn elapsed_text(elapsed: Duration) -> String {
+    let total = elapsed.as_secs();
+    let seconds = total % 60;
+    let minutes = (total / 60) % 60;
+    let hours = total / 3600;
+    if hours > 0 {
+        return format!("{hours}:{minutes:02}:{seconds:02}");
+    }
+    format!("{minutes}:{seconds:02}")
+}
+
+/// What a recording menu item is called on this machine.
+///
+/// On macOS 14 the item is built disabled and says why in its own label. A
+/// disabled macOS menu item does not deliver a click, so there is no event to
+/// explain it in; the label is the only surface left, and an item that is
+/// greyed out with no reason given is worse than no item.
+fn record_label(base: &str, available: bool) -> String {
+    if available {
+        return base.to_string();
+    }
+    format!("{base}{NEEDS_MACOS_15}")
+}
+
+/// Puts the recording's elapsed time in the menu bar, or takes it back out.
+///
+/// Unused until the recording commands are wired, as `recording`'s own file
+/// contract is: the tray has to be able to say a recording is running before
+/// anything can start one. The allowance comes off with the rest of them.
+///
+/// `None` returns the title to its quiet state. Best-effort, like every other
+/// write to the tray.
+///
+/// The title is the same character cell a failure's marker claims, and the
+/// failure wins: it has to be read before it can be cleared, and the elapsed
+/// time is in the menu anyway. That is a rule about call order rather than
+/// about this function, and it belongs to whoever calls both.
+#[allow(dead_code)]
+pub fn show_recording(app: &AppHandle, elapsed: Option<Duration>) {
+    let Some(surface) = app.try_state::<FailureSurface>() else {
+        return;
+    };
+    let title = elapsed.map(elapsed_text);
+    let _ = surface.tray.set_title(title.as_deref());
+}
+
+/// Turns the Stop and Cancel items on or off.
+#[allow(dead_code)]
+pub fn set_recording_items_enabled(app: &AppHandle, recording: bool) {
+    let Some(items) = app.try_state::<RecordingItems>() else {
+        return;
+    };
+    let _ = items.stop.set_enabled(recording);
+    let _ = items.cancel.set_enabled(recording);
 }
 
 /// Puts a failed capture in the menu bar, where the user is already looking.
@@ -344,6 +453,40 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         crate::fullpage::FULLPAGE_MENU_LABEL,
     )
     .build(app)?;
+    // One FFI hop, read once: all three items are asking the same machine the
+    // same question, and the answer cannot change while the process runs.
+    // Asked of the capturer rather than of ScreenCaptureKit: which framework
+    // would answer, and whether there is one at all, is `crates/capture`'s
+    // business and the only place that knows it.
+    let can_record = app.state::<crate::state::AppState>().capturer.can_record();
+    let record_region = MenuItemBuilder::with_id(
+        "record_region",
+        record_label(RECORD_REGION_TEXT, can_record),
+    )
+    .enabled(can_record)
+    .build(app)?;
+    let record_window = MenuItemBuilder::with_id(
+        "record_window",
+        record_label(RECORD_WINDOW_TEXT, can_record),
+    )
+    .enabled(can_record)
+    .build(app)?;
+    let record_display = MenuItemBuilder::with_id(
+        "record_display",
+        record_label(RECORD_DISPLAY_TEXT, can_record),
+    )
+    .enabled(can_record)
+    .build(app)?;
+    // In the menu whether or not anything is recording, and disabled until
+    // there is, for the reason `NO_FAILURE_TEXT` is present: an item that
+    // appears the first time it becomes useful is an item nobody was looking
+    // for. `recording` turns the pair on and off through `RecordingItems`.
+    let stop_recording = MenuItemBuilder::with_id("stop_recording", STOP_RECORDING_TEXT)
+        .enabled(false)
+        .build(app)?;
+    let cancel_recording = MenuItemBuilder::with_id("cancel_recording", CANCEL_RECORDING_TEXT)
+        .enabled(false)
+        .build(app)?;
     // Built with the placeholder already in it, so the submenu is never an
     // empty rectangle in the seconds before `recents::restore` fills it and
     // never becomes one if a later launch cannot read the file.
@@ -364,11 +507,21 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let check_for_updates =
         MenuItemBuilder::with_id("check_for_updates", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Snapdeck").build(app)?;
-    // The order the design spec asks for: capture actions, recent captures,
-    // then the rest. Its own group, because it answers a different question
-    // from the three items above it.
+    // The order the design spec asks for: capture actions, recording actions,
+    // recent captures, then the rest. Each group answers a different question,
+    // and recording is its own because "take a picture of this" and "film
+    // this" are not variants of one another: they end in different files, and
+    // only one of them leaves something running afterwards.
     let menu = MenuBuilder::new(app)
         .items(&[&region, &window, &display, &scrolling_window])
+        .separator()
+        .items(&[
+            &record_region,
+            &record_window,
+            &record_display,
+            &stop_recording,
+            &cancel_recording,
+        ])
         .separator()
         .item(&recent_captures)
         .separator()
@@ -390,6 +543,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             // nothing to select. It takes its own window and reports its own
             // failures, and it returns before it has done either.
             "capture_scrolling_window" => crate::fullpage::request_scrolling_capture(app),
+            "record_region" => request_recording(app, "region"),
+            "record_window" => request_recording(app, "window"),
+            "record_display" => request_recording(app, "display"),
+            "stop_recording" => crate::recording::request_stop(app),
+            "cancel_recording" => crate::recording::request_cancel(app),
             "open_log" => reveal_log(app),
             "check_for_updates" => crate::updater::check_on_request(app),
             "settings" => crate::settings_window::open_settings(app),
@@ -404,6 +562,10 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     app.manage(FailureSurface { tray, last_failure });
     app.manage(RecentCaptures(recent_captures));
+    app.manage(RecordingItems {
+        stop: stop_recording,
+        cancel: cancel_recording,
+    });
 
     Ok(())
 }
@@ -411,6 +573,104 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This module's source with its own tests cut off.
+    ///
+    /// The assertions below are about what the menu is built from, and they
+    /// quote the very strings they look for; searching the whole file would
+    /// find the needle in the haystack's own hand. Everything before the first
+    /// `#[cfg(test)]` is the module proper, and this helper's own copy of that
+    /// attribute sits after it.
+    fn menu_source() -> &'static str {
+        const TRAY: &str = include_str!("tray.rs");
+        TRAY.split("#[cfg(test)]")
+            .next()
+            .expect("a split yields at least one piece")
+    }
+
+    /// The one number the menu bar shows while a recording runs. Written out
+    /// rather than generated, because a test that formats its own expectation
+    /// agrees with whatever the code does.
+    #[test]
+    fn elapsed_time_reads_as_a_clock() {
+        assert_eq!(elapsed_text(Duration::from_secs(0)), "0:00");
+        assert_eq!(elapsed_text(Duration::from_secs(7)), "0:07");
+        assert_eq!(elapsed_text(Duration::from_secs(59)), "0:59");
+        assert_eq!(elapsed_text(Duration::from_secs(60)), "1:00");
+        assert_eq!(elapsed_text(Duration::from_secs(83)), "1:23");
+        assert_eq!(elapsed_text(Duration::from_secs(754)), "12:34");
+        assert_eq!(elapsed_text(Duration::from_secs(3599)), "59:59");
+        assert_eq!(elapsed_text(Duration::from_secs(3600)), "1:00:00");
+        assert_eq!(elapsed_text(Duration::from_secs(3723)), "1:02:03");
+        assert_eq!(elapsed_text(Duration::from_secs(86_399)), "23:59:59");
+    }
+
+    /// Where recording works there is nothing to explain, and a label carrying
+    /// a system requirement nobody is failing is noise.
+    #[test]
+    fn a_recording_item_is_plain_where_recording_works() {
+        assert_eq!(record_label("Record Region", true), "Record Region");
+    }
+
+    /// And where it does not work, the label is the only surface left: a
+    /// disabled macOS menu item delivers no click, so there is no event to put
+    /// the explanation in.
+    #[test]
+    fn a_recording_item_says_why_it_is_off() {
+        let label = record_label("Record Region", false);
+        assert!(label.starts_with("Record Region"), "{label}");
+        assert!(
+            label.contains("15"),
+            "the label has to name the version that is missing: {label}"
+        );
+    }
+
+    /// A source test, for the reason `output`'s JPEG quality test is one: an
+    /// item built from a bare string literal instead of through the gate is a
+    /// menu item that offers macOS 14 something it cannot do, and no compiler
+    /// notices.
+    #[test]
+    fn every_recording_item_is_labelled_through_the_gate() {
+        let source = menu_source();
+        for constant in [
+            "record_label(RECORD_REGION_TEXT",
+            "record_label(RECORD_WINDOW_TEXT",
+            "record_label(RECORD_DISPLAY_TEXT",
+        ] {
+            assert!(
+                source.contains(constant),
+                "the menu has to build `{constant}`"
+            );
+        }
+        assert_eq!(
+            source.matches(concat!("can_", "record()")).count(),
+            1,
+            "the availability check belongs in the menu exactly once"
+        );
+    }
+
+    /// Both items are in the menu whether or not anything is recording, so a
+    /// missing arm is not an item that fails to build: it is an item that is
+    /// there, is enabled while a recording runs, and does nothing when it is
+    /// clicked.
+    #[test]
+    fn stop_and_cancel_reach_the_recording_module() {
+        let source = menu_source();
+        for id in ["stop_recording", "cancel_recording"] {
+            let arm = format!("\"{id}\" => ");
+            let start = source
+                .find(&arm)
+                .unwrap_or_else(|| panic!("no menu arm for `{id}`"));
+            let body = source[start + arm.len()..]
+                .lines()
+                .next()
+                .expect("an arm is on a line");
+            assert!(
+                body.contains(concat!("recording", "::request_")),
+                "the `{id}` arm does not ask the recording module for anything: {body}"
+            );
+        }
+    }
 
     #[test]
     fn a_short_message_is_left_alone() {

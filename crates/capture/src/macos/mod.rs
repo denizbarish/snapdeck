@@ -411,6 +411,10 @@ impl ScreenCapturer for MacCapturer {
         Ok(sort_by_z_order(windows, &on_screen_z_order()))
     }
 
+    fn can_record(&self) -> bool {
+        SCRecordingOutput::is_available()
+    }
+
     fn record(
         &self,
         target: CaptureTarget,

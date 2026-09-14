@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use snapdeck_capture::{CaptureError, RecordingSummary};
+use tauri::AppHandle;
 
 use crate::output;
 
@@ -270,6 +271,24 @@ pub fn discard(result: Result<(), CaptureError>, files: &RecordingFiles) -> Opti
     // failed tear-down is the one mistake this function exists to not make.
     abandon(files);
     result.err().map(|error| error.to_string())
+}
+
+/// Stops the running recording and puts the movie where the user's settings
+/// say. Returns immediately; the work is on a blocking worker.
+///
+/// Body pending: the menu item that calls this is built disabled and nothing
+/// in this build can start a recording for it to stop, so the item cannot be
+/// clicked. The signature exists now because the tray is wired now.
+pub fn request_stop(app: &AppHandle) {
+    let _ = app;
+}
+
+/// Stops the running recording and leaves nothing on disk. Returns
+/// immediately.
+///
+/// Body pending, as `request_stop` is and for the same reason.
+pub fn request_cancel(app: &AppHandle) {
+    let _ = app;
 }
 
 #[cfg(test)]
