@@ -88,6 +88,13 @@ fn scroll_points_for(frame: &Frame) -> i32 {
 /// still showing the old pixels when the next capture began.
 const SETTLE: Duration = Duration::from_millis(250);
 
+/// How many more looks a window that has not changed gets before the run
+/// treats it as the end of the document.
+///
+/// Four looks at a quarter of a second is a second of animation, which is
+/// longer than any scroll a document view animates.
+const SETTLE_ATTEMPTS: usize = 4;
+
 /// The most pictures one run will take.
 ///
 /// The stop that matters is `ContentSettled`; this is the one for content that
@@ -130,20 +137,40 @@ where
         // Deliberately not `?`. What has been photographed so far is still a
         // picture, and handing it back with the reason attached is what lets
         // the caller offer it with a warning.
-        let frame = match capture().or_else(|first| {
-            // One retry, after the same wait a scroll gets. Screen capture on
-            // macOS fails transiently under a run of back to back window
-            // captures, measured as "could not start the stream", and a single
-            // one of those used to end the whole run and hand back a sliver.
-            let _ = first;
-            settle();
-            capture()
-        }) {
-            Ok(frame) => frame,
-            Err(reason) => {
-                return FullPageRun {
-                    frames,
-                    stopped: StopReason::CaptureFailed(reason),
+        //
+        // A picture identical to the last one means one of two things, and
+        // they cannot be told apart in a single look: the document has ended,
+        // or the scroll is still animating. So it is looked at again, up to
+        // `SETTLE_ATTEMPTS` times, and only a window that has stopped changing
+        // for all of them counts as ended. Measured against Safari, where a
+        // single look after one wait ended a six screen page after one and a
+        // half.
+        let mut attempts = 0;
+        let frame = loop {
+            let taken = capture().or_else(|first| {
+                // One retry, after the same wait a scroll gets. Screen capture
+                // on macOS fails transiently under a run of back to back window
+                // captures, measured as "could not start the stream", and a
+                // single one of those used to end the whole run and hand back a
+                // sliver.
+                let _ = first;
+                settle();
+                capture()
+            });
+            match taken {
+                Ok(frame) => {
+                    let repeated = frames.last().is_some_and(|last| last.data == frame.data);
+                    if !repeated || attempts >= SETTLE_ATTEMPTS {
+                        break frame;
+                    }
+                    attempts += 1;
+                    settle();
+                }
+                Err(reason) => {
+                    return FullPageRun {
+                        frames,
+                        stopped: StopReason::CaptureFailed(reason),
+                    }
                 }
             }
         };
@@ -671,6 +698,38 @@ mod tests {
         assert_eq!(run.stopped, StopReason::StepLimit);
     }
 
+    #[test]
+    fn a_window_still_animating_its_scroll_is_looked_at_again() {
+        // The picture that repeats the last one means the document ended, or
+        // the scroll has not finished yet, and one look cannot tell them
+        // apart. Measured against Safari: a scroll of several hundred points
+        // was still animating a quarter of a second later, and a single look
+        // ended a six screen page after one and a half.
+        let log = log();
+        let driver = FakeDriver::new(&log);
+        // Repeats the picture twice before moving on, as an animating window
+        // does.
+        let mut taken = 0_usize;
+        let mut pictures = vec![picture(1), picture(1), picture(1), picture(2), picture(3)];
+        pictures.reverse();
+        let run = run(
+            || {
+                taken += 1;
+                pictures.pop().ok_or_else(|| "no more".to_string())
+            },
+            &driver,
+            3,
+            || {},
+        );
+
+        assert_eq!(
+            run.frames.len(),
+            3,
+            "the run gave up on an animating scroll"
+        );
+        assert_eq!(run.stopped, StopReason::StepLimit);
+    }
+
     /// D3. One scroll between consecutive pictures, and none at all before the
     /// first one: a scroll before the first capture is how the top of the
     /// window is lost, silently and unrecoverably.
@@ -681,9 +740,21 @@ mod tests {
         let run = run(settling_capture(&log, 3), &driver, 20, || {});
 
         assert_eq!(run.frames.len(), 3);
+        // Up to the point the window stops changing, one scroll between
+        // consecutive pictures. The looks that follow are the settle policy
+        // asking again, and are counted by its own test rather than restated
+        // here.
         assert_eq!(
-            kinds(&log),
+            kinds(&log)[..7],
             ["capture", "scroll", "capture", "scroll", "capture", "scroll", "capture"]
+        );
+        // Every scroll is between two pictures, never before the first.
+        assert!(
+            kinds(&log)
+                .windows(2)
+                .all(|pair| pair != ["scroll", "scroll"]),
+            "two scrolls in a row would mean a picture was skipped: {:?}",
+            kinds(&log)
         );
         assert!(
             log.borrow()
