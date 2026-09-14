@@ -2,10 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use snapdeck_capture::macos::MacCapturer;
+use snapdeck_capture::Recording;
 
 use crate::bridge::server::BridgeServer;
+use crate::recording::RecordingFiles;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 
@@ -28,6 +31,22 @@ struct EditorSession {
     /// `None` when the server had not numbered the window yet, which leaves the
     /// editor in the picker exactly as it was before this was recorded.
     window_id: Option<u32>,
+}
+
+/// The recording that is running, and the two things about it only Rust knows.
+///
+/// Nothing reads it yet: the tray items and the commands that start, stop and
+/// cancel a recording arrive with the task that wires this up, and the
+/// allowance below comes off with the first of them, exactly as `lib`'s does
+/// over `mod recording`.
+#[allow(dead_code)]
+pub struct RecordingSession {
+    /// The live recording, which `stop` and `cancel` consume.
+    pub recording: Box<dyn Recording>,
+    /// Where it writes and where it will land.
+    pub files: RecordingFiles,
+    /// When it started, so the menu bar can say how long it has been going.
+    pub started_at: Instant,
 }
 
 /// Shared application state. The capturer is stateless and cheap to share.
@@ -136,6 +155,11 @@ pub struct AppState {
     /// then carries on from, since every other way of taking a screenshot still
     /// works without it.
     bridge_server: Mutex<Option<BridgeServer>>,
+    /// The recording that is running, if one is.
+    ///
+    /// One slot and not a list, for the reason `capture_in_flight` is a flag:
+    /// see `begin_recording`.
+    recording: Mutex<Option<RecordingSession>>,
 }
 
 impl AppState {
@@ -151,6 +175,7 @@ impl AppState {
             settings_window_id: Mutex::new(None),
             recent_captures: Mutex::new(Vec::new()),
             bridge_server: Mutex::new(None),
+            recording: Mutex::new(None),
         }
     }
 
@@ -376,6 +401,63 @@ impl AppState {
     }
 }
 
+/// The single recording slot.
+///
+/// Its own block and its own allowance because nothing calls it yet: the tray
+/// items and the commands that start, stop and cancel a recording arrive with
+/// the task that wires this up, and the allowance comes off with the first
+/// caller, exactly as `lib`'s does over `mod recording`.
+#[allow(dead_code)]
+impl AppState {
+    /// Claims the single recording slot, or answers `false` when one is
+    /// already running and leaves the caller's session untouched.
+    ///
+    /// One at a time for the reason `begin_capture` is: two recordings share
+    /// one menu bar title, one Stop item and one save folder, and the second
+    /// one to start would be a recording the user cannot stop.
+    pub fn begin_recording(&self, session: RecordingSession) -> bool {
+        let mut slot = self.recording_lock();
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(session);
+        true
+    }
+
+    /// Takes the running recording out, or `None` when there is none.
+    ///
+    /// Taking rather than borrowing, because both things a caller does with it
+    /// consume it, and a session left in the slot after its stream was torn
+    /// down is a Stop item that does nothing.
+    pub fn take_recording(&self) -> Option<RecordingSession> {
+        self.recording_lock().take()
+    }
+
+    /// Whether a recording is running.
+    pub fn is_recording(&self) -> bool {
+        self.recording_lock().is_some()
+    }
+
+    /// How long the running recording has been going, or `None`.
+    pub fn recording_elapsed(&self) -> Option<Duration> {
+        self.recording_lock()
+            .as_ref()
+            .map(|session| session.started_at.elapsed())
+    }
+
+    /// The recording slot's lock, with poisoning treated as recoverable for
+    /// the reason `overlay_ids` gives, and with more riding on it than any of
+    /// the others: propagating an unrelated panic here would leave a running
+    /// recording that cannot be stopped or cancelled, still writing into the
+    /// user's folder, which is the worst thing this application could do to
+    /// them.
+    fn recording_lock(&self) -> std::sync::MutexGuard<'_, Option<RecordingSession>> {
+        self.recording
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -400,6 +482,107 @@ impl Drop for CaptureGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use snapdeck_capture::{CaptureError, RecordingProgress, RecordingSummary};
+
+    /// A recording that does nothing at all.
+    ///
+    /// The slot's claim has nothing to do with what a recording does: it is
+    /// about how many of them the application will hold at once, and a stub is
+    /// what lets that be asked without a live stream and a screen recording
+    /// grant.
+    struct StubRecording;
+
+    impl Recording for StubRecording {
+        fn progress(&self) -> RecordingProgress {
+            RecordingProgress::default()
+        }
+
+        fn stop(self: Box<Self>) -> Result<RecordingSummary, CaptureError> {
+            Ok(RecordingSummary {
+                path: PathBuf::from("/Movies/Recording.mp4"),
+                bytes: 0,
+                frames: 0,
+            })
+        }
+
+        fn cancel(self: Box<Self>) -> Result<(), CaptureError> {
+            Ok(())
+        }
+    }
+
+    fn session(stem: &str) -> RecordingSession {
+        RecordingSession {
+            recording: Box::new(StubRecording),
+            files: RecordingFiles {
+                temporary: PathBuf::from(format!("/Movies/.{stem}.mp4.leftover.mp4")),
+                final_path: PathBuf::from(format!("/Movies/{stem}.mp4")),
+            },
+            started_at: Instant::now(),
+        }
+    }
+
+    /// S1
+    #[test]
+    fn a_second_recording_is_refused_while_the_first_one_runs() {
+        let state = AppState::new();
+        assert!(
+            state.begin_recording(session("First")),
+            "the first recording claims the slot"
+        );
+        assert!(
+            !state.begin_recording(session("Second")),
+            "a second recording would share one Stop item with the first"
+        );
+
+        let running = state
+            .take_recording()
+            .expect("the running recording is still the first one");
+        assert_eq!(
+            running.files.final_path,
+            PathBuf::from("/Movies/First.mp4"),
+            "the refused recording must not have replaced the running one"
+        );
+        assert!(
+            state.begin_recording(session("Third")),
+            "the slot is free once the recording has been taken out"
+        );
+    }
+
+    /// S2
+    #[test]
+    fn the_slot_says_whether_a_recording_runs_and_for_how_long() {
+        let state = AppState::new();
+        assert!(!state.is_recording(), "nothing has started yet");
+        assert_eq!(
+            state.recording_elapsed(),
+            None,
+            "there is no elapsed time to put in the menu bar"
+        );
+
+        assert!(state.begin_recording(session("Running")));
+        assert!(state.is_recording());
+        assert!(
+            state.recording_elapsed().is_some(),
+            "a running recording has been going for some length of time"
+        );
+
+        drop(state.take_recording());
+        assert!(!state.is_recording());
+        assert_eq!(state.recording_elapsed(), None);
+    }
+
+    /// S3
+    #[test]
+    fn taking_the_recording_twice_finds_nothing_the_second_time() {
+        let state = AppState::new();
+        assert!(state.begin_recording(session("Once")));
+        assert!(state.take_recording().is_some());
+        assert!(
+            state.take_recording().is_none(),
+            "a Stop item clicked twice must not go looking for a second movie"
+        );
+    }
 
     #[test]
     fn a_second_capture_is_refused_while_the_first_is_in_flight() {

@@ -18,10 +18,19 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use snapdeck_capture::{CaptureError, RecordingSummary};
+
 use crate::output;
 
 /// The extension every recording is written under.
 pub const RECORDING_EXTENSION: &str = "mp4";
+
+/// What the user is told when a recording ended without a single frame in it.
+///
+/// A file with no frames is one no player will open, so the honest answer is
+/// that there is no movie rather than a movie that fails when they click it.
+const NOTHING_RECORDED: &str =
+    "Snapdeck did not record a single frame, so there was no movie to save.";
 
 /// The middle of every temporary recording file's name.
 ///
@@ -189,6 +198,78 @@ pub fn sweep(directory: &Path, keep: Option<&RecordingFiles>) -> usize {
         }
     }
     removed
+}
+
+/// What a stopped recording did to the disk.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Finished {
+    /// The movie, or `None` when there is not one to give.
+    pub path: Option<PathBuf>,
+    /// What the user has to be told, if anything.
+    pub complaint: Option<String>,
+}
+
+/// Turns a platform result and a pair of files into what the user gets.
+///
+/// Split out for the reason `bridge::intake::deliver` is: the claim worth
+/// testing is what happens to the two files in each outcome, and everything
+/// around it needs a live stream and a screen recording grant.
+pub fn finish(summary: Result<RecordingSummary, CaptureError>, files: &RecordingFiles) -> Finished {
+    match summary {
+        // The stream did not come apart cleanly, so whatever is under the
+        // temporary name was never finalised and the placeholder names a
+        // capture that will not arrive. Both go, and the platform's own words
+        // are what the user is given: they are the only description of what
+        // went wrong that exists.
+        Err(error) => {
+            abandon(files);
+            Finished {
+                path: None,
+                complaint: Some(error.to_string()),
+            }
+        }
+        // A recording that took nothing in is a file no player can open. Handing
+        // it over would be worse than saying there is nothing: the user finds
+        // out at the moment they try to watch it, long after the recording they
+        // cannot take again.
+        Ok(summary) if summary.frames == 0 => {
+            abandon(files);
+            Finished {
+                path: None,
+                complaint: Some(NOTHING_RECORDED.to_string()),
+            }
+        }
+        Ok(_) => match commit(files) {
+            Ok(path) => Finished {
+                path: Some(path),
+                complaint: None,
+            },
+            // The rename is the only step that makes the movie the user's, so a
+            // rename that did not happen leaves nothing worth keeping: the
+            // placeholder is an empty file under a name that looks like a
+            // capture, which is a thing they would have to open to discover.
+            Err(error) => {
+                abandon(files);
+                Finished {
+                    path: None,
+                    complaint: Some(error),
+                }
+            }
+        },
+    }
+}
+
+/// Ends a cancelled recording and leaves nothing on disk.
+///
+/// The files go whether or not the platform managed to take the stream apart:
+/// a cancel that leaves a half-written movie in the user's folder is not a
+/// cancel. Answers with what to tell the user, or `None` when there is nothing
+/// to tell.
+pub fn discard(result: Result<(), CaptureError>, files: &RecordingFiles) -> Option<String> {
+    // First, and before the result is even looked at. An early return on a
+    // failed tear-down is the one mistake this function exists to not make.
+    abandon(files);
+    result.err().map(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -382,5 +463,132 @@ mod tests {
         assert_eq!(removed, 0);
         assert!(files.temporary.is_dir(), "the directory is untouched");
         assert!(files.final_path.exists(), "and so is the placeholder");
+    }
+
+    /// What the platform hands back about a recording that wrote `frames`
+    /// frames into `files`.
+    fn summary(files: &RecordingFiles, frames: u64) -> RecordingSummary {
+        RecordingSummary {
+            path: files.temporary.clone(),
+            bytes: 1024,
+            frames,
+        }
+    }
+
+    /// F1
+    #[test]
+    fn a_recording_that_took_frames_lands_under_its_final_name() {
+        let directory = temp_dir("finish-happy");
+        let files = reserve(&directory, "Recording").expect("reserve");
+        std::fs::write(&files.temporary, b"a finished movie").expect("write the movie");
+
+        let finished = finish(Ok(summary(&files, 12)), &files);
+
+        assert_eq!(finished.path, Some(files.final_path.clone()));
+        assert_eq!(
+            finished.complaint, None,
+            "there is nothing to complain about"
+        );
+        assert!(!files.temporary.exists(), "the temporary file is gone");
+        assert_eq!(
+            std::fs::read(&files.final_path).expect("read the finished movie"),
+            b"a finished movie"
+        );
+    }
+
+    /// F2
+    #[test]
+    fn a_recording_that_took_no_frames_is_not_handed_to_the_user() {
+        let directory = temp_dir("finish-empty");
+        let files = reserve(&directory, "Recording").expect("reserve");
+        std::fs::write(&files.temporary, b"a file no player can open")
+            .expect("write the unplayable file");
+
+        let finished = finish(Ok(summary(&files, 0)), &files);
+
+        assert_eq!(finished.path, None, "there is no movie to give");
+        let complaint = finished
+            .complaint
+            .expect("the user is told why nothing was saved");
+        assert!(
+            complaint.contains("not record a single frame"),
+            "{complaint:?} has to say that no frames were recorded"
+        );
+        assert!(!files.temporary.exists(), "the temporary file is gone");
+        assert!(!files.final_path.exists(), "and so is the placeholder");
+    }
+
+    /// F3
+    #[test]
+    fn a_platform_failure_reaches_the_user_and_leaves_nothing_behind() {
+        let directory = temp_dir("finish-failure");
+        let files = reserve(&directory, "Recording").expect("reserve");
+        std::fs::write(&files.temporary, b"half a movie").expect("write the half movie");
+
+        let finished = finish(Err(CaptureError::Platform("disk full".to_string())), &files);
+
+        assert_eq!(finished.path, None);
+        let complaint = finished
+            .complaint
+            .expect("the platform's own reason reaches the user");
+        assert!(
+            complaint.contains("disk full"),
+            "{complaint:?} has to carry what the platform said"
+        );
+        assert!(!files.temporary.exists(), "the temporary file is gone");
+        assert!(!files.final_path.exists(), "and so is the placeholder");
+    }
+
+    /// F4
+    #[test]
+    fn a_finished_recording_with_no_file_leaves_no_placeholder_behind() {
+        let directory = temp_dir("finish-nothing-written");
+        let files = reserve(&directory, "Recording").expect("reserve");
+
+        let finished = finish(Ok(summary(&files, 12)), &files);
+
+        assert_eq!(finished.path, None);
+        let complaint = finished
+            .complaint
+            .expect("the user is told the movie did not arrive");
+        assert!(!complaint.is_empty());
+        assert!(
+            !files.final_path.exists(),
+            "an empty placeholder left under a capture's name is a file that cannot be opened"
+        );
+    }
+
+    /// F5
+    #[test]
+    fn a_cancelled_recording_leaves_nothing_on_disk() {
+        let directory = temp_dir("discard-clean");
+        let files = reserve(&directory, "Recording").expect("reserve");
+        std::fs::write(&files.temporary, b"half a movie").expect("write the half movie");
+
+        assert_eq!(discard(Ok(()), &files), None, "there is nothing to report");
+
+        assert!(!files.temporary.exists(), "the temporary file is gone");
+        assert!(!files.final_path.exists(), "and so is the placeholder");
+    }
+
+    /// F6
+    #[test]
+    fn a_cancel_the_platform_failed_is_still_a_cancel() {
+        let directory = temp_dir("discard-failure");
+        let files = reserve(&directory, "Recording").expect("reserve");
+        std::fs::write(&files.temporary, b"half a movie").expect("write the half movie");
+
+        let complaint = discard(Err(CaptureError::Platform("boom".to_string())), &files)
+            .expect("a stream that would not come apart is worth saying out loud");
+        assert!(
+            complaint.contains("boom"),
+            "{complaint:?} has to carry what the platform said"
+        );
+
+        assert!(
+            !files.temporary.exists(),
+            "a cancel that leaves a half-written movie in the user's folder is not a cancel"
+        );
+        assert!(!files.final_path.exists(), "and the placeholder goes too");
     }
 }
