@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck Settings</title>
+    <!-- `apps/desktop/settings.html`, including the custom property the window
+         reads its own background out of. -->
+    <style>
+      :root { --settings-background: #f5f5f7; }
+      html, body, #settings-root { margin: 0; min-height: 100%; }
+      body { background: var(--settings-background); }
+    </style>
+  </head>
+  <body>
+    <div id="settings-root"></div>
+    <script type="module" src="/src/settings.tsx"></script>
+  </body>
+</html>

@@ -1,6 +1,8 @@
 packages:
   - "apps/*"
   - "packages/*"
+  # Not shipped: the screenshot harness that makes the pictures in docs/images.
+  - "tools/*"
 # esbuild ships a prebuilt binary and needs its install script to run.
 allowBuilds:
   esbuild: true

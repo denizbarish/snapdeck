@@ -1,0 +1,65 @@
+<!doctype html>
+<!--
+  The page every screenshot in this folder is taken of.
+
+  Entirely fictional: "Northwind Analytics" is not a product, the customers do
+  not exist, the addresses are under the reserved `.example` domain and the
+  `sk_live_` strings are not keys to anything. They are here because a redaction
+  tool cannot be shown working on a page with nothing worth hiding on it, and
+  the alternative, a real screen, is how a private one ends up in a README.
+
+  Rendered at 1100 x 720 by `tools/screenshots`, which then drives the real
+  editor and overlay over the result. Nothing about this file is loaded at
+  runtime by the app; it exists so the pictures can be made again.
+-->
+<meta charset="utf-8">
+<title>Northwind Analytics</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+         color: #1c1c1e; background: #f2f2f7; }
+  header { background: #fff; border-bottom: 1px solid #e3e3e8; padding: 18px 28px;
+           display: flex; align-items: center; gap: 14px; }
+  .logo { width: 28px; height: 28px; border-radius: 8px;
+          background: linear-gradient(135deg, #0a84ff, #5e5ce6); }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  nav { margin-left: auto; display: flex; gap: 20px; color: #6e6e73; font-size: 14px; }
+  main { padding: 28px; display: grid; gap: 18px; grid-template-columns: repeat(3, 1fr); }
+  .card { background: #fff; border: 1px solid #e3e3e8; border-radius: 14px; padding: 18px 20px; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: #6e6e73; font-weight: 500;
+             text-transform: uppercase; letter-spacing: 0.04em; }
+  .n { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+  .up { color: #248a3d; font-size: 13px; margin-left: 8px; font-weight: 500; }
+  .down { color: #d70015; font-size: 13px; margin-left: 8px; font-weight: 500; }
+  .wide { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; color: #6e6e73; font-weight: 500; padding: 8px 0; font-size: 13px; }
+  td { padding: 10px 0; border-top: 1px solid #f0f0f4; }
+  code { font: 13px/1.4 "SF Mono", ui-monospace, Menlo, monospace; background: #f2f2f7;
+         padding: 2px 6px; border-radius: 5px; }
+  .bars { display: flex; align-items: flex-end; gap: 10px; height: 96px; margin-top: 6px; }
+  .bars div { flex: 1; background: linear-gradient(180deg, #0a84ff, #64b5ff); border-radius: 6px 6px 0 0; }
+</style>
+<header>
+  <div class="logo"></div>
+  <h1>Northwind Analytics</h1>
+  <nav><span>Overview</span><span>Reports</span><span>Team</span><span>Settings</span></nav>
+</header>
+<main>
+  <div class="card"><h2>Monthly revenue</h2><div class="n">$48,210<span class="up">+12.4%</span></div></div>
+  <div class="card"><h2>Active seats</h2><div class="n">1,284<span class="up">+38</span></div></div>
+  <div class="card"><h2>Churn</h2><div class="n">1.9%<span class="down">+0.3</span></div></div>
+  <div class="card wide"><h2>Weekly signups</h2>
+    <div class="bars"><div style="height:40%"></div><div style="height:62%"></div><div style="height:48%"></div>
+      <div style="height:78%"></div><div style="height:66%"></div><div style="height:92%"></div><div style="height:71%"></div></div>
+  </div>
+  <div class="card wide"><h2>Recent invoices</h2>
+    <table>
+      <tr><th>Customer</th><th>Contact</th><th>Key</th><th>Amount</th></tr>
+      <tr><td>Acme Industries</td><td>billing@acme.example</td><td><code>sk_live_9f2a41c7b8</code></td><td>$3,400</td></tr>
+      <tr><td>Globex</td><td>ap@globex.example</td><td><code>sk_live_77de01aa93</code></td><td>$2,150</td></tr>
+      <tr><td>Initech</td><td>finance@initech.example</td><td><code>sk_live_04b6ffe215</code></td><td>$980</td></tr>
+    </table>
+  </div>
+</main>

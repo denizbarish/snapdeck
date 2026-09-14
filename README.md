@@ -6,6 +6,12 @@ or a whole display, and the capture is saved as a PNG and put on the clipboard.
 An editor opens on the capture afterwards, for arrows, captions, highlights, redaction and
 cropping. Sharing is planned and is not part of this release.
 
+![The Snapdeck editor, with an arrow, a rectangle and a blacked-out column of API keys](docs/images/editor.png)
+
+*Every picture in this README is taken on a fictional demo page, never on anyone's screen. The
+interface is the real one: `pnpm screenshots` renders
+[that page](docs/images/demo-page.html) and drives these components in a headless browser.*
+
 ## Install
 
 Download `Snapdeck_<version>_aarch64.dmg` from the
@@ -97,6 +103,10 @@ Snapdeck lives in the menu bar. Take a capture from the menu, or with a shortcut
 | `Cmd+Shift+9` | Full screen |
 
 The screen freezes and every display is covered by the selection overlay.
+
+![The selection overlay, with a region drawn out and the magnifier reading a pixel](docs/images/overlay.png)
+
+*The overlay, over the demo page standing in for a frozen screen.*
 
 - **Region.** Drag out a rectangle. Releasing the mouse does not capture it: the selection stays
   editable, so you can drag the eight handles to resize it, or nudge it with the arrow keys, one
@@ -293,6 +303,11 @@ which is the capture's own and which replaces it, or delete the original yoursel
 
 `Settings…` in the menu bar opens them. Nothing needs a relaunch: a change is in force as soon as
 you save it.
+
+![The settings window: shortcuts, saving, behaviour, the browser extension and updates](docs/images/settings.png)
+
+*The settings window, rendered outside the app for this picture. The pairing token shown is a
+placeholder, not a real one.*
 
 **Shortcuts.** The three capture shortcuts are rebindable. Click one and press the combination you
 want; there is no text field, so what you press is what you get. The defaults avoid the macOS

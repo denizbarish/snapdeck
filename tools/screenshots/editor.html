@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck Editor</title>
+    <!-- The same two rules `apps/desktop/editor.html` sets, so the component is
+         measured in the box the real window gives it. -->
+    <style>
+      html, body, #editor-root { margin: 0; height: 100%; width: 100%; overflow: hidden; }
+      body { background: #1c1c1e; color: #f5f5f7; }
+    </style>
+  </head>
+  <body>
+    <div id="editor-root"></div>
+    <script type="module" src="/src/editor.tsx"></script>
+  </body>
+</html>
