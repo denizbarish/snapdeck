@@ -1,0 +1,102 @@
+<!--
+  The Snapdeck application icon, and the one drawing everything else is cut
+  from: `icon-source.png` is this file rasterised at 1024x1024, and the app's
+  `.icns`, the menu bar icon and the extension's PNGs are all made from that.
+  `tools/screenshots/icon.mjs` does the rasterising, in the same headless
+  Chromium the README's pictures are taken in, so the icon is text in this
+  repository rather than a binary nobody can re-make.
+
+  WHAT IT IS. The selection overlay, reduced to the three marks that are only
+  ever this program: a bright region, a hairline frame around it, and a square
+  handle on each corner. `apps/desktop/src/overlay/Overlay.tsx` draws exactly
+  that over a frozen screen, and the graphite tile is the screen it is drawn
+  over, dimmed. Nothing here is a camera or a lens, because Snapdeck is not one:
+  what it does is mark out a rectangle and take it.
+
+  WHAT IT IS DRAWN FOR. Sixteen pixels, first. The menu bar and a browser
+  toolbar are both 16 points wide and every other size is easier, so the
+  measurements below are chosen at that size and then checked upwards rather
+  than the other way about. At 16 the blue is a solid eight-pixel square, each
+  handle is a white block in its corner of it, and the frame between them does
+  not resolve at all: it only brightens the blue's edge a shade, which is what a
+  detail should do when it runs out of room. From 128 up the frame is a crisp
+  line and the mark reads as the overlay it is.
+
+  THE GRID IS WHY IT SURVIVES. One pixel at 16 is 64 units here, so the
+  selection's edges are on multiples of 64 and land on pixel boundaries rather
+  than across them. That is not a nicety. An earlier draft put the selection at
+  270..754, a fifth of a pixel out at 16, and each handle came back off the
+  downscaler as one bright pixel bracketed by half-tones instead of a block: the
+  mark was still there and had stopped being legible. The same alignment is what
+  makes the frame exactly one pixel at 128 and exactly two at 256.
+
+  ITS COLOURS ARE THE PROGRAM'S. `#0a84ff` is the accent the editor gives a
+  pressed control; `#2c2c2e` and `#1c1c1e` are its control and chrome greys;
+  `#ffffff` is what the overlay paints a handle. No colour was invented for this
+  drawing, and there is only the one accent on a neutral ground, so the icon
+  cannot drift from the interface it belongs to.
+
+  MEASUREMENTS, in the 1024 grid.
+
+    Tile          100..924, so 824 square, which is Apple's icon body inside a
+                  1024 canvas. The margin it leaves is not decoration: the
+                  extension's 128-pixel icons want their artwork inset too, and
+                  this is the inset that serves both.
+    Selection     256..768, 512 square, which is 4..12 pixels at 16. The white
+                  frame is stroked 8 wide on a rect inset by 4, so its OUTER
+                  edge is the selection's edge and the line never straddles a
+                  half pixel.
+    Handles       144 square, centred on each corner of the selection, the way
+                  the overlay centres its own. Their outer corners sit at 184,
+                  which leaves about 43 units to the tile's own corner along the
+                  diagonal; at 160 they crowd it. 144 is two and a quarter pixels
+                  at 16 rather than a whole number, and is still the right size:
+                  128 aligns exactly and comes back a full step darker, because
+                  the downscaler spreads a small block over its neighbours
+                  whatever it is aligned to and only mass survives that.
+
+  THE TILE'S SHAPE is a superellipse, |x/412|^5 + |y/412|^5 = 1 about (512,512),
+  which is the rounded square macOS draws rather than the rounded rectangle an
+  `rx` would give. The path below is that curve fitted with sixteen cubic
+  segments; it is off by at most 2.3 units of 1024, which is a thirtieth of a
+  pixel at 128 and invisible at every size this is used at.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Snapdeck">
+  <title>Snapdeck</title>
+  <defs>
+    <linearGradient id="tile" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2c2c2e"/>
+      <stop offset="1" stop-color="#1c1c1e"/>
+    </linearGradient>
+    <clipPath id="tileClip">
+      <path d="M924 512C924 602.53 933.03 702.94 911.16 792.56C904.12 821.4 891.9 849.43 870.67 870.67C849.43 891.9 821.4 904.12 792.56 911.16C702.94 933.03 602.53 924 512 924C421.47 924 321.06 933.03 231.44 911.16C202.6 904.12 174.57 891.9 153.33 870.67C132.1 849.43 119.88 821.4 112.84 792.56C90.97 702.94 100 602.53 100 512C100 421.47 90.97 321.06 112.84 231.44C119.88 202.6 132.1 174.57 153.33 153.33C174.57 132.1 202.6 119.88 231.44 112.84C321.06 90.97 421.47 100 512 100C602.53 100 702.94 90.97 792.56 112.84C821.4 119.88 849.43 132.1 870.67 153.33C891.9 174.57 904.12 202.6 911.16 231.44C933.03 321.06 924 421.47 924 512Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- The frozen screen, dimmed. -->
+  <path fill="url(#tile)" d="M924 512C924 602.53 933.03 702.94 911.16 792.56C904.12 821.4 891.9 849.43 870.67 870.67C849.43 891.9 821.4 904.12 792.56 911.16C702.94 933.03 602.53 924 512 924C421.47 924 321.06 933.03 231.44 911.16C202.6 904.12 174.57 891.9 153.33 870.67C132.1 849.43 119.88 821.4 112.84 792.56C90.97 702.94 100 602.53 100 512C100 421.47 90.97 321.06 112.84 231.44C119.88 202.6 132.1 174.57 153.33 153.33C174.57 132.1 202.6 119.88 231.44 112.84C321.06 90.97 421.47 100 512 100C602.53 100 702.94 90.97 792.56 112.84C821.4 119.88 849.43 132.1 870.67 153.33C891.9 174.57 904.12 202.6 911.16 231.44C933.03 321.06 924 421.47 924 512Z"/>
+
+  <!-- A hairline of light inside the tile's edge, clipped so only the inner
+       half of the stroke lands. Without it the tile has no edge at all against
+       a dark Dock or a dark wallpaper. -->
+  <g clip-path="url(#tileClip)">
+    <path fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="6" d="M924 512C924 602.53 933.03 702.94 911.16 792.56C904.12 821.4 891.9 849.43 870.67 870.67C849.43 891.9 821.4 904.12 792.56 911.16C702.94 933.03 602.53 924 512 924C421.47 924 321.06 933.03 231.44 911.16C202.6 904.12 174.57 891.9 153.33 870.67C132.1 849.43 119.88 821.4 112.84 792.56C90.97 702.94 100 602.53 100 512C100 421.47 90.97 321.06 112.84 231.44C119.88 202.6 132.1 174.57 153.33 153.33C174.57 132.1 202.6 119.88 231.44 112.84C321.06 90.97 421.47 100 512 100C602.53 100 702.94 90.97 792.56 112.84C821.4 119.88 849.43 132.1 870.67 153.33C891.9 174.57 904.12 202.6 911.16 231.44C933.03 321.06 924 421.47 924 512Z"/>
+  </g>
+
+  <!-- The region, undimmed. -->
+  <rect x="256" y="256" width="512" height="512" fill="#0a84ff"/>
+
+  <!-- The selection's own frame. Inset by half its width so the outer edge is
+       the selection's edge. -->
+  <rect x="260" y="260" width="504" height="504" fill="none" stroke="#ffffff" stroke-opacity="0.92" stroke-width="8"/>
+
+  <!-- Four of the overlay's eight handles. Eight is what the overlay offers a
+       pointer and four is what sixteen pixels can hold; the corners are the
+       four that say which shape it is. -->
+  <g fill="#ffffff">
+    <rect x="184" y="184" width="144" height="144"/>
+    <rect x="696" y="184" width="144" height="144"/>
+    <rect x="184" y="696" width="144" height="144"/>
+    <rect x="696" y="696" width="144" height="144"/>
+  </g>
+</svg>

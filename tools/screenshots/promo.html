@@ -8,10 +8,14 @@
 
       Full bleed: the store asks for artwork with no padding and no white
       border, so the page is exactly the tile and the tile is exactly the
-      colour. `#0a84ff` is the accent the editor's toolbar and the settings
-      window already use for a pressed control, and the type stack is the one
-      `Editor.tsx` sets on its own chrome, so the tile is in the same two
-      materials as the product rather than in a third one invented for a store.
+      colour. `#1c1c1e` is the editor's own chrome and the type stack is the one
+      `Editor.tsx` sets on it, so the tile is in the same two materials as the
+      product rather than in a third one invented for a store.
+
+      The ground is dark rather than the accent blue, and that is the icon's
+      doing: the mark is a blue selection inside a dark square, so on a blue
+      tile the selection is the tile and only the handles survive. On this
+      ground the blue is the one saturated thing in the frame.
 
       Nothing here draws an interface. The icon is the extension's own file and
       the sentence is the description in its own `manifest.json`; a tile that
@@ -31,7 +35,7 @@
         width: 440px;
         height: 280px;
         padding: 0 40px;
-        background: #0a84ff;
+        background: #1c1c1e;
         color: #ffffff;
         font-family: system-ui, -apple-system, 'Helvetica Neue', sans-serif;
         display: flex;
@@ -41,10 +45,9 @@
 
       /*
         Drawn at 76 points from a 128-pixel file, so the icon is never enlarged
-        past its own resolution. Its artwork is a dark rounded square with
-        transparent padding, which is why the tile is not dark: on this blue it
-        reads as the mark it is, and on the app's own `#1c1c1e` it would
-        disappear into the background.
+        past its own resolution. The mark's own square is a shade lighter than
+        this ground, which is what keeps it a mark on a tile rather than a hole
+        in it.
       */
       .icon {
         width: 76px;

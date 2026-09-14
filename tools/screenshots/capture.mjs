@@ -36,6 +36,12 @@
  * at a fixed size. It draws no interface and invents no screen; it is the
  * extension's own icon, its own name and the description already in its own
  * manifest.
+ *
+ * `docs/images/icon-source.png` is the other exception, and is not part of the
+ * chain at all: it is the application icon, drawn from `icon-source.svg` by
+ * `icon.mjs`, which needs neither the dev server nor the demo page. It is run
+ * from here so that one command still makes everything in `docs/images`, and it
+ * is run first because every other icon in the repository is cut from it.
  */
 
 import { chromium } from 'playwright'
@@ -43,6 +49,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
+import { renderIcon } from './icon.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '../..')
@@ -116,6 +123,10 @@ async function main() {
   const browser = await chromium.launch({ headless: true })
   const written = []
   try {
+    // Not a screenshot, and nothing below depends on it. It shares the browser
+    // because one is already open, and nothing else.
+    written.push(await renderIcon(browser))
+
     const demo = await renderDemoPage(browser, SCENE, icon)
     const wide = await renderDemoPage(browser, STORE_SHOT, icon)
 

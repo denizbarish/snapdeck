@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "capture": "node capture.mjs",
+    "icon": "node icon.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
