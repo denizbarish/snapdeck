@@ -10,11 +10,11 @@ license = "MIT"
 repository = "https://github.com/denizbarish/snapdeck"
 
 [workspace.dependencies]
-# `macos_14_0` gates the whole `screenshot_manager` module, which holds
-# `SCScreenshotManager` and `CGImageExt::rgba_data`. No higher feature is
-# enabled: region capture uses `SCStreamConfiguration::with_source_rect`,
-# which is not version gated.
-screencapturekit = { version = "9.0.1", features = ["macos_14_0"] }
+# `macos_15_0` is what gates `SCRecordingOutput` and the two `SCStream`
+# methods that attach and finalise it; the features are cumulative
+# (`macos_15_0 = ["macos_14_4"]`, down to `macos_14_0`), so `SCScreenshotManager`
+# and `CGImageExt::rgba_data` stay open and the lock file does not move.
+screencapturekit = { version = "9.0.1", features = ["macos_15_0"] }
 core-graphics = "0.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,19 +1,24 @@
 pub mod permission;
+mod recording;
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use core_graphics::display::{CGDisplay, CGMainDisplayID};
 use core_graphics::window::{create_window_list, kCGNullWindowID, kCGWindowListOptionOnScreenOnly};
 use screencapturekit::error::SCStreamErrorCode;
 use screencapturekit::prelude::*;
+use screencapturekit::recording_output::{RecordingCallbacks, SCRecordingOutput};
 use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
 use screencapturekit::CGImage;
 
 use self::permission::{screen_capture_permission, PermissionState};
+use self::recording::{FrameCounter, FrameCounts, MacRecording};
 use crate::{
     error::CaptureError,
     types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo},
-    ScreenCapturer,
+    Recording, ScreenCapturer,
 };
 
 /// ScreenCaptureKit-backed capturer. Every capture path goes through
@@ -404,6 +409,62 @@ impl ScreenCapturer for MacCapturer {
             })
             .collect();
         Ok(sort_by_z_order(windows, &on_screen_z_order()))
+    }
+
+    fn record(
+        &self,
+        target: CaptureTarget,
+        output: &Path,
+    ) -> Result<Box<dyn Recording>, CaptureError> {
+        // 1. Before anything else: building a recording configuration panics
+        //    outright on macOS 14, and a panic is all a menu bar agent's user
+        //    would ever see of it.
+        if !SCRecordingOutput::is_available() {
+            return Err(recording::unsupported());
+        }
+        // 2. The target. A missing screen recording grant falls out here.
+        let resolved = resolve(target)?;
+        // 3. What the encoder is told, and the one channel a failed encode or
+        //    a full disk has back to the user.
+        let config =
+            recording::recording_output_config(output).ok_or_else(recording::unsupported)?;
+        let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let reported = Arc::clone(&failure);
+        let movie = SCRecordingOutput::new_with_delegate(
+            &config,
+            RecordingCallbacks::new().on_fail(move |error| {
+                *reported.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
+            }),
+        )
+        .ok_or_else(recording::unsupported)?;
+        // 4. The stream itself.
+        let mut stream = SCStream::new(
+            &resolved.filter,
+            &recording::recording_config(resolved.width, resolved.height, resolved.source_rect),
+        );
+        // 5. The counter. A stream that refuses to take one still records;
+        //    the count is a diagnostic, not a precondition.
+        let counts = Arc::new(FrameCounts::default());
+        let handler = stream.add_output_handler(
+            FrameCounter::new(Arc::clone(&counts)),
+            SCStreamOutputType::Screen,
+        );
+        // 6. The movie. Until `tear_down` removes this, nothing is finalised.
+        stream.add_recording_output(&movie).map_err(map_err)?;
+        let mut recording = MacRecording {
+            stream,
+            movie,
+            handler,
+            counts,
+            failure,
+            path: output.to_path_buf(),
+        };
+        // 7. Start, and leave nothing half-assembled behind if it refuses.
+        if let Err(error) = recording.stream.start_capture() {
+            let _ = recording::tear_down(&mut recording);
+            return Err(map_err(error));
+        }
+        Ok(Box::new(recording))
     }
 
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError> {
