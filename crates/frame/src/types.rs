@@ -149,6 +149,16 @@ pub enum CaptureTarget {
     Region(Rect),
 }
 
+/// Which sound a recording takes in besides the picture.
+///
+/// `Default` is silence, which is what every recording was before sound
+/// existed: a caller that says nothing about sound gets the Stage 1 movie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AudioSources {
+    /// What the Mac is playing, from every process but this one.
+    pub system: bool,
+}
+
 /// What a running recording has taken in so far.
 ///
 /// Counts and nothing else. The frames themselves never reach this process's

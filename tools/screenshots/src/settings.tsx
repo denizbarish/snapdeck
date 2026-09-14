@@ -38,6 +38,7 @@ const VIEW: SettingsView = {
     openEditorAfterCapture: true,
     checkForUpdatesAtLaunch: false,
     bridgeToken: FAKE_TOKEN,
+    recordSystemAudio: false,
   },
   // The same three the form holds, so the window shows no warning about a
   // keyboard that disagrees with it. A picture of a warning would be a picture

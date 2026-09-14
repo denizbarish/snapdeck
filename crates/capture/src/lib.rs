@@ -10,7 +10,7 @@ pub use snapdeck_frame::{error, types};
 pub mod macos;
 
 pub use snapdeck_frame::{
-    CaptureError, CaptureTarget, DisplayInfo, Frame, PixelFormat, RecordingProgress,
+    AudioSources, CaptureError, CaptureTarget, DisplayInfo, Frame, PixelFormat, RecordingProgress,
     RecordingSummary, Rect, WindowInfo,
 };
 
@@ -54,15 +54,6 @@ pub trait ScreenCapturer {
     /// Blocks the calling thread; see the trait documentation.
     fn capture(&self, target: CaptureTarget) -> Result<Frame, CaptureError>;
 
-    /// Starts recording `target` into `output`, which must not already exist.
-    ///
-    /// Blocks the calling thread for a platform round trip; see the trait
-    /// documentation.
-    ///
-    /// A default body rather than a required method, and that is the whole of
-    /// why the v1 design's `stream()` became this: every existing
-    /// implementation, `mock.rs` included, compiles unchanged, and a platform
-    /// with no recording says so out loud instead of doing nothing quietly.
     /// Whether this capturer can record at all on this machine.
     ///
     /// Asked before a recording is offered, so the answer can be a disabled
@@ -74,12 +65,24 @@ pub trait ScreenCapturer {
         false
     }
 
+    /// Starts recording `target` into `output`, which must not already exist.
+    ///
+    /// Blocks the calling thread for a platform round trip; see the trait
+    /// documentation.
+    ///
+    /// A default body rather than a required method, and that is the whole of
+    /// why the v1 design's `stream()` became this: every existing
+    /// implementation, `mock.rs` included, compiles unchanged, and a platform
+    /// with no recording says so out loud instead of doing nothing quietly.
+    ///
+    /// `audio` says which sound goes into the same file as the picture.
     fn record(
         &self,
         target: CaptureTarget,
+        audio: AudioSources,
         output: &Path,
     ) -> Result<Box<dyn Recording>, CaptureError> {
-        let _ = (target, output);
+        let _ = (target, audio, output);
         Err(CaptureError::Unsupported(
             "this platform cannot record the screen".to_string(),
         ))
@@ -149,7 +152,11 @@ mod tests {
 
         // `Box<dyn Recording>` is not `Debug`, so the success arm is named
         // here rather than unwrapped.
-        match capturer.record(CaptureTarget::Display(1), Path::new("/tmp/snapdeck.mp4")) {
+        match capturer.record(
+            CaptureTarget::Display(1),
+            AudioSources::default(),
+            Path::new("/tmp/snapdeck.mp4"),
+        ) {
             Err(CaptureError::Unsupported(message)) => assert!(
                 message.contains("record"),
                 "the refusal has to name what was refused, got {message:?}"

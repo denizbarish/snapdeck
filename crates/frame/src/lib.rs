@@ -10,6 +10,6 @@ pub mod types;
 
 pub use error::CaptureError;
 pub use types::{
-    CaptureTarget, DisplayInfo, Frame, PixelFormat, RecordingProgress, RecordingSummary, Rect,
-    WindowInfo,
+    AudioSources, CaptureTarget, DisplayInfo, Frame, PixelFormat, RecordingProgress,
+    RecordingSummary, Rect, WindowInfo,
 };

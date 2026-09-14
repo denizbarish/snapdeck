@@ -55,6 +55,8 @@ export type Settings = {
    * Rust writes back its own copy whatever this says.
    */
   bridgeToken: string
+  /** Whether a recording takes in what the Mac is playing. */
+  recordSystemAudio: boolean
 }
 
 /** Mirrors `commands::BridgeStatus`. */
@@ -459,6 +461,14 @@ export function SettingsWindow(): JSX.Element {
           label="Launch Snapdeck at login"
           checked={settings.launchAtLogin}
           onChange={(launchAtLogin) => update({ launchAtLogin })}
+        />
+      </Section>
+
+      <Section title="Recording">
+        <Check
+          label="Record system audio"
+          checked={settings.recordSystemAudio}
+          onChange={(recordSystemAudio) => update({ recordSystemAudio })}
         />
       </Section>
 

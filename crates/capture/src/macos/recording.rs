@@ -16,7 +16,7 @@ use screencapturekit::recording_output::{
     SCRecordingOutputFileType,
 };
 
-use crate::{CaptureError, Recording, RecordingProgress, RecordingSummary};
+use crate::{AudioSources, CaptureError, Recording, RecordingProgress, RecordingSummary};
 
 /// Frames per second a recording is capped at.
 ///
@@ -33,10 +33,19 @@ pub const RECORDING_FPS: u32 = 30;
 ///
 /// The cursor is **on**, which is the opposite of `capture()`. In a still
 /// screenshot the pointer is clutter; in a screen recording it is the content.
+///
+/// Sound is two flags on this same configuration and nothing more. With
+/// `audio.system` on, ScreenCaptureKit takes in what the Mac is playing and
+/// `SCRecordingOutput` writes it into the same movie. This process's own sound
+/// is always left out, which changes nothing while there is no sound. No
+/// output handler is attached for it: `tear_down` only gets the movie
+/// finalised when no handler is left on the stream, and a sound handler would
+/// be one more thing standing in the way of that.
 pub(crate) fn recording_config(
     width: u32,
     height: u32,
     source_rect: Option<CGRect>,
+    audio: AudioSources,
 ) -> SCStreamConfiguration {
     let config = SCStreamConfiguration::new();
     let config = match source_rect {
@@ -48,6 +57,8 @@ pub(crate) fn recording_config(
         .with_height(height)
         .with_fps(RECORDING_FPS)
         .with_shows_cursor(true)
+        .with_captures_audio(audio.system)
+        .with_excludes_current_process_audio(true)
 }
 
 /// What the encoder is told, which is all three things it accepts.
@@ -179,7 +190,6 @@ impl SCStreamOutputTrait for FrameCounter {
     }
 }
 
-/// A live ScreenCaptureKit recording.
 /// Which failure a stopped recording reports, when there is more than one.
 ///
 /// The encoder's own words win. It is the half of this that knows why: a disk
@@ -190,6 +200,7 @@ fn failure_to_report(encoder: Option<String>, torn_down: Result<(), String>) -> 
     encoder.or_else(|| torn_down.err())
 }
 
+/// A live ScreenCaptureKit recording.
 pub struct MacRecording {
     /// The stream the movie and the counter are attached to.
     pub(super) stream: SCStream,
@@ -280,7 +291,9 @@ impl Recording for MacRecording {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::process::Command;
     use std::rc::Rc;
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use core_graphics::display::CGMainDisplayID;
@@ -521,7 +534,7 @@ mod tests {
     /// C6
     #[test]
     fn the_stream_configuration_carries_the_three_fixed_decisions() {
-        let config = recording_config(800, 600, None);
+        let config = recording_config(800, 600, None, AudioSources::default());
         assert_eq!(config.width(), 800);
         assert_eq!(config.height(), 600);
         assert_eq!(config.fps(), 30);
@@ -540,10 +553,10 @@ mod tests {
             },
         };
         assert_eq!(
-            recording_config(640, 480, Some(source_rect)).source_rect(),
+            recording_config(640, 480, Some(source_rect), AudioSources::default()).source_rect(),
             source_rect
         );
-        let uncropped = recording_config(800, 600, None).source_rect();
+        let uncropped = recording_config(800, 600, None, AudioSources::default()).source_rect();
         assert_eq!(uncropped.size.width, 0.0);
         assert_eq!(uncropped.size.height, 0.0);
     }
@@ -631,7 +644,11 @@ mod tests {
         let directory = scratch_directory();
         let path = directory.join("recording.mp4");
         let recording = MacCapturer::new()
-            .record(CaptureTarget::Display(unsafe { CGMainDisplayID() }), &path)
+            .record(
+                CaptureTarget::Display(unsafe { CGMainDisplayID() }),
+                AudioSources::default(),
+                &path,
+            )
             .expect("the primary display can be recorded");
         std::thread::sleep(Duration::from_secs(2));
         let summary = recording.stop().expect("the recording stops");
@@ -668,5 +685,293 @@ mod tests {
         );
         // And a recording that ended cleanly reports nothing at all.
         assert_eq!(failure_to_report(None, Ok(())), None);
+    }
+
+    /// Everything in the capturer's source that is not a test.
+    fn capturer_production_source() -> &'static str {
+        let end = CAPTURER_SOURCE
+            .find("#[cfg(test)]")
+            .expect("the test module marker is in the capturer's source");
+        &CAPTURER_SOURCE[..end]
+    }
+
+    /// AU1
+    #[test]
+    fn a_recording_asked_for_system_audio_takes_it_in_and_leaves_its_own_out() {
+        let config = recording_config(800, 600, None, AudioSources { system: true });
+        assert!(
+            config.captures_audio(),
+            "system audio was asked for and the stream does not take it in"
+        );
+        assert!(
+            config.excludes_current_process_audio(),
+            "the stream would record Snapdeck's own sound"
+        );
+        // Adding sound did not move any of the picture's decisions.
+        assert_eq!(config.width(), 800);
+        assert_eq!(config.height(), 600);
+        assert_eq!(config.fps(), 30);
+        assert!(config.shows_cursor());
+    }
+
+    /// AU2
+    #[test]
+    fn a_recording_asked_for_silence_stays_silent() {
+        let config = recording_config(800, 600, None, AudioSources { system: false });
+        assert!(
+            !config.captures_audio(),
+            "silence was asked for and the stream takes in sound"
+        );
+        assert!(config.excludes_current_process_audio());
+    }
+
+    /// AU3
+    #[test]
+    fn a_caller_that_says_nothing_about_sound_gets_a_silent_recording() {
+        assert_eq!(AudioSources::default(), AudioSources { system: false });
+    }
+
+    /// AU4
+    #[test]
+    fn record_hands_the_callers_sound_to_the_stream_configuration() {
+        let body = capturer_body("fn record(");
+        let call = body
+            .split_once("recording_config(")
+            .expect("record never builds a stream configuration, so this claim reads nothing")
+            .1;
+        let mut depth = 0usize;
+        let end = call
+            .char_indices()
+            .find(|&(_, character)| match character {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            })
+            .map(|(at, _)| at)
+            .expect("the recording_config call closes");
+        let arguments = &call[..end];
+        assert!(
+            arguments
+                .split(',')
+                .any(|argument| argument.trim() == "audio"),
+            "record does not pass the caller's sound to the stream configuration: {arguments}"
+        );
+        assert!(
+            !body.contains("AudioSources::default()"),
+            "record replaces the caller's sound with silence"
+        );
+    }
+
+    /// AU5
+    #[test]
+    fn no_sound_handler_is_attached_to_a_recording_stream() {
+        // Built from halves so that this test is not the very thing it goes
+        // looking for.
+        let forbidden = [
+            concat!("SCStreamOutputType::", "Audio"),
+            concat!("SCStreamOutputType::", "Microphone"),
+        ];
+        for (file, source) in [
+            ("recording.rs", production_source()),
+            ("mod.rs", capturer_production_source()),
+        ] {
+            let code: Vec<&str> = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            assert!(
+                code.len() > 20,
+                "the production source of {file} did not slice, so this claim reads nothing"
+            );
+            for line in code {
+                for handler in forbidden {
+                    assert!(
+                        !line.contains(handler),
+                        "{file} attaches a sound handler, and a handler left on the stream skips the wait that finalises the movie: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where a `hdlr` box names its handler, counted from the start of its
+    /// tag: the tag itself, version and flags, and `pre_defined` are four
+    /// bytes each, and the handler type is the four after them.
+    const HANDLER_TYPE_AFTER_TAG: usize = 12;
+
+    /// How many sound tracks a movie carries: every `hdlr` box whose handler
+    /// type is `soun` is one.
+    fn sound_track_count(movie: &[u8]) -> usize {
+        movie
+            .windows(4)
+            .enumerate()
+            .filter(|(at, tag)| {
+                *tag == b"hdlr"
+                    && movie.get(at + HANDLER_TYPE_AFTER_TAG..at + HANDLER_TYPE_AFTER_TAG + 4)
+                        == Some(b"soun".as_slice())
+            })
+            .count()
+    }
+
+    /// A `hdlr` box as an MP4 writer lays it out: size, tag, version and
+    /// flags, `pre_defined`, handler type, three reserved words, empty name.
+    fn handler_box(handler_type: &[u8; 4]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"hdlr");
+        body.extend_from_slice(&[0; 4]);
+        body.extend_from_slice(&[0; 4]);
+        body.extend_from_slice(handler_type);
+        body.extend_from_slice(&[0; 12]);
+        body.push(0);
+        let size = u32::try_from(body.len() + 4).expect("a handler box fits in its size field");
+        [size.to_be_bytes().to_vec(), body].concat()
+    }
+
+    /// HD1
+    #[test]
+    fn the_sound_track_counter_counts_sound_handlers_and_nothing_else() {
+        assert_eq!(sound_track_count(&handler_box(b"soun")), 1);
+        assert_eq!(sound_track_count(&handler_box(b"vide")), 0);
+        let movie = [
+            handler_box(b"soun"),
+            handler_box(b"soun"),
+            handler_box(b"vide"),
+        ]
+        .concat();
+        assert_eq!(sound_track_count(&movie), 2);
+        // A video handler with `soun` written eight bytes after the tag, in
+        // `pre_defined`, where no handler type is.
+        let mut malformed = handler_box(b"vide");
+        malformed[4 + 8..4 + 12].copy_from_slice(b"soun");
+        assert_eq!(sound_track_count(&malformed), 0);
+    }
+
+    /// A sound every Mac ships with, played while C12 records.
+    const TEST_SOUND: &str = "/System/Library/Sounds/Glass.aiff";
+
+    /// The system's own command line player.
+    const PLAYER: &str = "/usr/bin/afplay";
+
+    /// How often C12 starts the sound again, so it is playing the whole time.
+    const SOUND_INTERVAL: Duration = Duration::from_millis(500);
+
+    /// How long each half of a C12 recording runs: the progress is read after
+    /// the first, the recording stops after the second.
+    const HALF_RECORDING: Duration = Duration::from_secs(2);
+
+    /// What C12 read off one recording before its file was removed.
+    struct SoundedRecording {
+        frames_mid: u64,
+        summary: Result<RecordingSummary, CaptureError>,
+        movie: std::io::Result<Vec<u8>>,
+    }
+
+    /// Records the primary display for two halves while the test sound plays
+    /// over and over, and removes the file before anything is claimed.
+    fn record_while_a_sound_plays(audio: AudioSources) -> SoundedRecording {
+        let directory = scratch_directory();
+        let path = directory.join("recording.mp4");
+        let recording = MacCapturer::new()
+            .record(
+                CaptureTarget::Display(unsafe { CGMainDisplayID() }),
+                audio,
+                &path,
+            )
+            .expect("the primary display can be recorded");
+        let playing = Arc::new(AtomicBool::new(true));
+        let player = {
+            let playing = Arc::clone(&playing);
+            std::thread::spawn(move || {
+                let mut players = Vec::new();
+                while playing.load(Ordering::Relaxed) {
+                    if let Ok(child) = Command::new(PLAYER).arg(TEST_SOUND).spawn() {
+                        players.push(child);
+                    }
+                    std::thread::sleep(SOUND_INTERVAL);
+                }
+                // Every player is waited for, so none outlives the test.
+                for mut child in players {
+                    let _ = child.wait();
+                }
+            })
+        };
+        std::thread::sleep(HALF_RECORDING);
+        let frames_mid = recording.progress().frames;
+        std::thread::sleep(HALF_RECORDING);
+        let summary = recording.stop();
+        playing.store(false, Ordering::Relaxed);
+        let joined = player.join();
+        let movie = std::fs::read(&path);
+        // Cleaned up before the claims, so a failing claim still leaves the
+        // user's temporary directory as it found it.
+        std::fs::remove_dir_all(&directory).expect("the scratch directory can be removed");
+        assert!(joined.is_ok(), "the sound player thread panicked");
+        SoundedRecording {
+            frames_mid,
+            summary,
+            movie,
+        }
+    }
+
+    /// C12
+    #[test]
+    #[ignore = "records the real screen and sound, so it needs the screen and system audio recording grant"]
+    fn a_real_recording_takes_in_system_audio_only_when_asked() {
+        assert!(
+            SCRecordingOutput::is_available(),
+            "this test needs macOS 15.0 or later; a silently skipped test is a test that does not exist"
+        );
+        assert!(
+            Path::new(TEST_SOUND).exists(),
+            "{TEST_SOUND} is not on this machine, so nothing would be playing; a silent test of sound is a test that does not exist"
+        );
+        let runs = [
+            (
+                "system audio",
+                record_while_a_sound_plays(AudioSources { system: true }),
+            ),
+            (
+                "silence",
+                record_while_a_sound_plays(AudioSources::default()),
+            ),
+        ];
+        let mut sound_tracks = Vec::new();
+        for (name, run) in runs {
+            // Started first: a recording that never ran proves nothing about
+            // what it would have taken in.
+            assert!(
+                run.frames_mid > 0,
+                "the {name} recording had delivered nothing two seconds in"
+            );
+            let summary = run.summary.expect("the recording stops");
+            let movie = run.movie.expect("the recording was written");
+            let tracks = sound_track_count(&movie);
+            eprintln!(
+                "C12 {name}: frames_mid={} frames={} bytes={} sound_tracks={tracks}",
+                run.frames_mid, summary.frames, summary.bytes
+            );
+            assert!(summary.frames > 0, "the {name} stream delivered nothing");
+            assert!(summary.bytes > 0, "the {name} recording is empty");
+            assert!(
+                has_moov_atom(&movie),
+                "the {name} movie has no moov atom, so no player will open it"
+            );
+            sound_tracks.push(tracks);
+        }
+        assert_eq!(
+            sound_tracks[0], 1,
+            "the recording asked for system audio does not carry one sound track"
+        );
+        assert_eq!(
+            sound_tracks[1], 0,
+            "the recording asked for silence carries a sound track"
+        );
     }
 }

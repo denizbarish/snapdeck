@@ -333,10 +333,11 @@ pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String>
 
     // 7. From here on every way out that is not a started recording takes
     // both names back, so no placeholder stays in the user's folder.
-    let recording = match state
-        .capturer
-        .record(CaptureTarget::Region(global), &files.temporary)
-    {
+    let recording = match state.capturer.record(
+        CaptureTarget::Region(global),
+        snapdeck_capture::AudioSources::default(),
+        &files.temporary,
+    ) {
         Ok(recording) => recording,
         Err(error) => {
             abandon(&files);

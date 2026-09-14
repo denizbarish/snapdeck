@@ -17,7 +17,7 @@ use self::permission::{screen_capture_permission, PermissionState};
 use self::recording::{FrameCounter, FrameCounts, MacRecording};
 use crate::{
     error::CaptureError,
-    types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo},
+    types::{AudioSources, CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo},
     Recording, ScreenCapturer,
 };
 
@@ -418,6 +418,7 @@ impl ScreenCapturer for MacCapturer {
     fn record(
         &self,
         target: CaptureTarget,
+        audio: AudioSources,
         output: &Path,
     ) -> Result<Box<dyn Recording>, CaptureError> {
         // 1. Before anything else: building a recording configuration panics
@@ -444,7 +445,12 @@ impl ScreenCapturer for MacCapturer {
         // 4. The stream itself.
         let mut stream = SCStream::new(
             &resolved.filter,
-            &recording::recording_config(resolved.width, resolved.height, resolved.source_rect),
+            &recording::recording_config(
+                resolved.width,
+                resolved.height,
+                resolved.source_rect,
+                audio,
+            ),
         );
         // 5. The counter. A stream that refuses to take one still records;
         //    the count is a diagnostic, not a precondition.
