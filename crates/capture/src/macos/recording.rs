@@ -74,6 +74,10 @@ pub(crate) fn unsupported() -> CaptureError {
 /// A live `SCStream` is not something a unit test can arrange, and the claim
 /// worth testing here is not the FFI, it is the order.
 pub(crate) trait RecordingTeardown {
+    /// Marks the recording as taken apart, and answers `true` only the first
+    /// time. `stop` and `cancel` consume the recording and its `Drop` runs
+    /// straight after them, so without this every stop would be two.
+    fn claim_teardown(&mut self) -> bool;
     /// Detaches the frame counter. `Ok` when there was nothing to detach.
     fn detach_frame_handler(&mut self) -> Result<(), String>;
     /// Removes the recording output, which is what finalises the movie.
@@ -105,10 +109,24 @@ pub(crate) trait RecordingTeardown {
 /// A failed detach does not skip the removal. The movie has to be finalised
 /// even when the handler will not come off; the worst a stuck handler costs is
 /// a few discarded samples, and the alternative costs the whole recording.
+///
+/// Once per recording. A second call answers `Ok` and touches nothing: the
+/// output is already gone, and whatever the first call said is what counted.
 pub(crate) fn tear_down<T: RecordingTeardown>(teardown: &mut T) -> Result<(), String> {
+    if !teardown.claim_teardown() {
+        return Ok(());
+    }
     let detached = teardown.detach_frame_handler();
     teardown.remove_recording_output()?;
     detached
+}
+
+/// Takes apart a recording that is going away, for its `Drop`.
+///
+/// Nobody is left to hear a failure, so it is not reported. What matters is
+/// that the stream stops writing into a file nobody will ever rename.
+fn release<T: RecordingTeardown>(teardown: &mut T) {
+    let _ = tear_down(teardown);
 }
 
 /// What the stream has delivered, shared between the handler that counts and
@@ -187,9 +205,25 @@ pub struct MacRecording {
     pub(super) failure: Arc<Mutex<Option<String>>>,
     /// The file this was told to write, which is never a name it chose.
     pub(super) path: PathBuf,
+    /// Whether `tear_down` has run, so `Drop` after `stop` or `cancel` does not
+    /// run it again.
+    pub(super) torn_down: bool,
+}
+
+/// A safety net, not the way a recording ends. A recording dropped without
+/// `stop` or `cancel`, by a `?`, a panic or a forgotten early return in whoever
+/// held it, would otherwise leave its stream capturing into a hidden file.
+impl Drop for MacRecording {
+    fn drop(&mut self) {
+        release(self);
+    }
 }
 
 impl RecordingTeardown for MacRecording {
+    fn claim_teardown(&mut self) -> bool {
+        !std::mem::replace(&mut self.torn_down, true)
+    }
+
     fn detach_frame_handler(&mut self) -> Result<(), String> {
         let Some(handler) = self.handler.take() else {
             return Ok(());
@@ -245,6 +279,8 @@ impl Recording for MacRecording {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use core_graphics::display::CGMainDisplayID;
@@ -305,9 +341,14 @@ mod tests {
         calls: Vec<&'static str>,
         detach_error: Option<String>,
         removal_error: Option<String>,
+        torn_down: bool,
     }
 
     impl RecordingTeardown for FakeTeardown {
+        fn claim_teardown(&mut self) -> bool {
+            !std::mem::replace(&mut self.torn_down, true)
+        }
+
         fn detach_frame_handler(&mut self) -> Result<(), String> {
             self.calls.push("detach_frame_handler");
             match &self.detach_error {
@@ -366,6 +407,82 @@ mod tests {
         );
         assert_eq!(
             teardown.calls,
+            vec!["detach_frame_handler", "remove_recording_output"]
+        );
+    }
+
+    /// A teardown owned the way `MacRecording` owns its stream: dropping it
+    /// runs the same `release` `MacRecording`'s `Drop` runs, and the calls land
+    /// in a log that outlives it.
+    struct DroppedTeardown {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        torn_down: bool,
+    }
+
+    impl RecordingTeardown for DroppedTeardown {
+        fn claim_teardown(&mut self) -> bool {
+            !std::mem::replace(&mut self.torn_down, true)
+        }
+
+        fn detach_frame_handler(&mut self) -> Result<(), String> {
+            self.calls.borrow_mut().push("detach_frame_handler");
+            Ok(())
+        }
+
+        fn remove_recording_output(&mut self) -> Result<(), String> {
+            self.calls.borrow_mut().push("remove_recording_output");
+            Ok(())
+        }
+    }
+
+    impl Drop for DroppedTeardown {
+        fn drop(&mut self) {
+            release(self);
+        }
+    }
+
+    /// D1. A recording dropped without `stop` or `cancel`, by a `?`, a panic or
+    /// an early return in whoever held it, is taken apart exactly once, and
+    /// `MacRecording` really is dropped that way.
+    #[test]
+    fn a_recording_nobody_took_apart_is_taken_apart_once_when_dropped() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        drop(DroppedTeardown {
+            calls: Rc::clone(&calls),
+            torn_down: false,
+        });
+        assert_eq!(
+            *calls.borrow(),
+            vec!["detach_frame_handler", "remove_recording_output"]
+        );
+
+        let drop_impl = production_source()
+            .split_once("impl Drop for MacRecording")
+            .expect("a dropped MacRecording takes its stream apart")
+            .1
+            .split_once("\n}\n")
+            .expect("the Drop impl ends at a closing brace in column zero")
+            .0;
+        assert!(
+            drop_impl.contains("release(self)"),
+            "MacRecording's Drop has to release the stream"
+        );
+    }
+
+    /// D2. `stop` and `cancel` consume the recording, so its `Drop` runs right
+    /// after they took it apart; a second removal of an output that is already
+    /// gone is not a teardown.
+    #[test]
+    fn a_recording_already_taken_apart_is_not_taken_apart_again_when_dropped() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut recording = DroppedTeardown {
+            calls: Rc::clone(&calls),
+            torn_down: false,
+        };
+        tear_down(&mut recording).expect("both steps succeed");
+        drop(recording);
+        assert_eq!(
+            *calls.borrow(),
             vec!["detach_frame_handler", "remove_recording_output"]
         );
     }

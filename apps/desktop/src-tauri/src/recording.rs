@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use snapdeck_capture::{CaptureError, CaptureTarget, RecordingSummary, Rect, ScreenCapturer};
+use snapdeck_capture::{
+    CaptureError, CaptureTarget, Recording, RecordingSummary, Rect, ScreenCapturer,
+};
 use tauri::{AppHandle, Manager};
 
 use crate::commands::{dismiss_overlays_and_wait, locate_selection};
@@ -342,26 +344,20 @@ pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String>
         }
     };
 
-    // 8. `begin_recording` consumes the session it refuses, recording and all,
-    // and a recording dropped rather than cancelled is a stream nobody took
-    // apart. So the ordinary way to get here, a Record item clicked while a
-    // recording runs, is caught first, while this one can still be cancelled.
+    // 8. A running recording is looked for before a session is built, and the
+    // claim still refuses the one that races past the look. Either way this
+    // recording is cancelled and its files are taken back, because a refused
+    // session is handed back with its stream still capturing.
     if state.is_recording() {
-        if let Some(complaint) = discard(recording.cancel(), &files) {
-            report_failure(app, &complaint);
-        }
-        return Err(ALREADY_RECORDING.to_string());
+        return Err(refuse(app, recording, &files));
     }
     let session = RecordingSession {
         recording,
-        files: files.clone(),
+        files,
         started_at: Instant::now(),
     };
-    if !state.begin_recording(session) {
-        // Two starts landed between the check and the claim. The refused
-        // session is gone, so its files are all that is left to take back.
-        abandon(&files);
-        return Err(ALREADY_RECORDING.to_string());
+    if let Err(refused) = state.begin_recording(session) {
+        return Err(refuse(app, refused.recording, &refused.files));
     }
 
     // 9.
@@ -369,6 +365,15 @@ pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String>
     tray::set_recording_items_enabled(app, true);
     spawn_counter(app);
     Ok(())
+}
+
+/// Cancels a recording that could not claim the slot, takes its files back,
+/// and answers with what the start is refused with.
+fn refuse(app: &AppHandle, recording: Box<dyn Recording>, files: &RecordingFiles) -> String {
+    if let Some(complaint) = discard(recording.cancel(), files) {
+        report_failure(app, &complaint);
+    }
+    ALREADY_RECORDING.to_string()
 }
 
 /// A length in points as the pixels a recording of it is made of.
@@ -389,7 +394,11 @@ fn spawn_counter(app: &AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(TICK);
         let elapsed = app.state::<AppState>().recording_elapsed();
-        tray::show_recording(&app, elapsed);
+        // The failure wins the title: it has to be read before it is cleared,
+        // and the elapsed time comes back once something clears it.
+        if !tray::is_showing_failure(&app) {
+            tray::show_recording(&app, elapsed);
+        }
         if elapsed.is_none() {
             return;
         }
@@ -446,10 +455,13 @@ fn stop_running(app: &AppHandle) {
     if let Some(path) = &finished.path {
         recents::record(app, path);
     }
+    // Quiet before the report, because the failure wins the title and quieting
+    // it afterwards would wipe the marker the user has to see.
+    tray::show_recording(app, None);
+    tray::set_recording_items_enabled(app, false);
     if let Some(complaint) = &finished.complaint {
         report_failure(app, complaint);
     }
-    clear_recording_from_tray(app);
 }
 
 /// Cancels the running recording on the calling thread.
@@ -458,16 +470,13 @@ fn cancel_running(app: &AppHandle) {
         return;
     };
     // Nothing goes into the recent captures: there is no movie.
-    if let Some(complaint) = discard(session.recording.cancel(), &session.files) {
-        report_failure(app, &complaint);
-    }
-    clear_recording_from_tray(app);
-}
-
-/// Returns the menu bar to how it is when nothing is recording.
-fn clear_recording_from_tray(app: &AppHandle) {
+    let complaint = discard(session.recording.cancel(), &session.files);
+    // Quiet before the report, for `stop_running`'s reason.
     tray::show_recording(app, None);
     tray::set_recording_items_enabled(app, false);
+    if let Some(complaint) = complaint {
+        report_failure(app, &complaint);
+    }
 }
 
 #[cfg(test)]
@@ -790,19 +799,25 @@ mod tests {
         assert!(!files.final_path.exists(), "and the placeholder goes too");
     }
 
-    /// The body of `start`, from its signature to the brace that closes it.
-    fn start_body() -> &'static str {
+    /// The body of the production function `signature` opens, from the
+    /// signature to the brace that closes it.
+    fn body_of(signature: &str) -> &'static str {
         const SOURCE: &str = include_str!("recording.rs");
         SOURCE
             .split("#[cfg(test)]")
             .next()
             .expect("a split yields at least one piece")
-            .split_once("pub fn start(")
-            .expect("`start` is in this file")
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("`{signature}` is in this file"))
             .1
             .split_once("\n}\n")
-            .expect("`start` ends at a closing brace in column zero")
+            .unwrap_or_else(|| panic!("`{signature}` ends at a closing brace in column zero"))
             .0
+    }
+
+    /// The body of `start`.
+    fn start_body() -> &'static str {
+        body_of("pub fn start(")
     }
 
     /// W4. A recording takes the screen again, so an overlay still up would be
@@ -825,5 +840,42 @@ mod tests {
     #[test]
     fn the_menu_bar_counter_is_redrawn_once_a_second() {
         assert_eq!(TICK, std::time::Duration::from_millis(1000));
+    }
+
+    /// W6. The failure wins the menu bar title. Quieting the title after the
+    /// report would wipe the marker the user has to see; both calls are one line
+    /// each and swapping them compiles.
+    #[test]
+    fn the_menu_bar_is_quiet_before_a_failed_stop_or_cancel_is_reported() {
+        for signature in ["fn stop_running(", "fn cancel_running("] {
+            let body = body_of(signature);
+            let quiet = body
+                .find("show_recording(app, None)")
+                .unwrap_or_else(|| panic!("`{signature}` has to quiet the menu bar"));
+            let report = body
+                .find("report_failure(")
+                .unwrap_or_else(|| panic!("`{signature}` has to report a failure"));
+            assert!(
+                quiet < report,
+                "`{signature}` has to quiet the menu bar before it reports a failure"
+            );
+        }
+    }
+
+    /// W7. The counter redraws the same title a failure's marker claims, once a
+    /// second, so without the check the marker lasts at most one tick.
+    #[test]
+    fn the_counter_does_not_write_over_a_failure_in_the_menu_bar() {
+        let body = body_of("fn spawn_counter(");
+        let check = body
+            .find("is_showing_failure(")
+            .expect("the counter has to ask whether a failure is on show");
+        let write = body
+            .find("show_recording(")
+            .expect("the counter writes the elapsed time");
+        assert!(
+            check < write,
+            "the counter has to ask before it writes, not after"
+        );
     }
 }

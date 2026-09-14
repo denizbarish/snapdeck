@@ -462,6 +462,7 @@ impl ScreenCapturer for MacCapturer {
             counts,
             failure,
             path: output.to_path_buf(),
+            torn_down: false,
         };
         // 7. Start, and leave nothing half-assembled behind if it refuses.
         if let Err(error) = recording.stream.start_capture() {

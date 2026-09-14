@@ -397,19 +397,23 @@ impl AppState {
 
 /// The single recording slot.
 impl AppState {
-    /// Claims the single recording slot, or answers `false` when one is
-    /// already running and leaves the caller's session untouched.
+    /// Claims the single recording slot, or hands the session back when one
+    /// is already running.
+    ///
+    /// Handed back rather than dropped: the session holds a stream that is
+    /// already capturing, and only the caller can cancel it and take its files
+    /// away.
     ///
     /// One at a time for the reason `begin_capture` is: two recordings share
     /// one menu bar title, one Stop item and one save folder, and the second
     /// one to start would be a recording the user cannot stop.
-    pub fn begin_recording(&self, session: RecordingSession) -> bool {
+    pub fn begin_recording(&self, session: RecordingSession) -> Result<(), RecordingSession> {
         let mut slot = self.recording_lock();
         if slot.is_some() {
-            return false;
+            return Err(session);
         }
         *slot = Some(session);
-        true
+        Ok(())
     }
 
     /// Takes the running recording out, or `None` when there is none.
@@ -515,12 +519,16 @@ mod tests {
     fn a_second_recording_is_refused_while_the_first_one_runs() {
         let state = AppState::new();
         assert!(
-            state.begin_recording(session("First")),
+            state.begin_recording(session("First")).is_ok(),
             "the first recording claims the slot"
         );
-        assert!(
-            !state.begin_recording(session("Second")),
-            "a second recording would share one Stop item with the first"
+        let Err(refused) = state.begin_recording(session("Second")) else {
+            panic!("a second recording would share one Stop item with the first");
+        };
+        assert_eq!(
+            refused.files.final_path,
+            PathBuf::from("/Movies/Second.mp4"),
+            "the refused session comes back, because only its caller can cancel it"
         );
 
         let running = state
@@ -532,7 +540,7 @@ mod tests {
             "the refused recording must not have replaced the running one"
         );
         assert!(
-            state.begin_recording(session("Third")),
+            state.begin_recording(session("Third")).is_ok(),
             "the slot is free once the recording has been taken out"
         );
     }
@@ -548,7 +556,7 @@ mod tests {
             "there is no elapsed time to put in the menu bar"
         );
 
-        assert!(state.begin_recording(session("Running")));
+        assert!(state.begin_recording(session("Running")).is_ok());
         assert!(state.is_recording());
         assert!(
             state.recording_elapsed().is_some(),
@@ -564,7 +572,7 @@ mod tests {
     #[test]
     fn taking_the_recording_twice_finds_nothing_the_second_time() {
         let state = AppState::new();
-        assert!(state.begin_recording(session("Once")));
+        assert!(state.begin_recording(session("Once")).is_ok());
         assert!(state.take_recording().is_some());
         assert!(
             state.take_recording().is_none(),

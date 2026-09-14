@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use snapdeck_capture::ScreenCapturer as _;
@@ -115,14 +116,21 @@ const RECENT_CAPTURE_ID_PREFIX: &str = "recent_capture_";
 /// list without the tray having handed anything to `recents`.
 struct RecentCaptures(Submenu<Wry>);
 
-/// The two items that only mean anything while a recording is running.
+/// The items a recording switches: the three that start one and the two that
+/// end it.
 ///
-/// Managed for the reason `FailureSurface` is: `recording` turns them on from
-/// the worker thread that starts a recording and off from the one that ends
-/// it, and neither has been handed anything by this module.
+/// Managed for the reason `FailureSurface` is: `recording` switches them from
+/// the worker thread that starts a recording and from the one that ends it,
+/// and neither has been handed anything by this module.
 struct RecordingItems {
+    record_region: MenuItem<Wry>,
+    record_window: MenuItem<Wry>,
+    record_display: MenuItem<Wry>,
     stop: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
+    /// What the menu was built with, kept rather than asked again, so the end
+    /// of a recording cannot switch on an item this machine cannot use.
+    can_record: bool,
 }
 
 /// The parts of the tray that a failed capture writes to.
@@ -133,6 +141,9 @@ struct RecordingItems {
 struct FailureSurface {
     tray: TrayIcon,
     last_failure: MenuItem<Wry>,
+    /// Whether the title holds the failure marker, because a tray title
+    /// cannot be read back and the recording counter must not write over it.
+    showing: AtomicBool,
 }
 
 /// Single entry point for every capture request, from the tray or a shortcut.
@@ -207,13 +218,34 @@ pub fn show_recording(app: &AppHandle, elapsed: Option<Duration>) {
     let _ = surface.tray.set_title(title.as_deref());
 }
 
-/// Turns the Stop and Cancel items on or off.
+/// Whether a Record item is on.
+///
+/// Off while a recording runs, because a second one would be refused after the
+/// user had framed it, and off for good where this machine cannot record.
+fn record_items_enabled(recording: bool, can_record: bool) -> bool {
+    can_record && !recording
+}
+
+/// Switches the menu between recording and not: Stop and Cancel on while a
+/// recording runs, the Record items on only while none does.
 pub fn set_recording_items_enabled(app: &AppHandle, recording: bool) {
     let Some(items) = app.try_state::<RecordingItems>() else {
         return;
     };
+    let record = record_items_enabled(recording, items.can_record);
+    let _ = items.record_region.set_enabled(record);
+    let _ = items.record_window.set_enabled(record);
+    let _ = items.record_display.set_enabled(record);
     let _ = items.stop.set_enabled(recording);
     let _ = items.cancel.set_enabled(recording);
+}
+
+/// Whether the menu bar title holds a failure's marker.
+///
+/// Asked by the recording counter, which writes the same title once a second.
+pub fn is_showing_failure(app: &AppHandle) -> bool {
+    app.try_state::<FailureSurface>()
+        .is_some_and(|surface| surface.showing.load(Ordering::Relaxed))
 }
 
 /// Puts a failed capture in the menu bar, where the user is already looking.
@@ -227,6 +259,7 @@ pub fn show_failure(app: &AppHandle, message: &str) {
     let Some(surface) = app.try_state::<FailureSurface>() else {
         return;
     };
+    surface.showing.store(true, Ordering::Relaxed);
     let _ = surface.tray.set_title(Some(FAILURE_MARKER));
     let _ = surface.tray.set_tooltip(Some(message));
     let _ = surface.last_failure.set_text(shorten(message));
@@ -237,6 +270,7 @@ fn clear_failure(app: &AppHandle) {
     let Some(surface) = app.try_state::<FailureSurface>() else {
         return;
     };
+    surface.showing.store(false, Ordering::Relaxed);
     let _ = surface.tray.set_title(None::<&str>);
     let _ = surface.tray.set_tooltip(Some(IDLE_TOOLTIP));
     let _ = surface.last_failure.set_text(NO_FAILURE_TEXT);
@@ -559,11 +593,19 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    app.manage(FailureSurface { tray, last_failure });
+    app.manage(FailureSurface {
+        tray,
+        last_failure,
+        showing: AtomicBool::new(false),
+    });
     app.manage(RecentCaptures(recent_captures));
     app.manage(RecordingItems {
+        record_region,
+        record_window,
+        record_display,
         stop: stop_recording,
         cancel: cancel_recording,
+        can_record,
     });
 
     Ok(())
@@ -610,6 +652,24 @@ mod tests {
         );
     }
 
+    /// While a recording runs a second one cannot start, so a Record item left
+    /// on is an overlay the user frames a selection in only to be refused. A
+    /// forgotten item compiles.
+    #[test]
+    fn the_record_items_follow_the_recording_through_the_availability_gate() {
+        let body = menu_source()
+            .split_once("pub fn set_recording_items_enabled(")
+            .expect("the switch is in this file")
+            .1
+            .split_once("\n}\n")
+            .expect("the switch ends at a closing brace in column zero")
+            .0;
+        for item in ["record_region", "record_window", "record_display"] {
+            let call = format!("items.{item}.set_enabled(record)");
+            assert!(body.contains(&call), "the switch has to call `{call}`");
+        }
+    }
+
     /// The one number the menu bar shows while a recording runs. Written out
     /// rather than generated, because a test that formats its own expectation
     /// agrees with whatever the code does.
@@ -645,6 +705,17 @@ mod tests {
             label.contains("15"),
             "the label has to name the version that is missing: {label}"
         );
+    }
+
+    /// A Record item is on only where this machine can record and nothing is
+    /// recording. The last two rows are the macOS 14 case: a recording that ends
+    /// must not switch on an item the machine cannot use.
+    #[test]
+    fn a_record_item_is_on_only_where_recording_works_and_nothing_records() {
+        assert!(record_items_enabled(false, true));
+        assert!(!record_items_enabled(true, true));
+        assert!(!record_items_enabled(false, false));
+        assert!(!record_items_enabled(true, false));
     }
 
     /// A source test, for the reason `output`'s JPEG quality test is one: an
