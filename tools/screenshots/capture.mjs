@@ -12,9 +12,11 @@
  * `docs/images/demo-page.html` is rendered first, at a fixed size, into a PNG
  * that never reaches the disk. It is a fictional analytics page: fictional so
  * that the redaction has something to redact, and a page rather than a picture
- * so the thing under the annotations can be read and re-made.
+ * so the thing under the annotations can be read and re-made. It is rendered
+ * twice, at two sizes, because the store's screenshots have a shape of their
+ * own and a picture stretched into it would be a picture of a stretched page.
  *
- * That render is then handed to three pages under `tools/screenshots`, each of
+ * Those renders are then handed to pages under `tools/screenshots`, each of
  * which mounts a component the application itself ships, and Chromium is driven
  * over them with real presses at real coordinates. The annotations in
  * `editor.png` are drawn by the editor, by the same code path a user's pointer
@@ -28,6 +30,12 @@
  * and survive a font that lays out a hair differently. Nothing is timed: each
  * step waits for something the surface itself says, and the run fails loudly if
  * it does not say it.
+ *
+ * `docs/images/store` is the exception to all of the above, and the one picture
+ * here that is not a product surface: a brand tile the Chrome Web Store demands
+ * at a fixed size. It draws no interface and invents no screen; it is the
+ * extension's own icon, its own name and the description already in its own
+ * manifest.
  */
 
 import { chromium } from 'playwright'
@@ -40,6 +48,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '../..')
 const IMAGES = resolve(REPO, 'docs/images')
 const DEMO_PAGE = resolve(IMAGES, 'demo-page.html')
+const EXTENSION_ICON = resolve(REPO, 'apps/extension/public/icons/128.png')
 
 /**
  * The demo render, in pixels.
@@ -49,6 +58,22 @@ const DEMO_PAGE = resolve(IMAGES, 'demo-page.html')
  * redaction in the preview is the redaction in the file. `render.ts` says why.
  */
 const SCENE = { width: 1100, height: 720 }
+
+/**
+ * The size the Chrome Web Store takes a screenshot at, and the second size the
+ * demo page is rendered at.
+ *
+ * Rendered rather than cropped. A centre crop of a picture of the editor cuts
+ * the toolbar or the status bar off, which are the two things the picture is of;
+ * rendering the interface into 1280x800 lets it lay itself out at that size, the
+ * way it would in a window of that shape. The overlay needs the second demo
+ * render for a plainer reason: its backdrop fills the window, so a frozen frame
+ * of a different shape would be stretched.
+ */
+const STORE_SHOT = { width: 1280, height: 800 }
+
+/** The small promotional tile the store requires, in pixels. */
+const STORE_TILE = { width: 440, height: 280 }
 
 /**
  * How much taller than the picture the editor window is, in points.
@@ -61,14 +86,22 @@ const SCENE = { width: 1100, height: 720 }
  */
 const EDITOR_CHROME = 56
 
-/** The density every picture is taken at. */
+/** The density the README's pictures are taken at. */
 const DENSITY = 2
+
+/**
+ * The density the store's are taken at.
+ *
+ * One, not two. The store asks for 1280x800 and means pixels; a 2x capture is
+ * 2560x1600 and is refused.
+ */
+const STORE_DENSITY = 1
 
 /** How long any one wait is given before the run is called failed. */
 const TIMEOUT = 15_000
 
 async function main() {
-  await mkdir(IMAGES, { recursive: true })
+  await mkdir(resolve(IMAGES, 'store'), { recursive: true })
 
   const server = await createServer({
     configFile: resolve(HERE, 'vite.config.ts'),
@@ -79,13 +112,43 @@ async function main() {
   const base = server.resolvedUrls?.local?.[0]
   if (!base) throw new Error('screenshots: the dev server reported no address')
 
+  const icon = await dataUrl(EXTENSION_ICON)
   const browser = await chromium.launch({ headless: true })
   const written = []
   try {
-    const demo = await renderDemoPage(browser)
-    written.push(await captureEditor(browser, base, demo))
-    written.push(await captureOverlay(browser, base, demo))
+    const demo = await renderDemoPage(browser, SCENE, icon)
+    const wide = await renderDemoPage(browser, STORE_SHOT, icon)
+
+    written.push(await captureEditor(browser, base, demo, { name: 'editor.png' }))
+    written.push(await captureOverlay(browser, base, demo, { name: 'overlay.png' }))
     written.push(await captureSettings(browser, base, demo))
+
+    // The same editor and the same three annotations, in a window of the
+    // store's shape. The picture inside it is a third render of the demo page,
+    // cut to the room the editor's own toolbar and status bar leave at that
+    // width, so the capture fills the window and is still shown at 1:1. The
+    // editor never enlarges a picture past its own resolution, so a scene of
+    // any other size would either be centred in a band of empty window or shown
+    // under 1:1, and a store screenshot of a screenshot tool should not be the
+    // one picture on the page that is soft.
+    const room = STORE_SHOT.height - (await measureEditorChrome(browser, base, demo, STORE_SHOT))
+    const fitted = await renderDemoPage(browser, { width: STORE_SHOT.width, height: room }, icon)
+    written.push(
+      await captureEditor(browser, base, fitted, {
+        name: 'store/screenshot-editor-1280x800.png',
+        viewport: STORE_SHOT,
+        density: STORE_DENSITY,
+      }),
+    )
+    written.push(
+      // No size is passed: the overlay's window is always its frozen frame's
+      // own size, and `wide` is the frame rendered at the store's.
+      await captureOverlay(browser, base, wide, {
+        name: 'store/screenshot-overlay-1280x800.png',
+        density: STORE_DENSITY,
+      }),
+    )
+    written.push(await capturePromoTile(browser, base, wide))
   } finally {
     await browser.close()
     await server.close()
@@ -96,16 +159,25 @@ async function main() {
   }
 }
 
+/** A file on disk, as a `data:` URL a page can be handed. */
+async function dataUrl(path) {
+  const bytes = await readFile(path)
+  return `data:image/png;base64,${bytes.toString('base64')}`
+}
+
 /**
- * The demo page, rendered, plus the boxes the annotations are aimed at.
+ * The demo page, rendered at `size`, plus the boxes the annotations are aimed
+ * at.
  *
  * The measurements are taken here, in the page itself, and travel as numbers.
  * They are in the render's own pixel space, which is the editor's document
- * space, so nothing downstream has to know how the page is laid out.
+ * space, so nothing downstream has to know how the page is laid out. They are
+ * taken per render rather than once, because the page is responsive and a
+ * second size lays its cards out somewhere else.
  */
-async function renderDemoPage(browser) {
+async function renderDemoPage(browser, size, icon) {
   const html = await readFile(DEMO_PAGE, 'utf8')
-  const context = await browser.newContext({ viewport: SCENE, deviceScaleFactor: 1 })
+  const context = await browser.newContext({ viewport: size, deviceScaleFactor: 1 })
   try {
     const page = await context.newPage()
     await page.setContent(html, { waitUntil: 'load', timeout: TIMEOUT })
@@ -147,15 +219,21 @@ async function renderDemoPage(browser) {
     })
 
     const image = await page.screenshot({ type: 'png' })
-    return { image: `data:image/png;base64,${image.toString('base64')}`, marks }
+    return {
+      image: `data:image/png;base64,${image.toString('base64')}`,
+      width: size.width,
+      height: size.height,
+      icon,
+      marks,
+    }
   } finally {
     await context.close()
   }
 }
 
 /** A page with the scene installed before any of its own code runs. */
-async function open(browser, base, file, viewport, scene) {
-  const context = await browser.newContext({ viewport, deviceScaleFactor: DENSITY })
+async function open(browser, base, file, { viewport, density, demo }) {
+  const context = await browser.newContext({ viewport, deviceScaleFactor: density })
   const page = await context.newPage()
   // Collected rather than thrown from the listener: a throw inside an event
   // handler becomes an unhandled rejection with no stack pointing here, where
@@ -163,9 +241,13 @@ async function open(browser, base, file, viewport, scene) {
   const failures = []
   page.on('pageerror', (error) => failures.push(error.message))
   page.__failures = failures
-  await page.addInitScript((value) => {
-    window.__SNAPDECK_SCENE__ = value
-  }, scene)
+  page.__density = density
+  await page.addInitScript(
+    (value) => {
+      window.__SNAPDECK_SCENE__ = value
+    },
+    { image: demo.image, width: demo.width, height: demo.height, icon: demo.icon },
+  )
   await page.goto(`${base}${file}`, { waitUntil: 'load', timeout: TIMEOUT })
   return { context, page }
 }
@@ -178,29 +260,34 @@ async function open(browser, base, file, viewport, scene) {
  * is the tool doing its job; the status bar is read after every one of them,
  * which is how a gesture that landed on nothing fails the run instead of
  * quietly producing a screenshot with an annotation missing.
+ *
+ * With no `viewport` the window is sized to the picture, which is what the app
+ * itself does. With one, the window is that size and the editor lays itself out
+ * inside it; either way the canvas has to come out at 1:1, which is asserted
+ * rather than assumed, because every coordinate below is a document coordinate.
  */
-async function captureEditor(browser, base, demo) {
-  const scene = { image: demo.image, width: SCENE.width, height: SCENE.height }
-  const { context, page } = await open(
-    browser,
-    base,
-    '/editor.html',
-    { width: SCENE.width, height: SCENE.height + EDITOR_CHROME },
-    scene,
-  )
+async function captureEditor(browser, base, demo, { name, viewport, density = DENSITY }) {
+  const fitted = viewport ?? { width: demo.width, height: demo.height + EDITOR_CHROME }
+  const { context, page } = await open(browser, base, '/editor.html', {
+    viewport: fitted,
+    density,
+    demo,
+  })
   try {
     await page.waitForSelector('[data-testid="canvas"]', { timeout: TIMEOUT })
 
-    // The window is sized so that the stage is exactly the picture and the
-    // editor's own fit lands on 1:1. `EDITOR_CHROME` is the app's guess at the
-    // toolbar and status bar; this is the measurement that makes it true.
-    const stage = await boxOf(page, 'stage')
-    const missing = SCENE.height - stage.height
-    if (missing !== 0) {
-      await page.setViewportSize({
-        width: SCENE.width,
-        height: SCENE.height + EDITOR_CHROME + Math.ceil(missing),
-      })
+    if (!viewport) {
+      // `EDITOR_CHROME` is the app's own guess at the toolbar and the status
+      // bar; this is the measurement that makes it true, so the stage is
+      // exactly the picture and the editor's fit lands on 1:1 with no margin.
+      const stage = await boxOf(page, 'stage')
+      const missing = demo.height - stage.height
+      if (missing !== 0) {
+        await page.setViewportSize({
+          width: fitted.width,
+          height: fitted.height + Math.ceil(missing),
+        })
+      }
     }
     await page.waitForFunction(
       (expected) => {
@@ -209,7 +296,7 @@ async function captureEditor(browser, base, demo) {
         const rect = canvas.getBoundingClientRect()
         return Math.abs(rect.width - expected.width) < 1 && Math.abs(rect.height - expected.height) < 1
       },
-      SCENE,
+      { width: demo.width, height: demo.height },
       { timeout: TIMEOUT },
     )
 
@@ -262,7 +349,31 @@ async function captureEditor(browser, base, demo) {
       { timeout: TIMEOUT },
     )
 
-    return await shoot(page, 'editor.png')
+    return await shoot(page, name)
+  } finally {
+    await context.close()
+  }
+}
+
+/**
+ * How many points of a window of this size the editor spends on its own
+ * toolbar and status bar.
+ *
+ * Measured rather than written down, because it is not one number: the toolbar
+ * wraps, so the answer depends on how wide the window is, and it changes again
+ * the day a control is added to it. Everything that needs a picture cut to the
+ * editor's stage asks here first.
+ */
+async function measureEditorChrome(browser, base, demo, viewport) {
+  const { context, page } = await open(browser, base, '/editor.html', {
+    viewport,
+    density: STORE_DENSITY,
+    demo,
+  })
+  try {
+    await page.waitForSelector('[data-testid="stage"]', { timeout: TIMEOUT })
+    const stage = await boxOf(page, 'stage')
+    return Math.ceil(viewport.height - stage.height)
   } finally {
     await context.close()
   }
@@ -275,10 +386,17 @@ async function captureEditor(browser, base, demo) {
  * reach for Tauri, so `src/tauri.ts` answers the three calls it makes before
  * its first paint; region mode issues no command of its own until `Enter`
  * confirms a selection, and nothing here presses `Enter`.
+ *
+ * The window is the frozen frame's own size, always. The backdrop is an `<img>`
+ * filling the window, so a window of any other shape would stretch the frame,
+ * and the overlay's coordinates would stop meaning what the measurements say.
  */
-async function captureOverlay(browser, base, demo) {
-  const scene = { image: demo.image, width: SCENE.width, height: SCENE.height }
-  const { context, page } = await open(browser, base, '/overlay.html', SCENE, scene)
+async function captureOverlay(browser, base, demo, { name, density = DENSITY }) {
+  const { context, page } = await open(browser, base, '/overlay.html', {
+    viewport: { width: demo.width, height: demo.height },
+    density,
+    demo,
+  })
   try {
     await page.waitForFunction(() => document.querySelector('img')?.complete === true, undefined, {
       timeout: TIMEOUT,
@@ -291,6 +409,7 @@ async function captureOverlay(browser, base, demo) {
     // starts only once the window has shown itself, and it needs a pointer
     // move after that to have a colour to report. So the pointer is nudged
     // until the hex readout appears rather than after a fixed pause.
+    //
     // Parked on one of the keys rather than where the drag ended. The
     // magnifier reports the pixel under the pointer, and a pointer left on the
     // flat grey between two cards makes a feature that reads pixels look like
@@ -301,7 +420,7 @@ async function captureOverlay(browser, base, demo) {
       page.evaluate(() => /#[0-9a-f]{6}/i.test(document.body.innerText)),
     )
 
-    return await shoot(page, 'overlay.png')
+    return await shoot(page, name)
   } finally {
     await context.close()
   }
@@ -319,15 +438,12 @@ async function captureOverlay(browser, base, demo) {
  * against, so it is drawn where it belongs.
  */
 async function captureSettings(browser, base, demo) {
-  const scene = { image: demo.image, width: SCENE.width, height: SCENE.height }
   const width = 460
-  const { context, page } = await open(
-    browser,
-    base,
-    '/settings.html',
-    { width, height: 620 },
-    scene,
-  )
+  const { context, page } = await open(browser, base, '/settings.html', {
+    viewport: { width, height: 620 },
+    density: DENSITY,
+    demo,
+  })
   try {
     await page.waitForFunction(
       () => document.body.innerText.includes('Shortcuts'),
@@ -342,6 +458,39 @@ async function captureSettings(browser, base, demo) {
       { timeout: TIMEOUT },
     )
     return await shoot(page, 'settings.png')
+  } finally {
+    await context.close()
+  }
+}
+
+/**
+ * The small promotional tile, 440x280, which the Chrome Web Store requires and
+ * which nothing else in this repository is the size of.
+ *
+ * The one picture here that is not a picture of the product running. It draws
+ * no interface: a store tile that shows a mocked-up screen is a drawing of
+ * software rather than the software, and this listing has real screenshots for
+ * that. What is on it is the extension's own icon file, its own name, and the
+ * description already written in its own `manifest.json`, on the accent colour
+ * the editor and the settings window use for a pressed control. Full bleed,
+ * because the store asks for no padding and no white border.
+ */
+async function capturePromoTile(browser, base, demo) {
+  const { context, page } = await open(browser, base, '/promo.html', {
+    viewport: STORE_TILE,
+    density: STORE_DENSITY,
+    demo,
+  })
+  try {
+    await page.waitForFunction(
+      () => document.querySelector('img')?.complete === true,
+      undefined,
+      { timeout: TIMEOUT },
+    )
+    await page.evaluate(async () => {
+      await document.fonts.ready
+    })
+    return await shoot(page, 'store/promo-440x280.png')
   } finally {
     await context.close()
   }
@@ -403,22 +552,23 @@ function inflate(rect, x, y) {
 }
 
 /** Takes the picture and reports what was written. */
-async function shoot(page, name, options = {}) {
+async function shoot(page, name) {
   const failures = page.__failures ?? []
   if (failures.length > 0) {
     throw new Error(`screenshots: ${name} was not written, the page raised ${failures.join('; ')}`)
   }
   const path = resolve(IMAGES, name)
-  const image = await page.screenshot({ type: 'png', ...options })
+  const image = await page.screenshot({ type: 'png' })
   await writeFile(path, image)
+  const density = page.__density ?? 1
   const size = await page.evaluate(() => ({
     width: document.documentElement.scrollWidth,
     height: document.documentElement.scrollHeight,
   }))
   return {
     path: `docs/images/${name}`,
-    width: size.width * DENSITY,
-    height: size.height * DENSITY,
+    width: size.width * density,
+    height: size.height * density,
     bytes: image.byteLength,
   }
 }

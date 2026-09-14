@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Snapdeck promotional tile</title>
+    <!--
+      The Chrome Web Store's small promotional tile, 440x280.
+
+      Full bleed: the store asks for artwork with no padding and no white
+      border, so the page is exactly the tile and the tile is exactly the
+      colour. `#0a84ff` is the accent the editor's toolbar and the settings
+      window already use for a pressed control, and the type stack is the one
+      `Editor.tsx` sets on its own chrome, so the tile is in the same two
+      materials as the product rather than in a third one invented for a store.
+
+      Nothing here draws an interface. The icon is the extension's own file and
+      the sentence is the description in its own `manifest.json`; a tile that
+      mocked up a screen would be a drawing of the software, and the listing has
+      real screenshots for that.
+    -->
+    <style>
+      html, body {
+        margin: 0;
+        width: 440px;
+        height: 280px;
+        overflow: hidden;
+      }
+
+      .tile {
+        box-sizing: border-box;
+        width: 440px;
+        height: 280px;
+        padding: 0 40px;
+        background: #0a84ff;
+        color: #ffffff;
+        font-family: system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      /*
+        Drawn at 76 points from a 128-pixel file, so the icon is never enlarged
+        past its own resolution. Its artwork is a dark rounded square with
+        transparent padding, which is why the tile is not dark: on this blue it
+        reads as the mark it is, and on the app's own `#1c1c1e` it would
+        disappear into the background.
+      */
+      .icon {
+        width: 76px;
+        height: 76px;
+        display: block;
+      }
+
+      h1 {
+        margin: 18px 0 8px;
+        font-size: 40px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        line-height: 1;
+      }
+
+      p {
+        margin: 0;
+        max-width: 300px;
+        font-size: 16px;
+        line-height: 1.4;
+        /* Held back from the heading rather than greyed: white at full strength
+           twice over gives the name and the sentence the same weight. */
+        color: rgba(255, 255, 255, 0.86);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="tile">
+      <img class="icon" id="icon" alt="" />
+      <h1>Snapdeck</h1>
+      <!-- Verbatim from `apps/extension/public/manifest.json`, which is also
+           the store's own short description. -->
+      <p>Capture a whole web page and hand it to the Snapdeck app.</p>
+    </div>
+    <script type="module" src="/src/promo.ts"></script>
+  </body>
+</html>

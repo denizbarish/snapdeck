@@ -201,51 +201,47 @@ What the store asks for, and what this repository already has.
 | Asset | Requirement | Status |
 | --- | --- | --- |
 | Store icon | 128x128 PNG | **Ready.** `apps/extension/public/icons/128.png` is exactly 128x128 and ships in the ZIP as `icons/128.png`. Upload that same file. |
-| Screenshots | At least 1, at most 5. 1280x800 or 640x400, square corners, full bleed | **Needs work.** Nothing in `docs/images/` is either size. |
-| Small promotional tile | 440x280 PNG | **Missing.** Nothing in the repository is that size. |
+| Screenshots | At least 1, at most 5. 1280x800 or 640x400, square corners, full bleed | **Ready.** `docs/images/store/screenshot-editor-1280x800.png` and `docs/images/store/screenshot-overlay-1280x800.png`, both exactly 1280x800. |
+| Small promotional tile | 440x280 PNG | **Ready.** `docs/images/store/promo-440x280.png`, exactly 440x280. |
 | Marquee tile | 1400x560 PNG, optional | Missing, and optional. |
 
 Google's advice on the icon is worth knowing before anyone redraws it: the artwork should occupy
 96x96 with 16 pixels of transparent padding on each side, adding up to 128x128. The current file is
 the right size; whether its artwork sits inside that inset is a design question, not a blocker.
 
-### Resizing the existing screenshots
+### Where the store images come from
 
-`docs/images/` holds three images produced by `pnpm screenshots`, and none of them is 16:10. The
-store wants full bleed with no padding, so the honest conversion is a centre crop to 16:10 followed
-by a resize, not letterboxing.
+All three are written by the harness in `tools/screenshots`, in the same run as the README's
+pictures:
 
-- **`editor.png`**, 2200x1648. Crop 273 pixels of height away, then resize:
+```bash
+pnpm screenshots
+```
 
-  ```bash
-  sips -c 1375 2200 docs/images/editor.png --out /tmp/shot-editor.png
-  sips -z 800 1280 /tmp/shot-editor.png
-  ```
+They are rendered at the store's sizes rather than cropped down from the README's images, and the
+difference matters. A centre crop of `editor.png` to 16:10 cuts off the toolbar or the status bar,
+which are the two things a picture of an editor is of; rendered at 1280x800, the interface lays
+itself out at that size and the capture inside it is still shown at 1:1. The overlay gets a second
+render of the demo page at 1280x800 for a plainer reason: its backdrop fills the window, so a frozen
+frame of any other shape would be stretched. Both are taken at a device pixel ratio of 1, because
+the store asks for 1280x800 and means pixels; a 2x capture is 2560x1600 and is refused.
 
-- **`overlay.png`**, 2200x1440. Same crop height, same resize:
+The promotional tile is the one image here that is not the product running. It draws no interface
+and mocks up no screen: it is `apps/extension/public/icons/128.png`, the name, and the description
+already in `apps/extension/public/manifest.json`, on the accent colour the editor and the settings
+window use for a pressed control, full bleed with no padding and no white border. The text is not
+written for the store; changing the manifest's description and re-running the harness changes the
+tile with it.
 
-  ```bash
-  sips -c 1375 2200 docs/images/overlay.png --out /tmp/shot-overlay.png
-  sips -z 800 1280 /tmp/shot-overlay.png
-  ```
+Both screenshots are taken on `docs/images/demo-page.html`, a fictional analytics page with invented
+customers and `sk_live_` strings that are keys to nothing. No real screen, and nobody's data, is in
+any of them.
 
-- **`settings.png`**, 920x1862, is portrait. A 16:10 centre crop of it keeps 575 pixels of a
-  1862-pixel-tall window, which is about a third of the settings panel and not worth showing.
-  Either leave it out or accept padding, which the store's own guidance advises against:
-
-  ```bash
-  sips --resampleHeight 800 docs/images/settings.png --out /tmp/shot-settings.png
-  sips -p 800 1280 --padColor 161619 /tmp/shot-settings.png
-  ```
-
-`sips -c` and `-z` take height before width. Work on copies, as written above, so the repository's
-images are left alone.
-
-One thing worth weighing before uploading any of them: all three show the desktop app, not the
-extension. The store asks that screenshots "demonstrate the actual user experience", and a reviewer
-comparing a browser extension's listing against pictures of a Mac application may reasonably ask
-why. A shot of the options page and a shot of a page mid-capture with the toolbar badge would
-represent this listing better, but both would be new images and neither exists yet.
+One thing worth weighing before uploading them: both show the desktop app, not the extension. The
+store asks that screenshots "demonstrate the actual user experience", and a reviewer comparing a
+browser extension's listing against pictures of a Mac application may reasonably ask why. A shot of
+the options page and a shot of a page mid-capture with the toolbar badge would represent this
+listing better, but both would be new images and neither exists yet.
 
 ## 6. How the version moves
 

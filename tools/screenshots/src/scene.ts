@@ -20,6 +20,14 @@ export type Scene = {
   /** Its size in pixels, which is also its size in CSS points here. */
   width: number
   height: number
+  /**
+   * `apps/extension/public/icons/128.png`, as a data URL.
+   *
+   * The file the store is given as the extension's icon, read rather than
+   * redrawn, so the tile cannot come to show a mark the extension does not
+   * ship. Only the promotional tile uses it.
+   */
+  icon: string
 }
 
 declare global {
