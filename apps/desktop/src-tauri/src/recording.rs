@@ -9,19 +9,26 @@
 //! placeholder up front so no later capture can take it, and only a successful
 //! finalisation renames the one onto the other.
 //!
-//! No Tauri here: no `AppHandle`, no settings. The folder and the filename stem
-//! arrive as arguments, which is what lets every rule below be tested without an
-//! application around it.
+//! The file rules take the folder and the filename stem as arguments and know
+//! nothing about Tauri, which is what lets each of them be tested without an
+//! application around it. The functions that start, stop, cancel and sweep
+//! from the menu bar sit on top of them, and they are the only ones here that
+//! take an `AppHandle` or read the settings.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use snapdeck_capture::{CaptureError, RecordingSummary};
-use tauri::AppHandle;
+use snapdeck_capture::{CaptureError, CaptureTarget, RecordingSummary, Rect, ScreenCapturer};
+use tauri::{AppHandle, Manager};
 
-use crate::output;
+use crate::commands::{dismiss_overlays_and_wait, locate_selection};
+use crate::output::{self, OffsetDateTimeParts};
+use crate::report::report_failure;
+use crate::state::{AppState, RecordingSession};
+use crate::{overlay, recents, settings, tray};
 
 /// The extension every recording is written under.
 pub const RECORDING_EXTENSION: &str = "mp4";
@@ -41,6 +48,12 @@ const RECORDING_TEMP_MARKER: &str = ".snapdeck-recording-";
 
 /// Source of temporary recording names, unique for the life of the process.
 static NEXT_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// How often the menu bar's elapsed time is redrawn.
+const TICK: Duration = Duration::from_millis(1000);
+
+/// What a second recording is refused with while one is already running.
+const ALREADY_RECORDING: &str = "a recording is already running; stop it before starting another";
 
 /// Where a recording writes while it runs and where it lands when it finishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,22 +286,188 @@ pub fn discard(result: Result<(), CaptureError>, files: &RecordingFiles) -> Opti
     result.err().map(|error| error.to_string())
 }
 
+/// Starts a recording, from the blocking worker `start_recording` put it on.
+pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    // 1. Not `begin_capture`: a recording claims its own slot, in step 8. The
+    // overlays still go, for the capture path's reason: the recording takes
+    // the screen again, and an overlay still up would be in the user's video.
+    dismiss_overlays_and_wait(app)?;
+
+    // 2. The frozen frames are a lossless copy of the user's screen, and
+    // nothing else is coming back for them.
+    overlay::discard_cached_frozen_frames(app);
+
+    // 3. The settings in force, read once, in the capture path's order, so a
+    // save from the settings window cannot split this between two folders.
+    let settings = state.settings();
+    let (directory, complaint) = settings::resolve_save_directory(app, &settings);
+    if let Some(complaint) = complaint {
+        report_failure(app, &complaint);
+    }
+    // Best effort, as in `capture_and_write`: a folder that cannot be created
+    // shows up as a failed reservation below, which names the folder.
+    let _ = std::fs::create_dir_all(&directory);
+
+    // 4. Before this recording has claimed anything, so there is no pair of
+    // its own to keep.
+    sweep_save_directory(app, None);
+
+    // 5. The display turns the overlay's points into both the pixels the name
+    // carries and the global rectangle the recording takes, so that
+    // `{width}` and `{height}` give a recording the numbers a capture of the
+    // same selection would.
+    let (display, global) = locate_selection(&state, display_id, rect)?;
+    let stem = output::render_filename(
+        &settings.filename_template,
+        OffsetDateTimeParts::now(),
+        pixels(global.width, display.scale_factor),
+        pixels(global.height, display.scale_factor),
+    );
+
+    // 6.
+    let files = reserve(&directory, &stem)?;
+
+    // 7. From here on every way out that is not a started recording takes
+    // both names back, so no placeholder stays in the user's folder.
+    let recording = match state
+        .capturer
+        .record(CaptureTarget::Region(global), &files.temporary)
+    {
+        Ok(recording) => recording,
+        Err(error) => {
+            abandon(&files);
+            return Err(error.to_string());
+        }
+    };
+
+    // 8. `begin_recording` consumes the session it refuses, recording and all,
+    // and a recording dropped rather than cancelled is a stream nobody took
+    // apart. So the ordinary way to get here, a Record item clicked while a
+    // recording runs, is caught first, while this one can still be cancelled.
+    if state.is_recording() {
+        if let Some(complaint) = discard(recording.cancel(), &files) {
+            report_failure(app, &complaint);
+        }
+        return Err(ALREADY_RECORDING.to_string());
+    }
+    let session = RecordingSession {
+        recording,
+        files: files.clone(),
+        started_at: Instant::now(),
+    };
+    if !state.begin_recording(session) {
+        // Two starts landed between the check and the claim. The refused
+        // session is gone, so its files are all that is left to take back.
+        abandon(&files);
+        return Err(ALREADY_RECORDING.to_string());
+    }
+
+    // 9.
+    tray::show_recording(app, Some(Duration::ZERO));
+    tray::set_recording_items_enabled(app, true);
+    spawn_counter(app);
+    Ok(())
+}
+
+/// A length in points as the pixels a recording of it is made of.
+fn pixels(points: f64, scale: f32) -> u32 {
+    // `as` saturates rather than wrapping, so a nonsensical rectangle gives a
+    // name with an odd number in it rather than a panic.
+    (points * f64::from(scale)).round() as u32
+}
+
+/// Redraws the menu bar's elapsed time until the recording is over, then
+/// takes it back out.
+///
+/// Its own thread and best effort, as `overlay::schedule_reveal_deadline` is:
+/// the tray is written through the `AppHandle`, and a write that does not land
+/// costs one tick of a stale clock.
+fn spawn_counter(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(TICK);
+        let elapsed = app.state::<AppState>().recording_elapsed();
+        tray::show_recording(&app, elapsed);
+        if elapsed.is_none() {
+            return;
+        }
+    });
+}
+
 /// Stops the running recording and puts the movie where the user's settings
 /// say. Returns immediately; the work is on a blocking worker.
-///
-/// Body pending: the menu item that calls this is built disabled and nothing
-/// in this build can start a recording for it to stop, so the item cannot be
-/// clicked. The signature exists now because the tray is wired now.
 pub fn request_stop(app: &AppHandle) {
-    let _ = app;
+    let app = app.clone();
+    // Off the main thread, where the menu event arrives: stopping waits for
+    // ScreenCaptureKit to finalise the movie.
+    tauri::async_runtime::spawn_blocking(move || stop_running(&app));
 }
 
 /// Stops the running recording and leaves nothing on disk. Returns
 /// immediately.
-///
-/// Body pending, as `request_stop` is and for the same reason.
 pub fn request_cancel(app: &AppHandle) {
-    let _ = app;
+    let app = app.clone();
+    // Off the main thread for `request_stop`'s reason: a cancel finalises the
+    // movie too, before the files are taken away.
+    tauri::async_runtime::spawn_blocking(move || cancel_running(&app));
+}
+
+/// Stops a running recording and waits for it, for the quit path.
+///
+/// The one place this is synchronous. `Quit Snapdeck` pressed during a
+/// recording must leave a playable file, and a process that exits while
+/// `SCRecordingOutput` is still finalising leaves one that opens in nothing.
+pub fn stop_before_quit(app: &AppHandle) {
+    stop_running(app);
+}
+
+/// Deletes recording leftovers from the folder captures go to.
+///
+/// Called at launch and at the start of every recording; `keep` is the
+/// recording that is starting, when there is one.
+pub fn sweep_save_directory(app: &AppHandle, keep: Option<&RecordingFiles>) -> usize {
+    let settings = app.state::<AppState>().settings();
+    // The complaint is not repeated: a folder that has gone away is reported
+    // by the capture or recording that needs it, and a sweep is housekeeping.
+    let (directory, _) = settings::resolve_save_directory(app, &settings);
+    sweep(&directory, keep)
+}
+
+/// Stops the running recording on the calling thread and answers once the
+/// movie is in place or the user has been told why it is not.
+fn stop_running(app: &AppHandle) {
+    // `None` is Stop pressed twice, or a quit with nothing recording.
+    let Some(session) = app.state::<AppState>().take_recording() else {
+        return;
+    };
+    let finished = finish(session.recording.stop(), &session.files);
+    if let Some(path) = &finished.path {
+        recents::record(app, path);
+    }
+    if let Some(complaint) = &finished.complaint {
+        report_failure(app, complaint);
+    }
+    clear_recording_from_tray(app);
+}
+
+/// Cancels the running recording on the calling thread.
+fn cancel_running(app: &AppHandle) {
+    let Some(session) = app.state::<AppState>().take_recording() else {
+        return;
+    };
+    // Nothing goes into the recent captures: there is no movie.
+    if let Some(complaint) = discard(session.recording.cancel(), &session.files) {
+        report_failure(app, &complaint);
+    }
+    clear_recording_from_tray(app);
+}
+
+/// Returns the menu bar to how it is when nothing is recording.
+fn clear_recording_from_tray(app: &AppHandle) {
+    tray::show_recording(app, None);
+    tray::set_recording_items_enabled(app, false);
 }
 
 #[cfg(test)]
@@ -609,5 +788,42 @@ mod tests {
             "a cancel that leaves a half-written movie in the user's folder is not a cancel"
         );
         assert!(!files.final_path.exists(), "and the placeholder goes too");
+    }
+
+    /// The body of `start`, from its signature to the brace that closes it.
+    fn start_body() -> &'static str {
+        const SOURCE: &str = include_str!("recording.rs");
+        SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a split yields at least one piece")
+            .split_once("pub fn start(")
+            .expect("`start` is in this file")
+            .1
+            .split_once("\n}\n")
+            .expect("`start` ends at a closing brace in column zero")
+            .0
+    }
+
+    /// W4. A recording takes the screen again, so an overlay still up would be
+    /// in the user's video, and the frozen frames are a lossless copy of their
+    /// screen. Both are one forgotten line away, and neither fails to compile.
+    #[test]
+    fn a_recording_clears_the_overlays_and_the_frozen_frames_the_way_a_capture_does() {
+        let body = start_body();
+        for call in [
+            "dismiss_overlays_and_wait(",
+            "discard_cached_frozen_frames(",
+        ] {
+            assert!(body.contains(call), "`start` has to call `{call}`");
+        }
+    }
+
+    /// W5. The counter shows whole seconds, so a faster tick redraws the menu
+    /// bar with a value that has not changed and a slower one skips a second.
+    /// The contract value is written out rather than read back from `TICK`.
+    #[test]
+    fn the_menu_bar_counter_is_redrawn_once_a_second() {
+        assert_eq!(TICK, std::time::Duration::from_millis(1000));
     }
 }

@@ -192,10 +192,6 @@ fn record_label(base: &str, available: bool) -> String {
 
 /// Puts the recording's elapsed time in the menu bar, or takes it back out.
 ///
-/// Unused until the recording commands are wired, as `recording`'s own file
-/// contract is: the tray has to be able to say a recording is running before
-/// anything can start one. The allowance comes off with the rest of them.
-///
 /// `None` returns the title to its quiet state. Best-effort, like every other
 /// write to the tray.
 ///
@@ -203,7 +199,6 @@ fn record_label(base: &str, available: bool) -> String {
 /// failure wins: it has to be read before it can be cleared, and the elapsed
 /// time is in the menu anyway. That is a rule about call order rather than
 /// about this function, and it belongs to whoever calls both.
-#[allow(dead_code)]
 pub fn show_recording(app: &AppHandle, elapsed: Option<Duration>) {
     let Some(surface) = app.try_state::<FailureSurface>() else {
         return;
@@ -213,7 +208,6 @@ pub fn show_recording(app: &AppHandle, elapsed: Option<Duration>) {
 }
 
 /// Turns the Stop and Cancel items on or off.
-#[allow(dead_code)]
 pub fn set_recording_items_enabled(app: &AppHandle, recording: bool) {
     let Some(items) = app.try_state::<RecordingItems>() else {
         return;
@@ -551,7 +545,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "open_log" => reveal_log(app),
             "check_for_updates" => crate::updater::check_on_request(app),
             "settings" => crate::settings_window::open_settings(app),
-            "quit" => app.exit(0),
+            // Synchronous, and first: a process that exits while the movie is
+            // still being finalised leaves a file that opens in nothing.
+            "quit" => {
+                crate::recording::stop_before_quit(app);
+                app.exit(0);
+            }
             other => {
                 if let Some(path) = recent_capture_path(other) {
                     reveal_recent_capture(app, &path);
@@ -586,6 +585,29 @@ mod tests {
         TRAY.split("#[cfg(test)]")
             .next()
             .expect("a split yields at least one piece")
+    }
+
+    /// W3. `Quit Snapdeck` pressed during a recording has to leave a playable
+    /// file, and a process that exits while the movie is still being finalised
+    /// leaves one that opens in nothing. Both calls are one line each, in the
+    /// same arm, and swapping them compiles.
+    #[test]
+    fn quit_stops_a_running_recording_before_it_exits() {
+        let arm = menu_source()
+            .split_once("\"quit\" => ")
+            .expect("the menu has a quit arm")
+            .1
+            .split_once("other => ")
+            .expect("the quit arm comes before the fallback arm")
+            .0;
+        let stop = arm
+            .find("stop_before_quit(")
+            .expect("quit has to stop a running recording");
+        let exit = arm.find("app.exit(").expect("quit has to exit");
+        assert!(
+            stop < exit,
+            "the recording has to be stopped before the process exits"
+        );
     }
 
     /// The one number the menu bar shows while a recording runs. Written out

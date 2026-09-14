@@ -34,12 +34,6 @@ struct EditorSession {
 }
 
 /// The recording that is running, and the two things about it only Rust knows.
-///
-/// Nothing reads it yet: the tray items and the commands that start, stop and
-/// cancel a recording arrive with the task that wires this up, and the
-/// allowance below comes off with the first of them, exactly as `lib`'s does
-/// over `mod recording`.
-#[allow(dead_code)]
 pub struct RecordingSession {
     /// The live recording, which `stop` and `cancel` consume.
     pub recording: Box<dyn Recording>,
@@ -402,12 +396,6 @@ impl AppState {
 }
 
 /// The single recording slot.
-///
-/// Its own block and its own allowance because nothing calls it yet: the tray
-/// items and the commands that start, stop and cancel a recording arrive with
-/// the task that wires this up, and the allowance comes off with the first
-/// caller, exactly as `lib`'s does over `mod recording`.
-#[allow(dead_code)]
 impl AppState {
     /// Claims the single recording slot, or answers `false` when one is
     /// already running and leaves the caller's session untouched.

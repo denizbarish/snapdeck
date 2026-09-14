@@ -5,11 +5,6 @@ mod fullpage;
 mod output;
 mod overlay;
 mod recents;
-// The file contract a recording writes under, built and proved before anything
-// calls it. Nothing in the application reaches it yet, so every item in it is
-// dead code until `start_recording` and the sweep at launch arrive; the
-// allowance comes off with the first caller.
-#[allow(dead_code)]
 mod recording;
 mod report;
 mod settings;
@@ -85,6 +80,7 @@ pub fn run() {
             commands::close_overlays,
             commands::list_windows,
             commands::capture_region,
+            commands::start_recording,
             commands::save_edited,
             commands::copy_edited,
             commands::close_editor,
@@ -106,6 +102,10 @@ pub fn run() {
             // capture of the run is added to the list that was on disk rather
             // than to an empty one.
             recents::restore(&handle);
+            // After the list is restored, because the sweep takes files out of
+            // the save folder and `restore` prunes the entries whose files are
+            // gone. A crash mid-recording leaves its litter until this runs.
+            recording::sweep_save_directory(&handle, None);
             // After the settings are in force, because this is the one thing
             // in the application that reads a setting to decide whether it may
             // happen at all: it does nothing unless the user has turned it on.
@@ -298,6 +298,55 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything in this file that is not a test.
+    fn launch_source() -> &'static str {
+        const LIB: &str = include_str!("lib.rs");
+        LIB.split("#[cfg(test)]")
+            .next()
+            .expect("a split yields at least one piece")
+    }
+
+    /// W1. A source test, for the reason `output`'s JPEG quality test is one:
+    /// a command missing from the handler list is an overlay whose `invoke`
+    /// fails with "unknown command" at run time, and nothing fails to compile.
+    #[test]
+    fn the_recording_command_is_registered() {
+        let handlers = launch_source()
+            .split_once("generate_handler![")
+            .expect("the handler list is in this file")
+            .1
+            .split_once(']')
+            .expect("the handler list ends")
+            .0;
+        assert!(
+            handlers.contains("commands::start_recording"),
+            "`start_recording` has to be in the invoke handler list"
+        );
+    }
+
+    /// W2. The launch sweep runs once the recent captures are back, so the list
+    /// is loaded before anything the sweep takes away could be pruned from it.
+    #[test]
+    fn the_launch_sweep_runs_after_the_recent_captures_are_restored() {
+        let setup = launch_source()
+            .split_once(".setup(")
+            .expect("the setup hook is in this file")
+            .1
+            .split_once(".build(")
+            .expect("the setup hook ends before the build")
+            .0;
+        let restore = setup
+            .find("recents::restore(")
+            .expect("setup restores the recent captures");
+        let sweep = setup
+            .find("recording::sweep_save_directory(")
+            .expect("setup sweeps the save folder");
+        assert!(
+            restore < sweep,
+            "the sweep has to come after the recent captures are restored"
+        );
+    }
 
     fn defaults() -> Shortcuts {
         Settings::default().shortcuts

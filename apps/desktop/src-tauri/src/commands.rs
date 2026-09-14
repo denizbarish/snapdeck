@@ -29,7 +29,7 @@ use snapdeck_capture::{
         request_screen_capture_permission, screen_capture_permission, PermissionState,
         SETTINGS_DEEP_LINK,
     },
-    CaptureTarget, Frame, Rect, ScreenCapturer, WindowInfo,
+    CaptureTarget, DisplayInfo, Frame, Rect, ScreenCapturer, WindowInfo,
 };
 use tauri::{image::Image, AppHandle, Manager, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -42,7 +42,7 @@ use crate::{
         check_filename_template, render_filename, save_capture_without_overwriting,
         OffsetDateTimeParts,
     },
-    overlay, recents,
+    overlay, recents, recording,
     report::report_failure,
     settings::{self, Settings},
     shortcuts::Shortcuts,
@@ -276,6 +276,34 @@ pub async fn capture_region(
     result
 }
 
+/// Starts a recording on the region the overlay confirmed.
+///
+/// Answers with nothing. There is no file and no picture yet: the movie
+/// appears when the user stops, and until then the only thing to look at is
+/// the menu bar. An `Err` here means the recording never started.
+///
+/// `async` plus `spawn_blocking` for the reason `capture_region` is: a
+/// synchronous command runs on the main thread and everything below blocks for
+/// a platform round trip.
+#[tauri::command]
+pub async fn start_recording(app: AppHandle, display_id: u32, rect: Rect) -> Result<(), String> {
+    let handle = app.clone();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || recording::start(&app, display_id, rect))
+            .await
+            .map_err(|err| format!("the recording task did not finish: {err}"))?;
+    // The overlay that asked is closed before the recording starts, for the
+    // reason `capture_region` gives, so an `Err` has no webview left to reach
+    // and the notification and the log file are the surfaces it lands on.
+    if let Err(err) = &result {
+        report_failure(
+            &handle,
+            &format!("Snapdeck could not start the recording: {err}"),
+        );
+    }
+    result
+}
+
 /// Blocking worker only; see `capture_region`.
 fn capture_selection(
     app: &AppHandle,
@@ -357,17 +385,17 @@ struct Captured {
     scale: f32,
 }
 
-/// The capture itself, once the screen is clear: everything from the display
-/// lookup to the clipboard write.
+/// The display a selection was made on, and the selection in the global points
+/// capture and recording both take.
 ///
-/// Split out from `capture_selection` so that its caller can run the frozen
-/// frame cleanup on every path out of it, successful or not.
-fn capture_and_write(
-    app: &AppHandle,
+/// Shared by `capture_and_write` and `recording::start`, so the conversion from
+/// the overlay's display-local points is written once and a correction to it
+/// reaches a still capture and a recording alike.
+pub(crate) fn locate_selection(
     state: &AppState,
     display_id: u32,
     rect: Rect,
-) -> Result<Captured, String> {
+) -> Result<(DisplayInfo, Rect), String> {
     let display = state
         .capturer
         .displays()
@@ -383,6 +411,21 @@ fn capture_and_write(
         width: rect.width,
         height: rect.height,
     };
+    Ok((display, global))
+}
+
+/// The capture itself, once the screen is clear: everything from the display
+/// lookup to the clipboard write.
+///
+/// Split out from `capture_selection` so that its caller can run the frozen
+/// frame cleanup on every path out of it, successful or not.
+fn capture_and_write(
+    app: &AppHandle,
+    state: &AppState,
+    display_id: u32,
+    rect: Rect,
+) -> Result<Captured, String> {
+    let (display, global) = locate_selection(state, display_id, rect)?;
     let frame = state
         .capturer
         .capture(CaptureTarget::Region(global))
@@ -508,7 +551,7 @@ pub(crate) fn copy_to_clipboard(app: &AppHandle, frame: &Frame) -> Result<(), St
 /// leaves the window map when `Destroyed` arrives, and the pixels leave with
 /// it, so capturing on the next line would photograph a window that is still
 /// up. A timeout abandons the capture rather than saving that picture.
-fn dismiss_overlays_and_wait(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn dismiss_overlays_and_wait(app: &AppHandle) -> Result<(), String> {
     let handle = app.clone();
     // On the main thread, which is where macOS requires window teardown and
     // where `commands::close_overlays` already gets to be by being synchronous.
