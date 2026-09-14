@@ -93,7 +93,17 @@ describe('parseClientMessage', () => {
 
 describe('encode', () => {
   // M5
-  it('rejects a message whose multi-byte title pushes it over the byte limit', () => {
+  //
+  // The payload is the size of the limit itself, because that is the only
+  // place the two measurements can be told apart: a message has to be under
+  // 64 MiB counted in UTF-16 code units and over it counted in UTF-8 bytes.
+  // Building it takes about two seconds on an idle machine and longer when the
+  // rest of the workspace is running its own tests on the other cores, which
+  // is what used to push this past the default five second timeout and make
+  // the suite fail for no reason a reader could see.
+  it(
+    'rejects a message whose multi-byte title pushes it over the byte limit',
+    () => {
     // Under the limit measured in UTF-16 code units, over it measured in UTF-8
     // bytes: every 'ğ' is one character and two bytes.
     const message = fullPage({
@@ -114,7 +124,9 @@ describe('encode', () => {
     const text = String((thrown as Error).message)
     expect(text).toContain(String(new TextEncoder().encode(json).length))
     expect(text).toContain(String(MAX_MESSAGE_BYTES))
-  })
+    },
+    30_000,
+  )
 })
 
 describe('parseServerMessage', () => {
