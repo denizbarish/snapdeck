@@ -164,6 +164,12 @@ this one has to work it out from the pixels, and a window whose content repeats 
 way it was asked to comes out wrong. It tells you when it could not find an overlap; it cannot tell
 you when it found the wrong one.
 
+Measured against Safari on a six screen page, a run joins about two windows and then stops, because
+the window stopped changing between one picture and the next and that is indistinguishable from the
+end of the document. The run waits and looks again several times before accepting it, and retries a
+capture that fails, but a short result is the ordinary outcome on some windows rather than a rare
+one. The extension is the route that knows how far the page actually moved.
+
 ## The editor
 
 Every capture that produced a file opens in an editor window: the title bar carries the file's
