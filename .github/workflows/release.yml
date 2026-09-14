@@ -68,6 +68,13 @@ jobs:
           # check would ever notice it going stale.
           pkg_version="$(jq -er '.version' apps/desktop/package.json)"
 
+          # The extension ships to the Chrome Web Store, which refuses an
+          # upload whose version did not go up. Its manifest and its
+          # package.json are a fifth and sixth copy, and a test already ties
+          # those two to each other, so checking one of them against the tag
+          # ties all three together.
+          extension_version="$(jq -er '.version' apps/extension/public/manifest.json)"
+
           # `[workspace.package] version`, which every crate in the workspace
           # inherits.
           cargo_version="$(
@@ -84,6 +91,7 @@ jobs:
           echo "tauri.conf.json  $conf_version"
           echo "Cargo.toml       $cargo_version"
           echo "package.json     $pkg_version"
+          echo "extension        $extension_version"
 
           failed=0
 
@@ -104,6 +112,11 @@ jobs:
 
           if [ "$pkg_version" != "$version" ]; then
             echo "::error::apps/desktop/package.json says $pkg_version, the tag says $version"
+            failed=1
+          fi
+
+          if [ "$extension_version" != "$version" ]; then
+            echo "::error::apps/extension/public/manifest.json says $extension_version, the tag says $version"
             failed=1
           fi
 
