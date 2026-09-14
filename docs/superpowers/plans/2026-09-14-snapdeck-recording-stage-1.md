@@ -1067,7 +1067,7 @@ uygulanmadan önce gerçek bir kayıtta dosya boyutunun ne hızla büyüdüğün
 ### Task 3, C11 bu makinede negatif kontrol değil, ve yanlış sıranın bedeli ölçüldü
 
 Plan C11'in mutasyon kanıtını "sırayı ters çevir, `moov` iddiası kırmızı" diye yazmıştı. macOS
-27'de **öyle olmuyor** ve bu ölçüldü, varsayılmadı. Aynı iki saniyelik kayıt için:
+26.5.2'de **öyle olmuyor** ve bu ölçüldü, varsayılmadı. Aynı iki saniyelik kayıt için:
 
 | Sıra | Dosya | `moov` |
 |---|---|---|
@@ -1113,7 +1113,7 @@ kolunda geçer ve test bunu da çivilemiştir. Planın mutasyon kanıtı aynen g
 
 ### Task 9, gerçek donanım sonuçları
 
-Kurulu release paketi, 1710x1112 puntoluk Retina ekran, macOS 27, tam ekran kayıt. Kayıtların
+Kurulu release paketi, 1710x1112 puntoluk Retina ekran, macOS 26.5.2 (25F84), tam ekran kayıt. Kayıtların
 hiçbiri açılıp izlenmedi: kullanıcının canlı ekranını içerdikleri için yalnız sayıları okundu ve
 dosyalar hemen silindi.
 
