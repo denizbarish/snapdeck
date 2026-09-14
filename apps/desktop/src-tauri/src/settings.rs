@@ -99,6 +99,13 @@ pub struct Settings {
     /// settings because it has to survive a relaunch, which is the whole of
     /// what pairing means; a token minted at every launch pairs with nothing.
     pub bridge_token: String,
+    /// Whether a recording takes in what the Mac is playing.
+    ///
+    /// Off until turned on: recordings were silent before this existed, and
+    /// sound is a choice about what ends up in a file somebody may share.
+    /// macOS asks nothing for it; system audio sits under the screen
+    /// recording grant.
+    pub record_system_audio: bool,
 }
 
 /// Reads a `shortcuts` object, filling any binding it does not name from the
@@ -177,6 +184,7 @@ impl Default for Settings {
             // `ensure_bridge_token` is the reason: a constant here would be the
             // same pairing secret on every installation in the world.
             bridge_token: String::new(),
+            record_system_audio: false,
         }
     }
 }
@@ -800,6 +808,7 @@ mod tests {
             open_editor_after_capture: false,
             check_for_updates_at_launch: true,
             bridge_token: "0123456789abcdef".to_string(),
+            record_system_audio: true,
         };
         let json = serde_json::to_string(&written).expect("render");
         let (read_back, complaint) = settings_from_json(&json);
@@ -1264,5 +1273,58 @@ mod tests {
             "a new field must not cost the user the settings they already had"
         );
         assert_eq!(settings.filename_template, "shot-{time}");
+    }
+
+    /// ST1. Recordings were silent before this setting existed, and sound is a
+    /// choice about what ends up in a file somebody may share.
+    #[test]
+    fn a_recording_is_silent_until_system_audio_is_turned_on() {
+        assert!(
+            !Settings::default().record_system_audio,
+            "system audio has to be off until the user turns it on"
+        );
+    }
+
+    /// ST2. The name the settings window reads and writes, written out rather
+    /// than derived from the field.
+    #[test]
+    fn the_system_audio_setting_is_written_under_the_name_the_window_reads() {
+        let json = serde_json::to_string(&Settings::default()).expect("render");
+        assert!(
+            json.contains("\"recordSystemAudio\""),
+            "missing recordSystemAudio in {json}"
+        );
+    }
+
+    /// ST3. A file written before this field existed is a file from every user
+    /// who already has Snapdeck. It loads without a complaint, keeps what it
+    /// says, and stays silent.
+    #[test]
+    fn a_file_written_before_system_audio_existed_loads_silent() {
+        let (settings, complaint) = settings_from_json(r#"{"filenameTemplate": "shot-{time}"}"#);
+        assert_eq!(complaint, None);
+        assert_eq!(
+            settings.filename_template, "shot-{time}",
+            "a new field must not cost the user the settings they already had"
+        );
+        assert!(
+            !settings.record_system_audio,
+            "a file that names no system audio setting records no sound"
+        );
+    }
+
+    /// ST4. The checkbox has to read and write this field. The expectation comes
+    /// from the window's own source, the other side of the contract.
+    #[test]
+    fn the_system_audio_checkbox_reads_and_writes_the_setting() {
+        for wiring in [
+            "checked={settings.recordSystemAudio}",
+            "update({ recordSystemAudio })",
+        ] {
+            assert!(
+                SETTINGS_UI.contains(wiring),
+                "the settings window has to contain `{wiring}`"
+            );
+        }
     }
 }

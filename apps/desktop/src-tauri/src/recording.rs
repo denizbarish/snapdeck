@@ -22,13 +22,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use snapdeck_capture::{
-    CaptureError, CaptureTarget, Recording, RecordingSummary, Rect, ScreenCapturer,
+    AudioSources, CaptureError, CaptureTarget, Recording, RecordingSummary, Rect, ScreenCapturer,
 };
 use tauri::{AppHandle, Manager};
 
 use crate::commands::{dismiss_overlays_and_wait, locate_selection};
 use crate::output::{self, OffsetDateTimeParts};
 use crate::report::report_failure;
+use crate::settings::Settings;
 use crate::state::{AppState, RecordingSession};
 use crate::{overlay, recents, settings, tray};
 
@@ -288,6 +289,13 @@ pub fn discard(result: Result<(), CaptureError>, files: &RecordingFiles) -> Opti
     result.err().map(|error| error.to_string())
 }
 
+/// The sound a recording takes in, from the settings in force when it starts.
+fn audio_sources(settings: &Settings) -> AudioSources {
+    AudioSources {
+        system: settings.record_system_audio,
+    }
+}
+
 /// Starts a recording, from the blocking worker `start_recording` put it on.
 pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -335,7 +343,7 @@ pub fn start(app: &AppHandle, display_id: u32, rect: Rect) -> Result<(), String>
     // both names back, so no placeholder stays in the user's folder.
     let recording = match state.capturer.record(
         CaptureTarget::Region(global),
-        snapdeck_capture::AudioSources::default(),
+        audio_sources(&settings),
         &files.temporary,
     ) {
         Ok(recording) => recording,
@@ -877,6 +885,39 @@ mod tests {
         assert!(
             check < write,
             "the counter has to ask before it writes, not after"
+        );
+    }
+
+    /// RA1. The setting reaches the recording, both ways, with literal
+    /// expectations.
+    #[test]
+    fn the_system_audio_setting_decides_the_sound_a_recording_takes_in() {
+        let on = Settings {
+            record_system_audio: true,
+            ..Settings::default()
+        };
+        assert_eq!(audio_sources(&on), AudioSources { system: true });
+        assert_eq!(
+            audio_sources(&Settings::default()),
+            AudioSources { system: false }
+        );
+    }
+
+    /// RA2. `start` hands the recording the sound its settings ask for, from the
+    /// settings it read once.
+    #[test]
+    fn a_recording_takes_in_the_sound_the_settings_ask_for() {
+        let body = start_body();
+        let call = body
+            .split_once(".record(")
+            .expect("`start` starts a recording")
+            .1
+            .split_once(") {")
+            .expect("the `.record(` call closes before its `match` arms")
+            .0;
+        assert!(
+            call.contains("audio_sources(&settings)"),
+            "`start` has to pass `audio_sources(&settings)` to `.record(`, not {call:?}"
         );
     }
 }

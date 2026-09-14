@@ -1443,6 +1443,32 @@ mod tests {
         );
     }
 
+    /// ST5. A ticked system audio box is written down, and a refused rebind in
+    /// the same save does not take it back.
+    #[test]
+    fn a_ticked_system_audio_box_is_written_whether_or_not_the_rebind_was_refused() {
+        let previous = Settings {
+            record_system_audio: false,
+            ..stored()
+        };
+        let requested = Settings {
+            record_system_audio: true,
+            ..previous.clone()
+        };
+
+        let accepted = settings_to_store(&previous, requested.clone(), false);
+        assert!(
+            accepted.record_system_audio,
+            "an accepted save writes the box the user ticked"
+        );
+
+        let refused = settings_to_store(&previous, requested, true);
+        assert!(
+            refused.record_system_audio,
+            "a refused rebind costs the shortcuts and nothing else"
+        );
+    }
+
     #[test]
     fn one_overlay_per_display_is_dropped() {
         let windows = vec![window(11), window(22), window(33), window(44)];
