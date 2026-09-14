@@ -28,6 +28,14 @@ Screen recording. Apple silicon; the app runs on macOS 14 or later, and recordin
   crash never leaves a half-written file under a real name, and the leftovers are cleared the next
   time Snapdeck starts. Quitting while recording stops the recording first and keeps the file.
 
+### Fixed
+
+- The update check's TLS library is rustls 0.23.45, which fixes RUSTSEC-2026-0285: 0.23.44 accepted
+  TLS 1.3 handshake messages across encryption level boundaries. The update check is the only
+  network traffic Snapdeck makes. It was never what stood between a user and a tampered update,
+  since the manifest and the download are both checked against the signing key built into the app,
+  but it should not run on a TLS stack with a published flaw.
+
 ### Known limitations
 
 - No sound: neither system audio nor the microphone.
