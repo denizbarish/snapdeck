@@ -9,4 +9,7 @@ pub mod error;
 pub mod types;
 
 pub use error::CaptureError;
-pub use types::{CaptureTarget, DisplayInfo, Frame, PixelFormat, Rect, WindowInfo};
+pub use types::{
+    CaptureTarget, DisplayInfo, Frame, PixelFormat, RecordingProgress, RecordingSummary, Rect,
+    WindowInfo,
+};

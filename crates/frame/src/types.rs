@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -148,6 +149,33 @@ pub enum CaptureTarget {
     Region(Rect),
 }
 
+/// What a running recording has taken in so far.
+///
+/// Counts and nothing else. The frames themselves never reach this process's
+/// heap: `SCRecordingOutput` takes the `IOSurface` directly, and pulling one
+/// into a `Frame` would be the 2 GB/s memcpy the design refused (4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecordingProgress {
+    /// Screen samples the platform has delivered since the stream started.
+    pub frames: u64,
+    /// Of those, the ones the platform marked as anything other than a
+    /// complete frame.
+    pub incomplete: u64,
+}
+
+/// What a finished recording left on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingSummary {
+    /// The file that was written, which is the path `record` was given and
+    /// never a name this chose.
+    pub path: PathBuf,
+    /// Size of that file once the movie was finalised.
+    pub bytes: u64,
+    /// Screen samples the stream delivered, so the caller can refuse a
+    /// recording that took nothing in.
+    pub frames: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +284,14 @@ mod tests {
             captured_at: SystemTime::now(),
         };
         assert!(matches!(frame.to_rgba8(), Err(CaptureError::Platform(_))));
+    }
+
+    #[test]
+    fn a_recording_starts_out_having_seen_nothing() {
+        let progress = RecordingProgress::default();
+
+        assert_eq!(progress.frames, 0);
+        assert_eq!(progress.incomplete, 0);
     }
 
     #[test]
