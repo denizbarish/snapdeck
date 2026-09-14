@@ -1064,6 +1064,35 @@ kullanıcıya sebebini söyler, yani disk dolduğunda kullanıcı bozuk bir dosy
 uygulanmadan önce gerçek bir kayıtta dosya boyutunun ne hızla büyüdüğünü ölçmek gerekiyor
 (Task 9, madde 2). O ölçüm elde olmadan seçilecek eşikler tahmindir.
 
+### Task 3, C11 bu makinede negatif kontrol değil, ve yanlış sıranın bedeli ölçüldü
+
+Plan C11'in mutasyon kanıtını "sırayı ters çevir, `moov` iddiası kırmızı" diye yazmıştı. macOS
+27'de **öyle olmuyor** ve bu ölçüldü, varsayılmadı. Aynı iki saniyelik kayıt için:
+
+| Sıra | Dosya | `moov` |
+|---|---|---|
+| Doğru (sayaç önce iner, `stop_capture` yok) | 1.959.168 bayt, 57 kare | var |
+| Ters (kayıt çıktısı önce kaldırılır) | 2.385.608 bayt | var |
+| `stop_capture` önce | **206.236 bayt** | var |
+
+Yani bu macOS sürümünde `removeRecordingOutput` filmi kendi başına sonlandırıyor ve crate'in
+`stop_capture + wait_until_terminal` dalı ek bir güvence. Yanlış sıranın bedeli **oynatılamaz
+dosya değil, kesilmiş kayıt**: aynı iki saniyeden 2 MB yerine 206 KB, yani içeriğin yaklaşık
+%90'ı sessizce gidiyor. Belirti değişti, tehlike değişmedi.
+
+C11 olduğu gibi bırakıldı (mutlu yolun gerçek donanım kanıtı) ve sıranın koruması C1-C4'te
+duruyor: onlar deterministik, işletim sistemi sürümünden bağımsız ve `stop_capture` dizesinin
+dosyada hiç geçmemesini de denetliyorlar. Bayt eşiğine dayanan bir "negatif kontrol" testi
+yazılmadı, çünkü durağan bir ekranda düşük bayt meşrudur ve o test kırılgan olurdu; ölçüm Task
+9'un elle doğrulama listesinde duruyor.
+
+### Task 3, hata önceliği: kodlayıcının sözü önce gelir
+
+`stop()` önce `tear_down`'ın hatasını döndürüyordu. Disk dolduğunda kullanıcı, delegate'in
+"disk dolu" mesajı yerine akışla ilgili opak bir hata görürdü. Karar saf bir fonksiyona çıkarıldı
+(`failure_to_report`) ve testi mutasyon kanıtlı: ikisi birden hata verdiğinde kodlayıcınınki
+gösterilir, yalnız söküm başarısızsa o gösterilir, ikisi de temizse hiçbir şey.
+
 ### Task 2, V7'nin kuralı daraltıldı: `largest_overlap_index` pencere kolunda da kalır
 
 Plan V7'yi "`largest_overlap_index(` çağrısı yalnız `resolve_region` içinde geçer" diye yazmıştı.

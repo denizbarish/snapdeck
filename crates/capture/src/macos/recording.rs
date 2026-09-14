@@ -162,6 +162,16 @@ impl SCStreamOutputTrait for FrameCounter {
 }
 
 /// A live ScreenCaptureKit recording.
+/// Which failure a stopped recording reports, when there is more than one.
+///
+/// The encoder's own words win. It is the half of this that knows why: a disk
+/// that filled up says so, while taking the stream apart afterwards fails with
+/// something about a stream, which is true and useless to the person reading
+/// it.
+fn failure_to_report(encoder: Option<String>, torn_down: Result<(), String>) -> Option<String> {
+    encoder.or_else(|| torn_down.err())
+}
+
 pub struct MacRecording {
     /// The stream the movie and the counter are attached to.
     pub(super) stream: SCStream,
@@ -203,15 +213,15 @@ impl Recording for MacRecording {
     }
 
     fn stop(mut self: Box<Self>) -> Result<RecordingSummary, CaptureError> {
-        tear_down(&mut *self).map_err(CaptureError::Platform)?;
-        // Read after the teardown, never instead of it: the stream comes
-        // apart whatever the encoder had to say.
-        let failure = self
+        // Taken apart first and always: the stream comes apart whatever the
+        // encoder had to say.
+        let torn_down = tear_down(&mut *self);
+        let encoder = self
             .failure
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(failure) = failure {
+        if let Some(failure) = failure_to_report(encoder, torn_down) {
             return Err(CaptureError::Platform(failure));
         }
         let bytes = std::fs::metadata(&self.path)
@@ -290,6 +300,7 @@ mod tests {
     /// A teardown that records the order it was driven in and can be made to
     /// fail at either step.
     #[derive(Default)]
+
     struct FakeTeardown {
         calls: Vec<&'static str>,
         detach_error: Option<String>,
@@ -519,5 +530,26 @@ mod tests {
             has_moov_atom(&movie),
             "the movie has no moov atom, so no player will open it"
         );
+    }
+    #[test]
+    fn the_encoder_says_why_a_recording_failed_rather_than_the_teardown() {
+        // Both went wrong at once, which is what a full disk looks like: the
+        // encoder stopped because there was no room, and taking the stream
+        // apart afterwards failed too. Only one of them can be shown, and the
+        // one that knows about the disk is not the one about the stream.
+        assert_eq!(
+            failure_to_report(
+                Some("the disk is full".to_string()),
+                Err("the stream could not be taken apart".to_string()),
+            ),
+            Some("the disk is full".to_string())
+        );
+        // With nothing from the encoder, the teardown is all there is.
+        assert_eq!(
+            failure_to_report(None, Err("the stream could not be taken apart".to_string())),
+            Some("the stream could not be taken apart".to_string())
+        );
+        // And a recording that ended cleanly reports nothing at all.
+        assert_eq!(failure_to_report(None, Ok(())), None);
     }
 }
