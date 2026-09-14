@@ -5,6 +5,12 @@ mod fullpage;
 mod output;
 mod overlay;
 mod recents;
+// The file contract a recording writes under, built and proved before anything
+// calls it. Nothing in the application reaches it yet, so every item in it is
+// dead code until `start_recording` and the sweep at launch arrive; the
+// allowance comes off with the first caller.
+#[allow(dead_code)]
+mod recording;
 mod report;
 mod settings;
 mod settings_window;

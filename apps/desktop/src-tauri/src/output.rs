@@ -98,24 +98,38 @@ const JPEG_QUALITY: u8 = 92;
 /// now, and one without `{time}` in it would otherwise leave them with exactly
 /// one file no matter how many captures they took.
 ///
-/// The name is claimed with `create_new`, not with an "does it exist" check
-/// followed by a write: the check would answer for a moment that has passed by
-/// the time the file is opened, and the whole point here is that nothing is
-/// overwritten.
+/// The name is claimed through `claim_free_path`, which is where the rule that
+/// nothing is overwritten lives.
 pub fn save_capture_without_overwriting(
     frame: &Frame,
     directory: &Path,
     stem: &str,
     format: SaveFormat,
 ) -> Result<PathBuf, String> {
-    let extension = format.extension();
+    let (file, path) = claim_free_path(directory, stem, format.extension())?;
+    encode_capture(frame, file, format)?;
+    Ok(path)
+}
+
+/// Claims the first free name for `stem` under `directory` and answers with
+/// the open file and the path it took.
+///
+/// `create_new`, not an "is it there" check followed by a write: the check
+/// answers for a moment that has passed by the time the file is opened, and
+/// the whole point is that nothing is overwritten.
+///
+/// Extracted so that a recording claims its name by exactly the rule a still
+/// capture claims one by. The ` 2`, ` 3` suffix is the user-visible half of
+/// that rule and a second copy of it would drift.
+pub(crate) fn claim_free_path(
+    directory: &Path,
+    stem: &str,
+    extension: &str,
+) -> Result<(File, PathBuf), String> {
     for attempt in 1..=MAX_NAME_ATTEMPTS {
         let path = directory.join(suffixed_file_name(stem, attempt, extension));
         match File::options().write(true).create_new(true).open(&path) {
-            Ok(file) => {
-                encode_capture(frame, file, format)?;
-                return Ok(path);
-            }
+            Ok(file) => return Ok((file, path)),
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(format!("failed to create {}: {err}", path.display())),
         }
