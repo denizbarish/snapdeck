@@ -13,7 +13,7 @@
 //! obeys can be checked without a window server, without a permission and
 //! without moving anything on the user's screen.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -79,6 +79,15 @@ fn scroll_points_for(frame: &Frame) -> i32 {
     ((window_points * SCROLL_FRACTION) as i32).max(1)
 }
 
+/// How long to let a window finish scrolling before photographing it again.
+///
+/// Posting a scroll event only starts the scroll. Browsers and most document
+/// views animate it, so a picture taken at once is the picture before the
+/// scroll, and a loop that cannot tell that from the end of the document stops
+/// on the first animated window it meets. Measured against Safari, which was
+/// still showing the old pixels when the next capture began.
+const SETTLE: Duration = Duration::from_millis(250);
+
 /// The most pictures one run will take.
 ///
 /// The stop that matters is `ContentSettled`; this is the one for content that
@@ -91,10 +100,11 @@ const MAX_STEPS: usize = 40;
 ///
 /// Never fails: a partial run is a partial picture, and spec 9 says a partial
 /// picture is offered with a warning rather than thrown away.
-pub fn run<C, D>(mut capture: C, driver: &D, max_steps: usize) -> FullPageRun
+pub fn run<C, D, S>(mut capture: C, driver: &D, max_steps: usize, settle: S) -> FullPageRun
 where
     C: FnMut() -> Result<Frame, String>,
     D: ScrollDriver,
+    S: Fn(),
 {
     let mut frames: Vec<Frame> = Vec::new();
     for step in 0..max_steps {
@@ -112,11 +122,23 @@ where
                     stopped: StopReason::CaptureFailed(reason),
                 };
             }
+            // The scroll has been posted, not finished. Without this wait the
+            // next picture can be the one before the scroll, which reads as
+            // the end of the document.
+            settle();
         }
         // Deliberately not `?`. What has been photographed so far is still a
         // picture, and handing it back with the reason attached is what lets
         // the caller offer it with a warning.
-        let frame = match capture() {
+        let frame = match capture().or_else(|first| {
+            // One retry, after the same wait a scroll gets. Screen capture on
+            // macOS fails transiently under a run of back to back window
+            // captures, measured as "could not start the stream", and a single
+            // one of those used to end the whole run and hand back a sliver.
+            let _ = first;
+            settle();
+            capture()
+        }) {
             Ok(frame) => frame,
             Err(reason) => {
                 return FullPageRun {
@@ -276,6 +298,7 @@ fn capture_scrolling_window(app: &AppHandle) {
         },
         &WheelDriver,
         MAX_STEPS,
+        || std::thread::sleep(SETTLE),
     );
 
     match &outcome.stopped {
@@ -427,6 +450,43 @@ mod tests {
     }
 
     #[test]
+    fn the_window_is_given_time_to_finish_scrolling_before_the_next_picture() {
+        // Posting a scroll starts an animation. Photographing at once returns
+        // the pixels from before it, which this loop cannot tell from the end
+        // of the document: it stops, and the picture is short with nothing
+        // said. Measured against Safari, where a run ended after one and a
+        // half windows of a six screen page.
+        let log = log();
+        let driver = FakeDriver::new(&log);
+        let waits = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&waits);
+        let order = Rc::clone(&log);
+        let mut pictures = [picture(1), picture(2), picture(3)].into_iter();
+
+        run(
+            || pictures.next().ok_or_else(|| "no more".to_string()),
+            &driver,
+            3,
+            || {
+                seen.borrow_mut().push(order.borrow().len());
+            },
+        );
+
+        // One wait per scroll, and each one after the scroll it belongs to and
+        // before the picture that follows.
+        let scrolls: Vec<usize> = log
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, step)| match step {
+                Step::Scroll(_) => Some(at + 1),
+                Step::Capture => None,
+            })
+            .collect();
+        assert_eq!(*waits.borrow(), scrolls);
+    }
+
+    #[test]
     fn a_step_is_shorter_than_the_window_it_photographed() {
         // The property the whole fallback rests on: the next picture has to
         // overlap the last one, because overlap is the only thing the stitcher
@@ -474,6 +534,7 @@ mod tests {
             || pictures.next().ok_or_else(|| "no more".to_string()),
             &driver,
             3,
+            || {},
         );
 
         let scrolls: Vec<i32> = log
@@ -551,13 +612,33 @@ mod tests {
     }
 
     /// A capture that fails on the `fails_on`th call, counting from one.
-    fn failing_capture(log: &Log, fails_on: usize) -> impl FnMut() -> Result<Frame, String> {
+    /// Fails from `fails_from` on, and keeps failing: a window that has gone
+    /// away does not come back for the retry.
+    fn failing_capture(log: &Log, fails_from: usize) -> impl FnMut() -> Result<Frame, String> {
         let log = Rc::clone(log);
         let mut taken = 0_usize;
         move || {
             taken += 1;
-            if taken == fails_on {
+            if taken >= fails_from {
                 return Err("the window went away".to_string());
+            }
+            log.borrow_mut().push(Step::Capture);
+            Ok(picture(taken as u8))
+        }
+    }
+
+    /// Fails once on the `fails_on`th call and succeeds on every other,
+    /// including the retry: what screen capture on macOS does under a run of
+    /// back to back window captures.
+    fn flaky_capture(log: &Log, fails_on: usize) -> impl FnMut() -> Result<Frame, String> {
+        let log = Rc::clone(log);
+        let mut taken = 0_usize;
+        let mut failed = false;
+        move || {
+            taken += 1;
+            if taken == fails_on && !failed {
+                failed = true;
+                return Err("could not start the stream".to_string());
             }
             log.borrow_mut().push(Step::Capture);
             Ok(picture(taken as u8))
@@ -572,7 +653,7 @@ mod tests {
     fn a_window_that_stops_moving_ends_the_run() {
         let log = log();
         let driver = FakeDriver::new(&log);
-        let run = run(settling_capture(&log, 4), &driver, 20);
+        let run = run(settling_capture(&log, 4), &driver, 20, || {});
 
         assert_eq!(run.frames.len(), 4);
         assert_eq!(run.stopped, StopReason::ContentSettled);
@@ -584,7 +665,7 @@ mod tests {
     fn content_that_never_settles_is_stopped_by_the_limit() {
         let log = log();
         let driver = FakeDriver::new(&log);
-        let run = run(endless_capture(&log), &driver, 5);
+        let run = run(endless_capture(&log), &driver, 5, || {});
 
         assert_eq!(run.frames.len(), 5);
         assert_eq!(run.stopped, StopReason::StepLimit);
@@ -597,7 +678,7 @@ mod tests {
     fn the_first_picture_is_taken_before_anything_scrolls() {
         let log = log();
         let driver = FakeDriver::new(&log);
-        let run = run(settling_capture(&log, 3), &driver, 20);
+        let run = run(settling_capture(&log, 3), &driver, 20, || {});
 
         assert_eq!(run.frames.len(), 3);
         assert_eq!(
@@ -620,13 +701,27 @@ mod tests {
     fn a_failed_capture_keeps_the_pictures_already_taken() {
         let log = log();
         let driver = FakeDriver::new(&log);
-        let run = run(failing_capture(&log, 3), &driver, 20);
+        let run = run(failing_capture(&log, 3), &driver, 20, || {});
 
         assert_eq!(run.frames.len(), 2);
         let StopReason::CaptureFailed(reason) = run.stopped else {
             panic!("a failed capture has to say so: {:?}", run.stopped);
         };
         assert!(reason.contains("the window went away"), "{reason}");
+    }
+
+    #[test]
+    fn a_capture_that_fails_once_is_tried_again_rather_than_ending_the_run() {
+        // Measured on a real window: screen capture returned "could not start
+        // the stream" in the middle of a run, and a single transient failure
+        // used to end it and hand back a sliver of the first window.
+        let log = log();
+        let driver = FakeDriver::new(&log);
+
+        let run = run(flaky_capture(&log, 2), &driver, 4, || {});
+
+        assert_eq!(run.stopped, StopReason::StepLimit);
+        assert_eq!(run.frames.len(), 4);
     }
 
     /// D5. A driver that fails is the same kind of partial run: the pictures
@@ -636,7 +731,7 @@ mod tests {
     fn a_failed_scroll_keeps_the_pictures_already_taken() {
         let log = log();
         let driver = FakeDriver::failing_on(&log, 2);
-        let run = run(endless_capture(&log), &driver, 20);
+        let run = run(endless_capture(&log), &driver, 20, || {});
 
         assert_eq!(run.frames.len(), 2);
         let StopReason::CaptureFailed(reason) = run.stopped else {
