@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, SyntheticEvent } from 'react'
+import { confirmCommand, confirmHint } from './action'
 import { magnifierSourceRect, samplePixel, toHex, type Rgba } from './magnifier'
 import {
   clampRect,
@@ -25,6 +26,12 @@ export interface OverlayProps {
    * overlay.
    */
   mode: string
+  /**
+   * `'record'` starts a recording when the selection is confirmed; anything
+   * else takes a still. Written by Rust into the overlay URL, so it never
+   * changes under a live overlay.
+   */
+  action: string
   scale: number
   /**
    * Absolute path of the frozen frame, passed by Rust. Keeping it out of the
@@ -95,7 +102,7 @@ const MAGNIFIER_READOUT_HEIGHT = 32
  * `./snap`, both pure and unit tested. What is left here is event plumbing and
  * paint.
  */
-export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
+export function Overlay({ displayId, mode, action, scale, framePath }: OverlayProps) {
   const snapsToWindows = mode === WINDOW_MODE
   const [selection, setSelection] = useState<Rect | null>(null)
   /** Candidate windows, in global points and in the order `list_windows` gave. */
@@ -269,7 +276,7 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
     // re-captures the region at native resolution rather than cropping the
     // frozen frame, so it cannot start until this window is off the screen,
     // and by the time it answers there is no webview left to answer to.
-    invoke('capture_region', { displayId, rect }).catch((error: unknown) => {
+    invoke(confirmCommand(action), { displayId, rect }).catch((error: unknown) => {
       console.error(`overlay: could not capture the selection on display ${displayId}`, error)
       // Reachable for exactly the two failures that happen while this window is
       // still on screen: the refused capture slot, and the dismissal that timed
@@ -599,7 +606,7 @@ export function Overlay({ displayId, mode, scale, framePath }: OverlayProps) {
               sits there with no clue how to commit it.
             */}
             <span style={{ opacity: 0.7, marginLeft: 8 }}>
-              {snapsToWindows ? 'Click to capture' : 'Enter to capture'} · Esc to cancel
+              {confirmHint(action, snapsToWindows)} · Esc to cancel
             </span>
           </div>
           {/*

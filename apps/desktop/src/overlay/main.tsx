@@ -31,6 +31,7 @@ createRoot(document.getElementById('overlay-root')!).render(
     <Overlay
       displayId={requiredNumberParam('display')}
       mode={requiredParam('mode')}
+      action={requiredParam('action')}
       scale={requiredNumberParam('scale')}
       framePath={requiredParam('path')}
     />

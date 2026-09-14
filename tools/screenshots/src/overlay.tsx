@@ -27,6 +27,10 @@ createRoot(root).render(
   <Overlay
     displayId={1}
     mode="region"
+    // The still capture, which is what these pictures are of. It is also what
+    // any other value would give, but naming it keeps the readout's wording
+    // something this file chose rather than something it fell into.
+    action="capture"
     // One device pixel per point, because the frozen frame here is the demo
     // render at its own size. The size readout is in device pixels, so any
     // other value would print a number this picture does not contain.
